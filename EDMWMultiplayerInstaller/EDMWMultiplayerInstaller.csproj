@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net9.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <AssemblyName>EDMWMultiplayerInstaller</AssemblyName>
+    <Product>EDMW Mod Studio</Product>
+    <Title>EDMW Mod Studio Multiplayer Map Installer</Title>
+    <Description>Standalone multiplayer map installer exported by EDMW Mod Studio.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="..\EDMWMapDesigner\Assets\dark-cartography-texture.png" Link="Assets\dark-cartography-texture.png" LogicalName="EDMWInstaller.Assets.dark-cartography-texture.png" />
+    <EmbeddedResource Include="..\EDMWMapDesigner\Assets\ornate-panel-frame.png" Link="Assets\ornate-panel-frame.png" LogicalName="EDMWInstaller.Assets.ornate-panel-frame.png" />
+    <EmbeddedResource Include="Assets\installer-harbor-frame-v2.png" LogicalName="EDMWInstaller.Assets.installer-harbor-frame-v2.png" />
+  </ItemGroup>
+</Project>

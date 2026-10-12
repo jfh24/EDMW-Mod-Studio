@@ -1,0 +1,18 @@
+LIBRARY EDMWAnchored
+EXPORTS
+    EERMPIMCreateFlatMap
+    EERMPIMCreateHeightMap
+    EERMPIMCreateNeutralLandWaterMap
+    EERMPIMCreatePlayerLandWaterMap
+    EERMPIMCreateTrees
+    EERMPIMFilterHeightMap
+    EERMPIMGenerateNeutralPositions
+    EERMPIMGeneratePlayerPositions
+    EERMPIMGenerateRamps
+    EERMPIMGenerateResources
+    EERMPIMGenerateRiverLandFill
+    EERMPIMGenerateShallows
+    EERMPIMSetRandomMapValues
+    PIMGetName
+    PIMGetType
+    PIMIsValid

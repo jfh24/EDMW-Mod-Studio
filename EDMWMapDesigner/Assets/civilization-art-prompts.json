@@ -1,0 +1,52 @@
+{
+  "mode": "built-in image_gen",
+  "home": "Use case: precise-object-edit.\nAsset type: production Windows game-editor home-screen background, 16:9 landscape, target 1920x1080.\nInput image 1 is the edit target and strict style reference: the existing medieval harbor dashboard background.\nPrimary request: regenerate this same artwork to accommodate THREE upper tool panels (Map Script, Civilization Editor, Launch EDMW) and ONE lower Custom Maps panel. No change in artistic style.\nPreserve the original dark hand-painted/realistic medieval strategy-game interface aesthetic, weathered charcoal stone, finely beveled antique brass/gold borders, dark navy heraldic banners, subtle firelight, stormy harbor water and sky, crenellated tower walls, bottom-left statue/anchor and bottom-right barrel/lion shield. Keep the visual density, rich textures and restrained lighting precisely like the reference.\nComposition: three separate identical tall blank rectangular stone panels, aligned in one horizontal row. Their outer frame rectangles in percentages of the whole canvas: LEFT x10.2%-31.7%, CENTER x39.0%-61.5%, RIGHT x68.5%-88.8%; all y9%-49%. Center is the new dedicated civilization editor panel with exactly the same stone fill, matching ornate corner shape, metal thickness and small bottom shield ornament as the two side panels. All three must have equal top and bottom alignment; maintain clear visible harbor/sky gaps between frames. Shrink the original top central heraldic shield into the upper lintel above the center panel, entirely within y0%-9%, without changing its design. Move the lower wide blank Custom Maps panel down to x30.8%-68.8%, y53.5%-92%, retaining its header compartment and recessed list compartment, border material and original shield flourish at bottom. Ensure upper center and lower panels never overlap.\nInside panels: evenly dark, clean empty stone surfaces with ample legible space for app-generated text and icons. Do not paint any writing, letters, icons or buttons into the panels.\nConstraints: preserve the reference style and surrounding harbor setting; only necessary panel layout changes. Four panels total. No text, no watermark, no bright new palette, no modern UI, no flat vector rendering, no new characters. High resolution crisp production artwork, entire border visible.",
+  "civilizationIcon": "Use case: stylized-concept.\nAsset type: unique transparent game-editor home-screen Civilization Editor action icon.\nInput image 1 is the strict rendering/material style reference (antique compass icon); input image 2 is the strict environment/material reference (medieval harbor interface). These are style references, not edit targets.\nPrimary request: create one centered heraldic Civilization Editor emblem, a navy-blue shield with an antique-gold crown above it, an embossed gold medieval citadel/town with three towers within the shield, and one ivory-feather writing quill crossing the lower-right rim diagonally. The citadel represents civilization and the quill represents editing. Strong readable silhouette, simple coherent composition with only these motifs. The crown and shield are the focal point.\nStyle/medium: match EXACTLY the existing realistically painted medieval strategy-game icon: sculpted beveled weathered brass/gold and dark steel, embossed rich navy enamel, aged metal scratches and patina, subtle warm highlights, deep natural shadows, fine hand-crafted relief. Do not change the art style or palette.\nComposition: front-facing isolated emblem, compact square composition, comfortable transparent padding on all sides. Large shield and crown, smaller quill. All objects must be fully visible, no cropping. No giant outer circle; distinct silhouette from the compass.\nConstraints: true transparent background and clean alpha edges; opaque richly detailed emblem itself. No scene, no black backdrop, no lettering or numbers, no watermark, no UI panel, no flat vector or cartoon, no glow haze, no extra symbols, no photoreal photograph. Maintain the reference's antique gold/navy medieval rendered artwork styling.",
+  "artifacts": {
+    "backgroundMaster": "EDMWMapDesigner/Assets/dashboard-harbor-civilizations.png",
+    "backgroundSourceDimensions": [
+      1672,
+      941
+    ],
+    "backgroundExports": [
+      {
+        "path": "EDMWMapDesigner/Assets/dashboard-harbor-civilizations-1080p.png",
+        "dimensions": [
+          1920,
+          1080
+        ]
+      },
+      {
+        "path": "EDMWMapDesigner/Assets/dashboard-harbor-civilizations-1440p.png",
+        "dimensions": [
+          2560,
+          1440
+        ]
+      },
+      {
+        "path": "EDMWMapDesigner/Assets/dashboard-harbor-civilizations-2160p.png",
+        "dimensions": [
+          3840,
+          2160
+        ]
+      }
+    ],
+    "backgroundExportMethod": "System.Drawing HighQualityBicubic resizing of the ImageGen-generated master. These are display-size derivatives; artwork was created with built-in image_gen.",
+    "civilizationIcon": "EDMWMapDesigner/Assets/dashboard-civilizations-icon.png",
+    "civilizationIconDimensions": [
+      1254,
+      1254
+    ],
+    "civilizationIconTransparency": "Preserved generated PNG alpha channel; corner pixel alpha confirmed 0.",
+    "styleReferences": [
+      "EDMWMapDesigner/Assets/dashboard-harbor-frame-1080p.png",
+      "EDMWMapDesigner/Assets/dashboard-compass-icon.png"
+    ],
+    "uses": [
+      "Home Civilization Editor panel",
+      "Home action icon",
+      "Civilization Editor title emblem",
+      "Workspace switch to Civilizations"
+    ]
+  }
+}

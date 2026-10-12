@@ -1,0 +1,42 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net9.0-windows</TargetFramework>
+    <SupportedOSPlatformVersion>7.0</SupportedOSPlatformVersion>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <AssemblyName>EDMW Mod Studio</AssemblyName>
+    <Product>EDMW Mod Studio</Product>
+    <Title>EDMW Mod Studio</Title>
+    <Description>Map and civilization modding studio for Empires: Dawn of the Modern World.</Description>
+    <RootNamespace>EDMWMapDesigner</RootNamespace>
+    <Version>1.0.0</Version>
+    <AssemblyVersion>1.0.0.0</AssemblyVersion>
+    <FileVersion>1.0.0.0</FileVersion>
+  </PropertyGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="..\native\EDMWAnchored\build\EDMWAnchored.dll" LogicalName="EDMWMapDesigner.Native.EDMWAnchored.dll" />
+    <EmbeddedResource Include="Assets\medieval-command-banner.png" LogicalName="EDMWMapDesigner.Assets.medieval-command-banner.png" />
+    <EmbeddedResource Include="Assets\ornate-panel-frame.png" LogicalName="EDMWMapDesigner.Assets.ornate-panel-frame.png" />
+    <EmbeddedResource Include="Assets\medieval-command-rail.png" LogicalName="EDMWMapDesigner.Assets.medieval-command-rail.png" />
+    <EmbeddedResource Include="Assets\dark-cartography-texture.png" LogicalName="EDMWMapDesigner.Assets.dark-cartography-texture.png" />
+    <EmbeddedResource Include="Assets\dashboard-harbor-installed-content-1080p.png" LogicalName="EDMWMapDesigner.Assets.dashboard-harbor-installed-content-1080p.png" />
+    <EmbeddedResource Include="Assets\dashboard-harbor-installed-content-1440p.png" LogicalName="EDMWMapDesigner.Assets.dashboard-harbor-installed-content-1440p.png" />
+    <EmbeddedResource Include="Assets\dashboard-harbor-installed-content-2160p.png" LogicalName="EDMWMapDesigner.Assets.dashboard-harbor-installed-content-2160p.png" />
+    <EmbeddedResource Include="Assets\dashboard-civilizations-icon.png" LogicalName="EDMWMapDesigner.Assets.dashboard-civilizations-icon.png" />
+    <EmbeddedResource Include="Assets\dashboard-compass-icon.png" LogicalName="EDMWMapDesigner.Assets.dashboard-compass-icon.png" />
+    <EmbeddedResource Include="Assets\dashboard-warrior-icon.png" LogicalName="EDMWMapDesigner.Assets.dashboard-warrior-icon.png" />
+    <EmbeddedResource Include="Assets\dashboard-button-stone-v2.png" LogicalName="EDMWMapDesigner.Assets.dashboard-button-stone-v2.png" />
+    <EmbeddedResource Include="Assets\dashboard-map-row-stone-v2.png" LogicalName="EDMWMapDesigner.Assets.dashboard-map-row-stone-v2.png" />
+    <EmbeddedResource Include="Assets\brush-augment-length.png" LogicalName="EDMWMapDesigner.Assets.brush-augment-length.png" />
+    <EmbeddedResource Include="Assets\brush-augment-width.png" LogicalName="EDMWMapDesigner.Assets.brush-augment-width.png" />
+    <EmbeddedResource Include="Assets\brush-augment-scale.png" LogicalName="EDMWMapDesigner.Assets.brush-augment-scale.png" />
+    <EmbeddedResource Include="Assets\brush-augment-rotation.png" LogicalName="EDMWMapDesigner.Assets.brush-augment-rotation.png" />
+    <EmbeddedResource Include="Assets\Progression\progression-icons.png" LogicalName="EDMWMapDesigner.Assets.Progression.progression-icons.png" />
+    <EmbeddedResource Include="Assets\Progression\civilization-icons.png" LogicalName="EDMWMapDesigner.Assets.Progression.civilization-icons.png" />
+    <EmbeddedResource Include="Assets\EDMWMultiplayerInstaller.exe" LogicalName="EDMWMapDesigner.Tools.EDMWMultiplayerInstaller.exe" />
+    <EmbeddedResource Include="Assets\EDMWCivilizationInstaller.exe" LogicalName="EDMWMapDesigner.Tools.EDMWCivilizationInstaller.exe" />
+  </ItemGroup>
+</Project>

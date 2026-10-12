@@ -1,0 +1,24 @@
+* text=auto
+
+.gitattributes text eol=lf
+.gitignore text eol=lf
+
+*.cs text eol=lf
+*.csproj text eol=lf
+*.slnx text eol=lf
+*.cpp text eol=lf
+*.h text eol=lf
+*.def text eol=lf
+*.md text eol=lf
+*.md whitespace=-blank-at-eol
+*.json text eol=lf
+*.py text eol=lf
+*.ps1 text eol=crlf
+*.cmd text eol=crlf
+
+*.png binary
+*.zip binary
+*.gz binary
+
+# Retain the upstream WMS capabilities document as supplied by its publisher.
+EDMWMapDesigner/Assets/UsStateBrushes/Forests/worldcover-wms-capabilities.xml whitespace=-blank-at-eol

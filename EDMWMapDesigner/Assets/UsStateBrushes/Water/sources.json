@@ -1,0 +1,97 @@
+{
+  "retrieved": "2026-10-01",
+  "datasets": [
+    {
+      "file": "ne_10m_lakes.zip",
+      "publisher": "Natural Earth",
+      "version": "5.0.0",
+      "license": "Public domain",
+      "url": "https://naturalearth.s3.amazonaws.com/10m_physical/ne_10m_lakes.zip",
+      "sha256": "0803a06f9c3cb4671d89b68c48b142aad9366ba40f665245e12a913fbc61722a"
+    },
+    {
+      "file": "ne_10m_lakes_north_america.zip",
+      "publisher": "Natural Earth",
+      "version": "5.0.0",
+      "license": "Public domain",
+      "url": "https://naturalearth.s3.amazonaws.com/10m_physical/ne_10m_lakes_north_america.zip",
+      "sha256": "96c824a2f2646ea8b16fe6711f7906ba690788a547f51e391654c8e94271ffba"
+    },
+    {
+      "file": "ne_10m_rivers_lake_centerlines.zip",
+      "publisher": "Natural Earth",
+      "version": "5.0.0",
+      "license": "Public domain",
+      "url": "https://naturalearth.s3.amazonaws.com/10m_physical/ne_10m_rivers_lake_centerlines.zip",
+      "sha256": "ded71b01870855ccfe19b51f2ec14c9bb48fae23c0e9f3c11974d426433b5c38"
+    },
+    {
+      "file": "ne_10m_rivers_north_america.zip",
+      "publisher": "Natural Earth",
+      "version": "5.0.0",
+      "license": "Public domain",
+      "url": "https://naturalearth.s3.amazonaws.com/10m_physical/ne_10m_rivers_north_america.zip",
+      "sha256": "7fbe85a2acbf1f3ef4361a16bb39677ad1ea86f888be1689f7a4caeafc7529e8"
+    },
+    {
+      "file": "hawaii_nhd_rivers.json",
+      "publisher": "U.S. Geological Survey",
+      "dataset": "National Hydrography Dataset (The National Map)",
+      "license": "Public domain",
+      "serviceCopyrightText": "USGS TNM \u2013 National Hydrography Dataset. Data Refreshed July, 2026.",
+      "records": 897,
+      "url": "https://hydro.nationalmap.gov/arcgis/rest/services/nhd/MapServer/5/query?f=json&where=FCode%3D46006+AND+GNIS_Name+IS+NOT+NULL+AND+StreamOrde%3E%3D3&geometry=-161%2C18%2C-154%2C23&geometryType=esriGeometryEnvelope&inSR=4326&spatialRel=esriSpatialRelIntersects&outFields=OBJECTID%2CGNIS_Name%2CFCode%2CStreamOrde&outSR=4326&maxAllowableOffset=0.001&geometryPrecision=5&orderByFields=OBJECTID&resultRecordCount=2000",
+      "sha256": "da95157f6bcc066cd99d243ba58eb61d7ab2f08c15e9813ef2cf1e4114116fe1"
+    },
+    {
+      "file": "hawaii_nhd_lakes.json",
+      "publisher": "U.S. Geological Survey",
+      "dataset": "National Hydrography Dataset (The National Map)",
+      "license": "Public domain",
+      "serviceCopyrightText": "USGS TNM \u2013 National Hydrography Dataset. Data Refreshed July, 2026.",
+      "records": 147,
+      "url": "https://hydro.nationalmap.gov/arcgis/rest/services/nhd/MapServer/11/query?f=json&where=AreaSqKm%3E%3D0.03+AND+%28%28FCode%3E%3D39000+AND+FCode%3C40000%29+OR+%28FCode%3E%3D43600+AND+FCode%3C43700%29%29&geometry=-161%2C18%2C-154%2C23&geometryType=esriGeometryEnvelope&inSR=4326&spatialRel=esriSpatialRelIntersects&outFields=OBJECTID%2CGNIS_Name%2CFCode%2CAreaSqKm&outSR=4326&maxAllowableOffset=0.0005&geometryPrecision=5&orderByFields=OBJECTID&resultRecordCount=2000",
+      "sha256": "3903a68caba78756d93a4335b3232c7a02a213fff1f6e797566e82c64f542f42"
+    },
+    {
+      "file": "delaware_nhd_rivers.json",
+      "publisher": "U.S. Geological Survey",
+      "dataset": "National Hydrography Dataset (The National Map)",
+      "license": "Public domain",
+      "serviceCopyrightText": "USGS TNM \u2013 National Hydrography Dataset. Data Refreshed July, 2026.",
+      "records": 680,
+      "url": "https://hydro.nationalmap.gov/arcgis/rest/services/nhd/MapServer/4/query?f=json&where=FCode%3D46006+AND+GNIS_Name+IS+NOT+NULL+AND+StreamOrde%3E%3D3&geometry=-75.8%2C38.45%2C-75.03%2C39.85&geometryType=esriGeometryEnvelope&inSR=4326&spatialRel=esriSpatialRelIntersects&outFields=OBJECTID%2CGNIS_Name%2CFCode%2CStreamOrde&outSR=4326&maxAllowableOffset=0.001&geometryPrecision=5&orderByFields=OBJECTID&resultRecordCount=2000",
+      "sha256": "4fdddd9dbe8b990dff250fae12d513ab00d56d802239d935944c0c5b9b393728"
+    },
+    {
+      "file": "delaware_nhd_lakes.json",
+      "publisher": "U.S. Geological Survey",
+      "dataset": "National Hydrography Dataset (The National Map)",
+      "license": "Public domain",
+      "serviceCopyrightText": "USGS TNM \u2013 National Hydrography Dataset. Data Refreshed July, 2026.",
+      "records": 379,
+      "url": "https://hydro.nationalmap.gov/arcgis/rest/services/nhd/MapServer/10/query?f=json&where=AreaSqKm%3E%3D0.03+AND+%28%28FCode%3E%3D39000+AND+FCode%3C40000%29+OR+%28FCode%3E%3D43600+AND+FCode%3C43700%29%29&geometry=-75.8%2C38.45%2C-75.03%2C39.85&geometryType=esriGeometryEnvelope&inSR=4326&spatialRel=esriSpatialRelIntersects&outFields=OBJECTID%2CGNIS_Name%2CFCode%2CAreaSqKm&outSR=4326&maxAllowableOffset=0.0005&geometryPrecision=5&orderByFields=OBJECTID&resultRecordCount=2000",
+      "sha256": "2d75e208c9bfba9b14c5c3fd6479a92a6332f656c8153c5989f1a3ad6d834435"
+    },
+    {
+      "file": "rhode_island_nhd_rivers.json",
+      "publisher": "U.S. Geological Survey",
+      "dataset": "National Hydrography Dataset (The National Map)",
+      "license": "Public domain",
+      "serviceCopyrightText": "USGS TNM \u2013 National Hydrography Dataset. Data Refreshed July, 2026.",
+      "records": 390,
+      "url": "https://hydro.nationalmap.gov/arcgis/rest/services/nhd/MapServer/4/query?f=json&where=FCode%3D46006+AND+GNIS_Name+IS+NOT+NULL+AND+StreamOrde%3E%3D3&geometry=-71.91%2C41.12%2C-71.12%2C42.02&geometryType=esriGeometryEnvelope&inSR=4326&spatialRel=esriSpatialRelIntersects&outFields=OBJECTID%2CGNIS_Name%2CFCode%2CStreamOrde&outSR=4326&maxAllowableOffset=0.001&geometryPrecision=5&orderByFields=OBJECTID&resultRecordCount=2000",
+      "sha256": "6574625c64854ce9a422eca791befa77c96cba31d89d7b6e0d6b7c825918e10d"
+    },
+    {
+      "file": "rhode_island_nhd_lakes.json",
+      "publisher": "U.S. Geological Survey",
+      "dataset": "National Hydrography Dataset (The National Map)",
+      "license": "Public domain",
+      "serviceCopyrightText": "USGS TNM \u2013 National Hydrography Dataset. Data Refreshed July, 2026.",
+      "records": 455,
+      "url": "https://hydro.nationalmap.gov/arcgis/rest/services/nhd/MapServer/10/query?f=json&where=AreaSqKm%3E%3D0.03+AND+%28%28FCode%3E%3D39000+AND+FCode%3C40000%29+OR+%28FCode%3E%3D43600+AND+FCode%3C43700%29%29&geometry=-71.91%2C41.12%2C-71.12%2C42.02&geometryType=esriGeometryEnvelope&inSR=4326&spatialRel=esriSpatialRelIntersects&outFields=OBJECTID%2CGNIS_Name%2CFCode%2CAreaSqKm&outSR=4326&maxAllowableOffset=0.0005&geometryPrecision=5&orderByFields=OBJECTID&resultRecordCount=2000",
+      "sha256": "96faf34bf44edc93bec290b5e73b45f9d16e4ac4e8b56487144e67de30e1eb38"
+    }
+  ]
+}

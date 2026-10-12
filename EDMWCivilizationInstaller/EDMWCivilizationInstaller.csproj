@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net9.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <AssemblyName>EDMWCivilizationInstaller</AssemblyName>
+    <Product>EDMW Mod Studio</Product>
+    <Title>EDMW Mod Studio Civilization Installer</Title>
+    <Description>Standalone civilization mod installer exported by EDMW Mod Studio.</Description>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="..\EDMWMapDesigner\Civilizations\CivilizationInstallerPackage.cs" Link="Domain\CivilizationInstallerPackage.cs" />
+    <Compile Include="..\EDMWMapDesigner\Civilizations\CivilizationPackageManager.cs" Link="Domain\CivilizationPackageManager.cs" />
+    <Compile Include="..\EDMWMapDesigner\Civilizations\CivilizationPackageContentComparer.cs" Link="Domain\CivilizationPackageContentComparer.cs" />
+    <Compile Include="..\EDMWMapDesigner\Civilizations\CivilizationGameInstaller.cs" Link="Domain\CivilizationGameInstaller.cs" />
+    <Compile Include="..\EDMWMapDesigner\Civilizations\CivilizationEditProject.cs" Link="Domain\CivilizationEditProject.cs" />
+    <Compile Include="..\EDMWMapDesigner\Civilizations\CivilizationSchema.cs" Link="Domain\CivilizationSchema.cs" />
+    <Compile Include="..\EDMWMapDesigner\Civilizations\CivilizationObjectBindings.cs" Link="Domain\CivilizationObjectBindings.cs" />
+    <Compile Include="..\EDMWMapDesigner\Civilizations\CivilizationCivilizationBindings.cs" Link="Domain\CivilizationCivilizationBindings.cs" />
+    <Compile Include="..\EDMWMapDesigner\Civilizations\CivilizationTechnologyBindings.cs" Link="Domain\CivilizationTechnologyBindings.cs" />
+    <Compile Include="..\EDMWMapDesigner\Civilizations\CivilizationAbilityData.cs" Link="Domain\CivilizationAbilityData.cs" />
+    <Compile Include="..\EDMWMapDesigner\Civilizations\CivilizationObjectDetails.cs" Link="Domain\CivilizationObjectDetails.cs" />
+    <Compile Include="..\EDMWMapDesigner\Civilizations\CivilizationGameAssets.cs" Link="Domain\CivilizationGameAssets.cs" />
+    <Compile Include="..\EDMWMapDesigner\Civilizations\CivilizationModelAsset.cs" Link="Domain\CivilizationModelAsset.cs" />
+    <Compile Include="..\EDMWMapDesigner\Civilizations\CivilizationModelReader.cs" Link="Domain\CivilizationModelReader.cs" />
+    <Compile Include="..\EDMWMapDesigner\Civilizations\CivilizationModelAppearance.cs" Link="Domain\CivilizationModelAppearance.cs" />
+    <Compile Include="..\EDMWMapDesigner\Civilizations\CivilizationTextureReader.cs" Link="Domain\CivilizationTextureReader.cs" />
+  </ItemGroup>
+</Project>

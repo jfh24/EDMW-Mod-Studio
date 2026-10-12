@@ -1,0 +1,64 @@
+{
+  "mode": "built-in image_gen",
+  "purpose": "Five-panel home background: three upper actions, two lower installed-content lists.",
+  "prompts": {
+    "initial": "Use case: precise-object-edit.\nAsset type: production game-editor homepage background, wide 16:9 landscape, target 1920x1080.\nInput image 1 is the EDIT TARGET and strict style reference: existing medieval harbor dashboard with three upper panels and one lower panel.\nPrimary request: change ONLY the lower panel layout so the home screen accommodates the new Civilization Edits panel next to Custom Maps. There must be FIVE empty frames total: the original THREE tall upper tool frames remain unchanged, and TWO equally sized wide lower frames sit side by side. This is a careful same-style revision, not a new art direction.\nInvariants: preserve the entire upper half, the three top frames, the top shield and navy drapery, their exact current positions/proportions, the dark weathered stone and beveled antique gold/brass materials, the richness of the navy heraldic banners, the realistic painterly medieval strategy-game illustration style, stormy harbor and firelight. Maintain the reference's precise palette, lighting and texture. Do not vary the style.\nLower layout: remove the single centered lower panel and replace it with TWO matching wide blank stone frames. Left outer frame spans x10.5%-49.2% of canvas. Right outer frame spans x50.8%-89.5%. Both outer frames run y52%-91%. Mirror their sizes, corner ornaments, bevel thickness and shadow, with a visible thin harbor-water gap between them. Interiors must be quietly dark empty stone, able to hold lists and headings rendered by the app. App content rectangles are left x11.2%-48.7% and right x51.3%-88.8%, both y53%-88.3%; put ornate edges around this content, with title text/list safe inset. Keep lower plate interiors undivided and text-free because the application draws its own recessed list wells. Retain small original shield flourish centered below each lower frame, fully within bottom y91%-95%. Clearly separate both lower frames from the top row.\nSurroundings: keep the left statue, anchor, right barrel, lion shield, fires, tower walls, sea, and cobblestones visible where the widened lower panels allow; tuck the anchor/barrel/shield closer to the side margins if needed so they do not intrude into panel interiors. Match their original rendering exactly. Do not add new scenery or symbols.\nConstraints: five panels only, no labels, no lettering, no icons inside panels, no buttons, no watermark, no modern flat/vector elements, no new colors, no bright glow. All borders visible. Clean symmetrical functional composition in the exact established medieval styling."
+  },
+  "reference": "EDMWMapDesigner/Assets/dashboard-harbor-civilizations.png",
+  "master": {
+    "path": "EDMWMapDesigner/Assets/dashboard-harbor-installed-content.png",
+    "dimensions": [
+      1672,
+      941
+    ]
+  },
+  "exports": [
+    {
+      "path": "EDMWMapDesigner/Assets/dashboard-harbor-installed-content-1080p.png",
+      "dimensions": [
+        1920,
+        1080
+      ]
+    },
+    {
+      "path": "EDMWMapDesigner/Assets/dashboard-harbor-installed-content-1440p.png",
+      "dimensions": [
+        2560,
+        1440
+      ]
+    },
+    {
+      "path": "EDMWMapDesigner/Assets/dashboard-harbor-installed-content-2160p.png",
+      "dimensions": [
+        3840,
+        2160
+      ]
+    }
+  ],
+  "exportMethod": "Display-size derivatives resized from generated master using System.Drawing HighQualityBicubic.",
+  "topOrder": [
+    "Map Script",
+    "Launch EDMW",
+    "Civ Editor"
+  ],
+  "lowerOrder": [
+    "Custom Maps",
+    "Civilization Edits"
+  ],
+  "invariant": "Existing medieval harbor/stone/antique gold/navy styling preserved.",
+  "selection": "User selected the initial compact lower frames to keep more harbor scenery visible.",
+  "contentBounds": {
+    "customMaps": [
+      0.188,
+      0.535,
+      0.298,
+      0.319
+    ],
+    "civilizationEdits": [
+      0.514,
+      0.535,
+      0.298,
+      0.319
+    ]
+  }
+}

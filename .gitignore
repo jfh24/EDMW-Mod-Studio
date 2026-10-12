@@ -1,0 +1,44 @@
+# Build and publish outputs (including embedded installer executables).
+**/bin/
+**/obj/
+**/build/
+**/publish/
+/dist/
+/publish-staging/
+*.exe
+*.dll
+*.obj
+*.lib
+*.exp
+*.pdb
+*.ilk
+
+# Local game evidence, copied game files, and verification output.
+/.verification/
+
+# Editor and machine-local settings.
+.vs/
+.vscode/
+.idea/
+.agents/
+.codex/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Python caches and virtual environments used by geography tools.
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Local credentials and configuration.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
