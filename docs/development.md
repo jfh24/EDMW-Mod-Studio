@@ -42,7 +42,7 @@ Use the full build after native or shared installer-domain changes. A standalone
 | `EDMWCivilizationInstaller` | Civilization package executable template and UI; links the editor's package and game-installation domain code. |
 | `native/EDMWAnchored` | Game-facing generator exports, stock generator integration, authored terrain/elevation/marker behavior, and resource alignment. |
 | `relay` | Node.js HTTP/WebSocket service for authenticated identities, accepted friendships, map sessions, and temporary export delivery. |
-| `render.yaml` | Render deployment blueprint with one Node service and durable identity storage. |
+| `render.yaml` | Free Render Node service, ephemeral working directory, and generated stable signing secret; no disk or database. |
 
 The legacy `EDMWMapDesigner` directory and namespace are intentional. The rebrand changes the public product and executable name while retaining resource identities, persisted formats, and existing project paths.
 
@@ -62,9 +62,9 @@ The LAN recipient rebuilds its review using local game data. Received packages a
 
 ### Online friends and sharing
 
-The desktop authenticates a device identity over HTTPS/WSS and stores its credential using Windows DPAPI. Friends require a request and acceptance. The relay controls presence, invitation and export access, room membership, and ordered map revisions. Online map editing uses the existing `MapDelta` and `MapProject` formats. Public connections require TLS; unencrypted loopback endpoints are available for local verification.
+The desktop authenticates a signed device identity over HTTPS/WSS and stores its credential and accepted friendship receipts using Windows DPAPI. Friends require a request and acceptance. The free relay's stable `IDENTITY_SECRET` verifies recovery credentials after its ephemeral filesystem is replaced. A recovered friendship authorizes sharing only after both authenticated devices declare the same signed acceptance. A peer's current omission removes the stale counterpart receipt, preventing unilateral restoration of a removed friendship. The relay controls presence, invitation and export access, room membership, and ordered map revisions. Online map editing uses the existing `MapDelta` and `MapProject` formats. Public connections require TLS; unencrypted loopback endpoints are available for local verification.
 
-Online exports reuse map archives and `CivilizationInstallerPackageCodec` payloads. The relay checks upload length and SHA-256, permits downloads only by the intended accepted friend, and forwards recipient decisions. The desktop then applies the existing package validation, review, and tracked installation flow. Received installer executables are never run. Friends and identities are durable; rooms and package offers are transient.
+Online exports reuse map archives and `CivilizationInstallerPackageCodec` payloads. The relay checks upload length and SHA-256, permits downloads only by the intended accepted friend, and forwards recipient decisions. The desktop then applies the existing package validation, review, and tracked installation flow. Received installer executables are never run. Identity and accepted-contact recovery uses desktop credentials and the stable environment secret; pending requests, rooms and package offers remain transient. Connect polls the relay's health endpoint with a bounded, cancellable timeout to accommodate free-service cold starts.
 
 See [online setup and operations](online-sharing.md) and [the wire protocol](online-protocol.md). The relay is a separate service and is not embedded in the Windows executable. Source builds include the online feature; the existing v1.0.0 release does not.
 
@@ -110,7 +110,7 @@ The self-test exercises project persistence and identity, generated scripts and 
 | Switch and arguments | Coverage / output |
 | --- | --- |
 | `--self-test` | Core map and collaboration checks; does not require an installed game. |
-| `--verify-online <loopback-relay-url>` | Actual C# clients against Node: authentication, friendship permissions, map invitations, full-sized map masks, simultaneous edits, cursors, export bytes and decision status, reconnect, and revocation. Requires an isolated local relay; does not install game data. |
+| `--verify-online <loopback-relay-url> [control-directory]` | Actual C# clients against Node: authentication, friendship permissions, map invitations, map masks, simultaneous edits, cursors, export decisions, reconnect, and revocation. The isolated runner supplies a control directory to verify identity/contact recovery across complete filesystem replacements. Does not install game data. |
 | `--verify-online-ui <output-folder>` | Offscreen Friends and recipient picker layout, toolbar availability, and pending local stroke preservation across acknowledgements; no network connection or account changes. |
 | `--verify-civilization-navigation` | Catalog selection shortcuts, paging, and resizing; does not require an installed game. |
 | `--verify-stock-profiles <stock-scripts-folder>` | Original map-template/resource policy import across 13 profiles, five sizes, and 2–8-player branches. |
@@ -136,7 +136,7 @@ The civilization installer also provides `--verify-layout <game-folder>` and `--
 
 These checks do not replace in-game visual inspection or a real multiplayer session with matching installed gameplay data.
 
-For the Node relay, run `npm ci` and `npm test` inside `relay`. The tests use temporary storage and local listeners. For desktop/relay compatibility, run `tools/Verify-Online.ps1` from the repository root after generating the embedded resources with `build.ps1`. It starts an isolated loopback relay, builds the editor, runs `--verify-online`, and stops the relay. Test identities and output stay under the ignored `.verification` directory. Document check results and remaining limitations with the GitHub change; exclude credentials, local relay data, game fixtures, and generated executables from commits.
+For the Node relay, run `npm ci` and `npm test` inside `relay`. The tests use temporary storage and local listeners. For desktop/relay compatibility, run `tools/Verify-Online.ps1` from the repository root after generating the embedded resources with `build.ps1`. It starts `tools/OnlineVerificationRelay.mjs` on loopback, builds the editor, runs `--verify-online`, replaces the relay's filesystem twice while retaining its signing secret, and stops the relay. The restart control files exist only in this local verification runner; production exposes no reset endpoint. Test identities and output stay under ignored `.verification`. Document results with the GitHub change; exclude credentials, relay data, game fixtures, and generated executables.
 
 ## Maintenance and evidence commands
 

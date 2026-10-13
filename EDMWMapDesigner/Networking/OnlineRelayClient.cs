@@ -14,7 +14,7 @@ public sealed class OnlineRelayClient : IDisposable
     public const int MaximumMapBytes = 32 * 1024 * 1024;
     public const int MaximumCivilizationBytes = 128 * 1024 * 1024;
     private const int MaximumMessageBytes = 16 * 1024 * 1024;
-    private static readonly TimeSpan ConnectTimeout = TimeSpan.FromSeconds(60);
+    private static readonly TimeSpan ConnectTimeout = TimeSpan.FromSeconds(150);
     private static readonly TimeSpan CommandTimeout = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan TransferTimeout = TimeSpan.FromMinutes(3);
     internal static readonly JsonSerializerOptions JsonOptions = new()
@@ -57,10 +57,16 @@ public sealed class OnlineRelayClient : IDisposable
             var timeout = connecting = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             lock (_gate) _connectingCancellation = timeout;
             timeout.CancelAfter(ConnectTimeout);
-            StatusChanged?.Invoke(this, "Connecting to the online relay (a sleeping Render service can take a minute)...");
+            StatusChanged?.Invoke(this, "Waking the online relay (a free Render service can take a few minutes)...");
             var key = address.AbsoluteUri;
             var identity = _endpoint == address ? _identity : null;
             identity ??= Preferences.GetIdentity(key);
+            await WakeRelayAsync(address, timeout.Token).ConfigureAwait(false);
+            if (identity is not null && !identity.Token.StartsWith("d1.", StringComparison.Ordinal))
+            {
+                StatusChanged?.Invoke(this, "Updating this device for the free relay; exchange the new friend code again.");
+                identity = null;
+            }
             if (identity is null)
             {
                 using var request = new HttpRequestMessage(HttpMethod.Post, new Uri(address, "v1/register"))
@@ -72,6 +78,9 @@ public sealed class OnlineRelayClient : IDisposable
                     ?? throw new InvalidDataException("The online relay returned no identity.");
                 if (identity.UserId == Guid.Empty || string.IsNullOrWhiteSpace(identity.Token) || identity.Token.Length > 512)
                     throw new InvalidDataException("The online relay returned an invalid identity.");
+                if (!identity.Token.StartsWith("d1.", StringComparison.Ordinal))
+                    throw new InvalidDataException("Update the relay server to the free relay protocol before creating this device profile.");
+                identity = identity with { FriendReceipts = OnlineCredentialLimits.ValidateReceipts(identity.FriendReceipts) };
                 // Save before connecting: a failed cold-start connection must not create another account on retry.
                 Preferences.SetIdentity(key, identity);
             }
@@ -95,7 +104,8 @@ public sealed class OnlineRelayClient : IDisposable
             _ = ReceiveLoopAsync(connection);
             await RequestOnConnectionAsync(connection, "auth", new Dictionary<string, object?>
             {
-                ["protocol"] = 1, ["userId"] = identity.UserId, ["token"] = identity.Token, ["displayName"] = name
+                ["protocol"] = 1, ["userId"] = identity.UserId, ["token"] = identity.Token, ["displayName"] = name,
+                ["friendReceipts"] = OnlineCredentialLimits.ValidateReceipts(identity.FriendReceipts)
             }, timeout.Token, ApplyFriendsSnapshot).ConfigureAwait(false);
             lock (_gate)
             {
@@ -108,7 +118,7 @@ public sealed class OnlineRelayClient : IDisposable
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
             if (connection is not null) EndConnection(connection, "The online relay connection timed out.");
-            throw new TimeoutException("The online relay did not respond within 60 seconds. Try connecting again after it wakes up.");
+            throw new TimeoutException("The online relay did not wake and connect within 150 seconds. Try connecting again after it wakes up.");
         }
         catch
         {
@@ -353,6 +363,21 @@ public sealed class OnlineRelayClient : IDisposable
         var snapshot = Deserialize<OnlineFriendsSnapshot>(data);
         if (snapshot.User.UserId == Guid.Empty || snapshot.Friends is null || snapshot.Incoming is null || snapshot.Outgoing is null)
             throw new InvalidDataException("The relay returned an invalid friends snapshot.");
+        snapshot = snapshot with { FriendReceipts = OnlineCredentialLimits.ValidateReceipts(snapshot.FriendReceipts) };
+        if (_identity is not null && _endpoint is not null)
+        {
+            if (snapshot.User.UserId != _identity.UserId)
+                throw new InvalidDataException("The relay returned a friends snapshot for another device.");
+            var changed = !_identity.FriendReceipts.SequenceEqual(snapshot.FriendReceipts, StringComparer.Ordinal) ||
+                _identity.DisplayName != snapshot.User.DisplayName || _identity.FriendCode != snapshot.User.FriendCode;
+            var updated = _identity with
+            {
+                DisplayName = snapshot.User.DisplayName, FriendCode = snapshot.User.FriendCode,
+                FriendReceipts = snapshot.FriendReceipts.ToArray()
+            };
+            if (changed) Preferences.SetIdentity(_endpoint.AbsoluteUri, updated);
+            _identity = updated;
+        }
         Friends = snapshot;
         User = snapshot.User;
         var accepted = snapshot.Friends.Select(friend => friend.UserId).ToHashSet();
@@ -409,6 +434,46 @@ public sealed class OnlineRelayClient : IDisposable
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", identity.Token);
         request.Headers.Add("X-User-Id", identity.UserId.ToString("D"));
         return request;
+    }
+
+    private async Task WakeRelayAsync(Uri endpoint, CancellationToken cancellationToken)
+    {
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            using var attempt = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            attempt.CancelAfter(TimeSpan.FromSeconds(15));
+            try
+            {
+                using var request = new HttpRequestMessage(HttpMethod.Get, new Uri(endpoint, "health"));
+                using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, attempt.Token).ConfigureAwait(false);
+                if (response.IsSuccessStatusCode)
+                {
+                    try
+                    {
+                        var bytes = await ReadBoundedAsync(response.Content, 16 * 1024, attempt.Token).ConfigureAwait(false);
+                        using var document = JsonDocument.Parse(bytes);
+                        if (document.RootElement.ValueKind == JsonValueKind.Object &&
+                            document.RootElement.TryGetProperty("protocol", out var protocol) &&
+                            protocol.ValueKind == JsonValueKind.Number && protocol.TryGetInt32(out var version))
+                        {
+                            if (version != 1) throw new InvalidOperationException("This relay uses an unsupported online protocol version.");
+                            StatusChanged?.Invoke(this, "The online relay is awake. Connecting your friends profile...");
+                            return;
+                        }
+                    }
+                    catch (Exception error) when (error is JsonException or InvalidDataException)
+                    { /* Render may return its HTML wake-up page before the Node service starts. */ }
+                }
+                else if (response.StatusCode is not (HttpStatusCode.BadGateway or HttpStatusCode.ServiceUnavailable or HttpStatusCode.GatewayTimeout))
+                    throw new InvalidOperationException($"The relay health check returned HTTP {(int)response.StatusCode}. Check the relay URL.");
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            { /* The overall connection deadline still bounds retries. */ }
+            catch (HttpRequestException)
+            { /* A free service may briefly refuse requests while waking. */ }
+            await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken).ConfigureAwait(false);
+        }
     }
 
     public static Uri NormalizeEndpoint(string endpoint)

@@ -2,7 +2,7 @@ services:
   - type: web
     name: edmw-online-relay
     runtime: node
-    plan: starter
+    plan: free
     rootDir: relay
     buildCommand: npm ci --omit=dev
     startCommand: npm start
@@ -12,8 +12,6 @@ services:
       - key: NODE_VERSION
         value: 24.18.0
       - key: RELAY_DATA_DIR
-        value: /var/data/edmw-relay
-    disk:
-      name: edmw-identities
-      mountPath: /var/data
-      sizeGB: 1
+        value: /tmp/edmw-relay
+      - key: IDENTITY_SECRET
+        generateValue: true

@@ -10,34 +10,40 @@ namespace EDMWMapDesigner.Networking;
 /// <summary>Remembers relay profiles, protecting each device credential for the current Windows user.</summary>
 public sealed class OnlinePreferences
 {
+    private const int MaximumPreferencesBytes = 4 * 1024 * 1024;
     public string Endpoint { get; set; } = "";
     public string DisplayName { get; set; } = Environment.UserName;
     public Dictionary<string, string> ProtectedIdentities { get; set; } = new(StringComparer.Ordinal);
     [JsonIgnore] public bool PersistIdentity { get; set; } = true;
+    [JsonIgnore] internal string? LoadError { get; private init; }
 
     public static OnlinePreferences Load()
     {
         try
         {
             if (!File.Exists(PreferencePath)) return new();
-            if (new FileInfo(PreferencePath).Length > 256 * 1024) return new();
+            if (new FileInfo(PreferencePath).Length > MaximumPreferencesBytes)
+                throw new InvalidDataException("The saved online profiles exceed the supported size limit.");
             var preferences = JsonSerializer.Deserialize<OnlinePreferences>(File.ReadAllText(PreferencePath)) ?? new();
             preferences.ProtectedIdentities ??= new(StringComparer.Ordinal);
             return preferences;
         }
-        catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException)
-        { return new(); }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException or InvalidDataException)
+        { return new() { LoadError = "The saved online profiles could not be read. Restore or reset online.json before connecting: " + error.Message }; }
     }
 
     public void Save()
     {
         if (!PersistIdentity) return;
+        var json = JsonSerializer.SerializeToUtf8Bytes(this);
+        if (json.Length > MaximumPreferencesBytes)
+            throw new InvalidDataException("The saved online profiles exceed the supported size limit.");
         var path = PreferencePath;
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         var temporary = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
         try
         {
-            File.WriteAllText(temporary, JsonSerializer.Serialize(this));
+            File.WriteAllBytes(temporary, json);
             File.Move(temporary, path, true);
         }
         finally { if (File.Exists(temporary)) File.Delete(temporary); }
@@ -45,15 +51,19 @@ public sealed class OnlinePreferences
 
     internal OnlineIdentity? GetIdentity(string endpoint)
     {
+        if (LoadError is not null) throw new InvalidDataException(LoadError);
         if (!ProtectedIdentities.TryGetValue(endpoint, out var protectedIdentity)) return null;
+        if (protectedIdentity.Length > 1024 * 1024)
+            throw new InvalidDataException("The saved online device credential exceeds the supported size limit.");
         try
         {
             var bytes = Unprotect(Convert.FromBase64String(protectedIdentity), endpoint);
             try
             {
                 var identity = JsonSerializer.Deserialize<OnlineIdentity>(bytes);
-                return identity is not null && identity.UserId != Guid.Empty && identity.Token.Length is >= 32 and <= 512
-                    ? identity : null;
+                if (identity is null || identity.UserId == Guid.Empty || identity.Token is null || identity.Token.Length is < 32 or > 512)
+                    throw new InvalidDataException("The saved online device credential is invalid. Reconnect with a valid relay credential.");
+                return identity with { FriendReceipts = OnlineCredentialLimits.ValidateReceipts(identity.FriendReceipts) };
             }
             finally { CryptographicOperations.ZeroMemory(bytes); }
         }
@@ -64,8 +74,20 @@ public sealed class OnlinePreferences
     internal void SetIdentity(string endpoint, OnlineIdentity identity)
     {
         if (!PersistIdentity) return;
-        var bytes = JsonSerializer.SerializeToUtf8Bytes(identity);
-        try { ProtectedIdentities[endpoint] = Convert.ToBase64String(Protect(bytes, endpoint)); Save(); }
+        var validated = identity with { FriendReceipts = OnlineCredentialLimits.ValidateReceipts(identity.FriendReceipts) };
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(validated);
+        try
+        {
+            var previousExists = ProtectedIdentities.TryGetValue(endpoint, out var previous);
+            ProtectedIdentities[endpoint] = Convert.ToBase64String(Protect(bytes, endpoint));
+            try { Save(); }
+            catch
+            {
+                if (previousExists) ProtectedIdentities[endpoint] = previous!;
+                else ProtectedIdentities.Remove(endpoint);
+                throw;
+            }
+        }
         finally { CryptographicOperations.ZeroMemory(bytes); }
     }
 

@@ -29,11 +29,11 @@ internal static class Program
                 return 1;
             }
         }
-        if (args.Length == 2 && args[0].Equals("--verify-online", StringComparison.OrdinalIgnoreCase))
+        if (args.Length is 2 or 3 && args[0].Equals("--verify-online", StringComparison.OrdinalIgnoreCase))
         {
             try
             {
-                Networking.OnlineVerification.RunAsync(args[1]).GetAwaiter().GetResult();
+                Networking.OnlineVerification.RunAsync(args[1], args.Length == 3 ? args[2] : null).GetAwaiter().GetResult();
                 return 0;
             }
             catch (Exception error)

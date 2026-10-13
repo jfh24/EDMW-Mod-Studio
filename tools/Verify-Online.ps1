@@ -22,17 +22,20 @@ $taskListener.Stop()
 $taskEndpoint = 'http://127.0.0.1:' + $taskPort
 $taskOldPort = $env:PORT
 $taskOldData = $env:RELAY_DATA_DIR
+$taskOldControl = $env:ONLINE_VERIFICATION_CONTROL_DIR
 $taskServer = $null
 $taskClient = $null
 try {
     $env:PORT = $taskPort.ToString()
     $env:RELAY_DATA_DIR = Join-Path $taskChecks 'data'
-    $taskServer = Start-Process -FilePath $taskNode -ArgumentList 'src/server.js' -WorkingDirectory $taskRelay `
+    $env:ONLINE_VERIFICATION_CONTROL_DIR = $taskChecks
+    $taskServer = Start-Process -FilePath $taskNode -ArgumentList 'tools/OnlineVerificationRelay.mjs' -WorkingDirectory $taskRoot `
         -WindowStyle Hidden -PassThru `
         -RedirectStandardOutput (Join-Path $taskChecks 'relay.log') `
         -RedirectStandardError (Join-Path $taskChecks 'relay-errors.log')
     $env:PORT = $taskOldPort
     $env:RELAY_DATA_DIR = $taskOldData
+    $env:ONLINE_VERIFICATION_CONTROL_DIR = $taskOldControl
     $taskReady = $false
     for ($taskAttempt = 0; $taskAttempt -lt 40; $taskAttempt++) {
         if ($taskServer.HasExited) { throw 'The test relay exited before becoming healthy.' }
@@ -45,7 +48,7 @@ try {
     if (!$taskReady) { throw 'The test relay did not become healthy.' }
     $taskAssembly = Join-Path $taskRoot 'EDMWMapDesigner\bin\Release\net9.0-windows\EDMW Mod Studio.dll'
     $taskClient = Start-Process -FilePath $taskDotnet `
-        -ArgumentList ('"' + $taskAssembly + '" --verify-online ' + $taskEndpoint) `
+        -ArgumentList ('"' + $taskAssembly + '" --verify-online ' + $taskEndpoint + ' "' + $taskChecks + '"') `
         -WorkingDirectory $taskRoot -WindowStyle Hidden -PassThru `
         -RedirectStandardOutput (Join-Path $taskChecks 'desktop.log') `
         -RedirectStandardError (Join-Path $taskChecks 'desktop-errors.log')
@@ -61,6 +64,7 @@ try {
 finally {
     $env:PORT = $taskOldPort
     $env:RELAY_DATA_DIR = $taskOldData
+    $env:ONLINE_VERIFICATION_CONTROL_DIR = $taskOldControl
     if ($null -ne $taskClient -and !$taskClient.HasExited) { Stop-Process -Id $taskClient.Id -Force }
     if ($null -ne $taskServer -and !$taskServer.HasExited) { Stop-Process -Id $taskServer.Id -Force }
 }

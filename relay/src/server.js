@@ -8,6 +8,7 @@ import { Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { WebSocket, WebSocketServer } from 'ws';
 import { applyDelta, validateProject } from './project.js';
+import { identitySigner, loadIdentitySecret } from './identity.js';
 
 const MiB = 1024 * 1024;
 const idPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -42,16 +43,33 @@ export async function createRelay(options = {}) {
   const heartbeatMs = options.heartbeatMs ?? 30_000;
   const maxWsBytes = 16 * MiB;
   const maxExportBytes = 128 * MiB;
+  const maxRoomCells = 8 * 512 * 512;
+  let queuedMessageBytes = 0;
   const connections = new Map(), sessions = new Map(), userSessions = new Map(), offers = new Map();
   const registrationRates = new Map();
   let commandQueue = Promise.resolve(), stopping = false;
   await mkdir(exportDir, { recursive: true });
+  const signer = identitySigner(await loadIdentitySecret(dataDir, options));
   // Packages and rooms are intentionally transient; a restart never replays an offer.
   for (const file of await readdir(exportDir)) if (/^[0-9a-f-]{36}\.(?:part|bin)$/.test(file)) await discard(path.join(exportDir, file));
   let db;
   try { db = JSON.parse(await readFile(dbFile, 'utf8')); }
   catch (error) { if (error.code !== 'ENOENT') throw error; db = { version: 1, users: {}, friendships: [], requests: [] }; }
   check(db.version === 1 && db.users && Array.isArray(db.friendships) && Array.isArray(db.requests), 'Relay identity database is invalid.');
+  db.receipts ??= {};
+  db.revokedReceiptHashes ??= {};
+  const pairKey = (a, b) => [a, b].sort().join(':');
+  for (const user of Object.values(db.users)) {
+    user.declared ??= Boolean(user.tokenHash);
+    user.declaredReceipts ??= [];
+    user.pendingReceiptDelivery ??= [];
+  }
+  // Existing disk-backed relays migrate accepted pairs to signed receipts.
+  for (const [a, b] of db.friendships) {
+    const key = pairKey(a, b);
+    db.receipts[key] ??= signer.receipt({ userId: a, ...db.users[a] }, { userId: b, ...db.users[b] });
+    for (const id of [a, b]) if (!db.users[id].declaredReceipts.includes(db.receipts[key])) db.users[id].declaredReceipts.push(db.receipts[key]);
+  }
 
   function enqueue(action) {
     const result = commandQueue.then(action);
@@ -71,29 +89,43 @@ export async function createRelay(options = {}) {
   }
   function profile(userId) {
     const user = db.users[userId];
-    return { userId, displayName: user.displayName, friendCode: user.friendCode, online: connections.has(userId) };
+    return { userId, displayName: user.displayName, friendCode: user.friendCode, online: isOnline(userId) };
   }
+  function isOnline(userId) { return connections.get(userId)?.readyState === WebSocket.OPEN; }
   function friendIds(userId) { return db.friendships.filter(pair => pair.includes(userId)).map(pair => pair.find(id => id !== userId)); }
   function areFriends(a, b) { return a !== b && db.friendships.some(pair => pair.includes(a) && pair.includes(b)); }
+  function contactIds(userId) {
+    const ids = new Set(friendIds(userId));
+    for (const receipt of db.users[userId].declaredReceipts) {
+      const other = signer.verifyReceipt(receipt).users.find(user => user.userId !== userId);
+      if (other) ids.add(other.userId);
+    }
+    return [...ids];
+  }
   function snapshot(userId) {
     return {
-      user: profile(userId), friends: friendIds(userId).map(profile),
+      user: profile(userId), friends: contactIds(userId).map(id => ({ ...profile(id), online: areFriends(userId, id) && isOnline(id) })),
+      friendReceipts: db.users[userId].declaredReceipts,
       incoming: db.requests.filter(pair => pair[1] === userId).map(pair => profile(pair[0])),
       outgoing: db.requests.filter(pair => pair[0] === userId).map(pair => profile(pair[1])),
     };
   }
-  function send(socket, type, data) {
+  function wireSend(socket, value) {
     if (!socket || socket.readyState !== WebSocket.OPEN) return;
-    if (socket.bufferedAmount > 32 * MiB) { socket.close(4008, 'Client is too slow; reconnect and synchronize.'); return; }
-    socket.send(JSON.stringify({ type, data }), error => { if (error) socket.terminate(); });
+    const payload = JSON.stringify(value);
+    const buffered = [...wss.clients].reduce((sum, client) => sum + client.bufferedAmount, 0);
+    if (socket.bufferedAmount > 32 * MiB || buffered + Buffer.byteLength(payload) > 64 * MiB) {
+      socket.close(4008, 'Relay backpressure limit reached; reconnect and synchronize.');
+      const timeout = setTimeout(() => socket.terminate(), 1000); timeout.unref(); return;
+    }
+    socket.send(payload, error => { if (error) socket.terminate(); });
   }
+  function send(socket, type, data) { wireSend(socket, { type, data }); }
   function reply(socket, requestId, data, error) {
-    if (socket.readyState !== WebSocket.OPEN) return;
-    if (socket.bufferedAmount > 32 * MiB) { socket.close(4008, 'Client is too slow; reconnect and synchronize.'); return; }
-    socket.send(JSON.stringify(error ? { type: 'response', requestId, ok: false, error } : { type: 'response', requestId, ok: true, data }));
+    wireSend(socket, error ? { type: 'response', requestId, ok: false, error } : { type: 'response', requestId, ok: true, data });
   }
   function notifyFriends(userId) {
-    for (const id of new Set([userId, ...friendIds(userId), ...db.requests.filter(p => p.includes(userId)).flat()]))
+    for (const id of new Set([userId, ...contactIds(userId), ...db.requests.filter(p => p.includes(userId)).flat()]))
       if (connections.has(id)) send(connections.get(id), 'friends.changed', snapshot(id));
   }
   function sessionSnapshot(room) {
@@ -148,17 +180,104 @@ export async function createRelay(options = {}) {
       if ([offer.senderId, offer.recipientId].includes(a) && [offer.senderId, offer.recipientId].includes(b))
         await removeOffer(offer, 'failed', 'Friendship removed; export revoked.');
   }
-  function authenticate(userId, token) {
-    check(validId(userId) && typeof token === 'string' && /^[A-Za-z0-9_-]{43}$/.test(token), 'Invalid credentials.', 401);
+  function authenticate(userId, token, recover = false) {
+    check(validId(userId) && typeof token === 'string' && token.length <= 512, 'Invalid credentials.', 401);
     const user = db.users[userId], candidate = Buffer.from(hashToken(token), 'hex');
-    check(user && typeof user.tokenHash === 'string' && user.tokenHash.length === 64 &&
+    if (token.startsWith('d1.')) {
+      let identity;
+      try { identity = signer.verifyDevice(token); } catch { throw new PublicError('Invalid credentials.', 401); }
+      check(identity.userId === userId && (!user || user.friendCode === identity.friendCode), 'Invalid credentials.', 401);
+      if (user?.tokenHash) check(timingSafeEqual(candidate, Buffer.from(user.tokenHash, 'hex')), 'Invalid credentials.', 401);
+      check(recover || user?.tokenHash, 'Authenticate the device first.', 401);
+      return identity;
+    }
+    // Legacy opaque credentials remain valid while their disk record survives.
+    check(/^[A-Za-z0-9_-]{43}$/.test(token) && user && typeof user.tokenHash === 'string' && user.tokenHash.length === 64 &&
       timingSafeEqual(candidate, Buffer.from(user.tokenHash, 'hex')), 'Invalid credentials.', 401);
-    return userId;
+    return { userId, friendCode: user.friendCode };
   }
   function authorizeHttp(request) {
     const authorization = request.headers.authorization;
     check(typeof authorization === 'string' && authorization.startsWith('Bearer '), 'Authentication required.', 401);
-    return authenticate(request.headers['x-user-id'], authorization.slice(7));
+    return authenticate(request.headers['x-user-id'], authorization.slice(7)).userId;
+  }
+
+  function parseDeclarations(userId, friendCode, values) {
+    check(Array.isArray(values) && values.length <= 256, 'At most 256 friend receipts may be declared.');
+    const seen = new Set();
+    return values.map(receipt => {
+      let proof;
+      try { proof = signer.verifyReceipt(receipt); } catch { throw new PublicError('Invalid friend receipt.'); }
+      const self = proof.users.find(user => user.userId === userId);
+      check(self && self.friendCode === friendCode, 'Friend receipt does not belong to this device.');
+      const peer = proof.users.find(user => user.userId !== userId);
+      check(!seen.has(peer.userId), 'Duplicate friend receipt for one contact.'); seen.add(peer.userId);
+      return { receipt, peer };
+    });
+  }
+  async function recoverDeclarations(identity, token, displayName, declared) {
+    const userId = identity.userId;
+    // Older local clients which omit the new field retain their known disk state.
+    // An unknown identity after an ephemeral wipe has no implicit declarations.
+    const provided = declared ?? db.users[userId]?.declaredReceipts ?? [];
+    const proofs = parseDeclarations(userId, identity.friendCode, provided);
+    const submitted = new Set(provided);
+    const pending = db.users[userId]?.pendingReceiptDelivery ?? [];
+    // A request explicitly accepted while its sender was offline has one delivery
+    // waiting in the current database. It is never reconstructed from a replayed proof.
+    for (const receipt of pending) {
+      const peer = signer.verifyReceipt(receipt).users.find(user => user.userId !== userId);
+      if (!proofs.some(proof => proof.peer.userId === peer.userId)) proofs.push(...parseDeclarations(userId, identity.friendCode, [receipt]));
+    }
+    const outcome = await updateDatabase(next => {
+      check(next.users[userId] || Object.keys(next.users).length < 100_000, 'Relay identity limit reached.', 503);
+      const affected = new Set([userId]), revoked = [];
+      const self = next.users[userId] = {
+        ...next.users[userId], friendCode: identity.friendCode, displayName, tokenHash: hashToken(token),
+        declared: true, declaredReceipts: [], pendingReceiptDelivery: pending.filter(receipt => !submitted.has(receipt)),
+      };
+      for (const { receipt, peer } of proofs) {
+        affected.add(peer.userId);
+        const digest = hashToken(receipt), known = next.users[peer.userId];
+        if (next.revokedReceiptHashes[digest]) continue;
+        check(!known || known.friendCode === peer.friendCode, 'Friend receipt identity mismatch.');
+        // A known peer's explicit omission wins over another endpoint's old proof.
+        if (known?.declared && !known.declaredReceipts.includes(receipt)) {
+          next.revokedReceiptHashes[digest] = true; continue;
+        }
+        if (!known) {
+          check(Object.keys(next.users).length < 100_000, 'Relay identity limit reached.', 503);
+          next.users[peer.userId] = { displayName: peer.displayName, friendCode: peer.friendCode,
+            declared: false, declaredReceipts: [], pendingReceiptDelivery: [] };
+        }
+        next.receipts[pairKey(userId, peer.userId)] = receipt;
+        self.declaredReceipts.push(receipt);
+      }
+      for (const [key, receipt] of Object.entries(next.receipts)) {
+        const users = signer.verifyReceipt(receipt).users.map(user => user.userId);
+        if (!users.includes(userId)) continue;
+        for (const id of users) affected.add(id);
+        const [a, b] = users;
+        const agreed = users.every(id => next.users[id].declared && next.users[id].declaredReceipts.includes(receipt));
+        const rejected = next.revokedReceiptHashes[hashToken(receipt)] || users.some(id => next.users[id].declared && !next.users[id].declaredReceipts.includes(receipt));
+        if (rejected) {
+          next.revokedReceiptHashes[hashToken(receipt)] = true;
+          delete next.receipts[key];
+          for (const id of users) {
+            next.users[id].declaredReceipts = next.users[id].declaredReceipts.filter(value => value !== receipt);
+            next.users[id].pendingReceiptDelivery = next.users[id].pendingReceiptDelivery.filter(value => value !== receipt);
+          }
+          next.friendships = next.friendships.filter(pair => !(pair.includes(a) && pair.includes(b)));
+          revoked.push(users);
+        } else if (agreed) {
+          if (!next.friendships.some(pair => pair.includes(a) && pair.includes(b))) next.friendships.push(users);
+          next.requests = next.requests.filter(pair => !(pair.includes(a) && pair.includes(b)));
+        }
+      }
+      return { affected: [...affected], revoked };
+    });
+    for (const [a, b] of outcome.revoked) await revokeFriendship(a, b);
+    return outcome.affected;
   }
 
   async function command(socket, message) {
@@ -166,9 +285,9 @@ export async function createRelay(options = {}) {
     if (type === 'auth') {
       check(!socket.userId, 'This connection is already authenticated.');
       check(message.protocol === 1, 'Unsupported protocol version.');
-      const id = authenticate(message.userId, message.token);
-      const displayName = name(message.displayName ?? db.users[id].displayName);
-      if (displayName !== db.users[id].displayName) await updateDatabase(next => { next.users[id].displayName = displayName; });
+      const identity = authenticate(message.userId, message.token, true), id = identity.userId;
+      const displayName = name(message.displayName ?? db.users[id]?.displayName ?? 'Player');
+      const affected = await recoverDeclarations(identity, message.token, displayName, message.friendReceipts);
       const previous = connections.get(id);
       // Tear down the old room before transferring a device identity to a new socket.
       if (previous) {
@@ -177,6 +296,7 @@ export async function createRelay(options = {}) {
         previous.close(4001, 'Device connected elsewhere.');
       }
       socket.userId = id; connections.set(id, socket); clearTimeout(socket.authTimer);
+      for (const contact of affected) if (connections.has(contact)) send(connections.get(contact), 'friends.changed', snapshot(contact));
       notifyFriends(id);
       return snapshot(id);
     }
@@ -196,9 +316,24 @@ export async function createRelay(options = {}) {
     if (type === 'friends.accept') {
       const other = message.userId;
       check(validId(other) && db.requests.some(p => p[0] === other && p[1] === userId), 'No incoming request from this user.');
-      check(friendIds(userId).length < 256 && friendIds(other).length < 256, 'Friend list is full.');
+      check((contactIds(userId).length < 256 || contactIds(userId).includes(other)) &&
+        (contactIds(other).length < 256 || contactIds(other).includes(userId)), 'Friend list is full.');
+      if (areFriends(userId, other)) {
+        await updateDatabase(next => { next.requests = next.requests.filter(pair => !(pair.includes(userId) && pair.includes(other))); });
+        notifyFriends(userId); return snapshot(userId);
+      }
+      const receipt = signer.receipt(profile(userId), profile(other));
       await updateDatabase(next => {
         next.requests = next.requests.filter(p => !(p.includes(userId) && p.includes(other)));
+        for (const id of [userId, other]) {
+          const prior = next.users[id].declaredReceipts.filter(value => signer.verifyReceipt(value).users.some(peer => peer.userId === (id === userId ? other : userId)));
+          for (const old of prior) next.revokedReceiptHashes[hashToken(old)] = true;
+          next.users[id].declaredReceipts = next.users[id].declaredReceipts.filter(value => !prior.includes(value));
+          next.users[id].pendingReceiptDelivery = next.users[id].pendingReceiptDelivery.filter(value => !prior.includes(value));
+        }
+        next.receipts[pairKey(userId, other)] = receipt;
+        for (const id of [userId, other]) next.users[id].declaredReceipts.push(receipt);
+        if (!isOnline(other)) next.users[other].pendingReceiptDelivery.push(receipt);
         if (!next.friendships.some(p => p.includes(userId) && p.includes(other))) next.friendships.push([userId, other]);
       });
       notifyFriends(userId); return snapshot(userId);
@@ -209,6 +344,14 @@ export async function createRelay(options = {}) {
       await updateDatabase(next => {
         next.requests = next.requests.filter(p => !(p.includes(userId) && p.includes(other)));
         next.friendships = next.friendships.filter(p => !(p.includes(userId) && p.includes(other)));
+        const key = pairKey(userId, other), receipt = next.receipts[key];
+        if (receipt) {
+          next.revokedReceiptHashes[hashToken(receipt)] = true; delete next.receipts[key];
+          for (const id of [userId, other]) {
+            next.users[id].declaredReceipts = next.users[id].declaredReceipts.filter(value => value !== receipt);
+            next.users[id].pendingReceiptDelivery = next.users[id].pendingReceiptDelivery.filter(value => value !== receipt);
+          }
+        }
       });
       await revokeFriendship(userId, other);
       send(connections.get(other), 'friends.changed', snapshot(other)); notifyFriends(userId); return snapshot(userId);
@@ -216,6 +359,9 @@ export async function createRelay(options = {}) {
     if (type === 'collab.create') {
       check(sessions.size < 128, 'The relay has reached its session limit.');
       const project = validateProject(message.project);
+      const prior = sessions.get(userSessions.get(userId));
+      const cells = [...sessions.values()].reduce((sum, room) => sum + room.project.cells.length, 0);
+      check(cells - (prior?.hostId === userId ? prior.project.cells.length : 0) + project.cells.length <= maxRoomCells, 'The relay has reached its map capacity.');
       leave(userId);
       const room = { id: randomUUID(), hostId: userId, members: new Set([userId]), invites: new Set(), revision: 0, project };
       sessions.set(room.id, room); userSessions.set(userId, room.id); return sessionSnapshot(room);
@@ -224,7 +370,7 @@ export async function createRelay(options = {}) {
       const room = roomFor(userId, message.sessionId), other = message.userId;
       check(room.hostId === userId, 'Only the host can invite friends.', 403);
       check(validId(other) && areFriends(userId, other), 'Only accepted friends can be invited.', 403);
-      check(connections.has(other), 'The friend is offline.');
+      check(isOnline(other), 'The friend is offline.');
       check(!room.members.has(other), 'The friend is already in this session.');
       check(room.invites.size < 256, 'Too many invitations.');
       room.invites.add(other);
@@ -250,7 +396,10 @@ export async function createRelay(options = {}) {
     if (type === 'collab.project') {
       const room = roomFor(userId, message.sessionId);
       check(Number.isSafeInteger(message.baseRevision) && message.baseRevision === room.revision, 'Project revision changed; synchronize before retrying.');
-      room.project = validateProject(message.project); room.revision++;
+      const project = validateProject(message.project);
+      const cells = [...sessions.values()].reduce((sum, existing) => sum + existing.project.cells.length, 0);
+      check(cells - room.project.cells.length + project.cells.length <= maxRoomCells, 'The relay has reached its map capacity.');
+      room.project = project; room.revision++;
       broadcast(room, 'collab.project', { sessionId: room.id, revision: room.revision, project: room.project, authorId: userId }); return { revision: room.revision };
     }
     if (type === 'collab.cursor') {
@@ -265,7 +414,7 @@ export async function createRelay(options = {}) {
     if (type === 'export.offer') {
       const other = message.userId;
       check(validId(other) && areFriends(userId, other), 'Exports require an accepted friend.', 403);
-      check(connections.has(other), 'The friend is offline.');
+      check(isOnline(other), 'The friend is offline.');
       check(['map', 'civilization'].includes(message.kind), 'Unknown export kind.');
       check(Number.isSafeInteger(message.size) && message.size > 0 && message.size <= (message.kind === 'map' ? 32 * MiB : maxExportBytes), 'Export exceeds the size limit.');
       check(typeof message.sha256 === 'string' && /^[a-f0-9]{64}$/i.test(message.sha256), 'Invalid SHA-256 digest.');
@@ -309,10 +458,12 @@ export async function createRelay(options = {}) {
     const displayName = name(input.displayName);
     const result = await enqueue(async () => {
       check(Object.keys(db.users).length < 100_000, 'Relay identity limit reached.', 503);
-      const userId = randomUUID(), token = randomBytes(32).toString('base64url');
+      const userId = randomUUID();
       let friendCode;
       do { friendCode = randomBytes(6).toString('hex').toUpperCase(); } while (Object.values(db.users).some(user => user.friendCode === friendCode));
-      await updateDatabase(next => { next.users[userId] = { displayName, friendCode, tokenHash: hashToken(token) }; });
+      const token = signer.device(userId, friendCode);
+      await updateDatabase(next => { next.users[userId] = { displayName, friendCode, tokenHash: hashToken(token),
+        declared: false, declaredReceipts: [], pendingReceiptDelivery: [] }; });
       return { userId, token, friendCode, displayName };
     });
     httpJson(response, 201, result);
@@ -384,12 +535,15 @@ export async function createRelay(options = {}) {
     wss.handleUpgrade(request, socket, head, ws => wss.emit('connection', ws, request));
   });
   wss.on('connection', socket => {
-    socket.alive = true; socket.pendingCommands = 0; socket.rateStart = now(); socket.rateCount = 0;
+    socket.alive = true; socket.pendingCommands = 0; socket.pendingBytes = 0; socket.rateStart = now(); socket.rateCount = 0;
     socket.authTimer = setTimeout(() => socket.close(4003, 'Authentication timed out.'), 15_000); socket.authTimer.unref();
     socket.on('pong', () => { socket.alive = true; });
     socket.on('error', () => {});
     socket.on('message', (raw, binary) => {
       if (binary) { socket.close(1003, 'JSON messages are required.'); return; }
+      if (socket.pendingBytes + raw.length > 32 * MiB || queuedMessageBytes + raw.length > 64 * MiB) {
+        socket.close(4008, 'Relay message queue is full; reconnect and synchronize.'); return;
+      }
       let message;
       try {
         message = jsonObject(JSON.parse(raw.toString('utf8')));
@@ -397,6 +551,7 @@ export async function createRelay(options = {}) {
       } catch { socket.close(1007, 'Invalid JSON command.'); return; }
       if (now() - socket.rateStart >= 1000) { socket.rateStart = now(); socket.rateCount = 0; }
       if (++socket.rateCount > 120 || ++socket.pendingCommands > 128) { socket.close(4008, 'Command rate limit reached.'); return; }
+      socket.pendingBytes += raw.length; queuedMessageBytes += raw.length;
       enqueue(async () => {
         if (socket.readyState !== WebSocket.OPEN) return;
         try { const data = await command(socket, message); reply(socket, message.requestId, data); }
@@ -405,7 +560,7 @@ export async function createRelay(options = {}) {
           const safe = error instanceof PublicError || error.constructor === Error && message.type.startsWith('collab.');
           reply(socket, message.requestId, undefined, safe ? error.message : 'Relay command failed.');
         }
-      }).finally(() => { socket.pendingCommands--; }).catch(() => { socket.terminate(); });
+      }).finally(() => { socket.pendingCommands--; socket.pendingBytes -= raw.length; queuedMessageBytes -= raw.length; }).catch(() => { socket.terminate(); });
     });
     socket.on('close', () => {
       clearTimeout(socket.authTimer);

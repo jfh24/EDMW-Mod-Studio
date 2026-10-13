@@ -28,11 +28,13 @@ function delta(indices = [], cells = [], changes = {}) {
     elevationMask: Array(indices.length).fill(127), ...changes,
   };
 }
-async function client(url, identity, displayName = identity.displayName) {
+async function client(url, identity, displayName = identity.displayName, friendReceipts = identity.friendReceipts ?? []) {
   const socket = new WebSocket(url);
   const responses = new Map(), events = [], waiters = [];
   socket.on('message', raw => {
     const message = JSON.parse(raw.toString());
+    if (message.type === 'friends.changed' || message.type === 'response' && message.ok && Array.isArray(message.data?.friendReceipts))
+      identity.friendReceipts = [...message.data.friendReceipts];
     if (message.type === 'response') {
       const resolve = responses.get(message.requestId); responses.delete(message.requestId); resolve?.(message);
     } else {
@@ -70,14 +72,15 @@ async function client(url, identity, displayName = identity.displayName) {
       const closed = once(socket, 'close'); socket.close(); await closed;
     },
   };
-  api.friends = await api.command('auth', { protocol: 1, userId: identity.userId, token: identity.token, displayName });
+  api.friends = await api.command('auth', { protocol: 1, userId: identity.userId, token: identity.token, displayName, friendReceipts });
   return api;
 }
 async function fixture(t, options = {}) {
   const dataDir = await mkdtemp(path.join(os.tmpdir(), 'edmw-relay-test-'));
-  const relay = await createRelay({ dataDir, ...options });
-  const address = await relay.listen(0, '127.0.0.1');
-  const base = `http://127.0.0.1:${address.port}`, ws = base.replace('http:', 'ws:') + '/ws';
+  let relayOptions = options;
+  let relay = await createRelay({ dataDir, ...relayOptions });
+  let address = await relay.listen(0, '127.0.0.1');
+  let base = `http://127.0.0.1:${address.port}`, ws = base.replace('http:', 'ws:') + '/ws';
   const clients = [];
   t.after(async () => {
     for (const c of clients) c.socket.terminate();
@@ -89,7 +92,7 @@ async function fixture(t, options = {}) {
     const response = await fetch(base + '/v1/register', { method: 'POST', body: JSON.stringify({ displayName }) });
     assert.equal(response.status, 201); return response.json();
   }
-  async function connect(identity, displayName) { const c = await client(ws, identity, displayName); clients.push(c); return c; }
+  async function connect(identity, displayName, receipts) { const c = await client(ws, identity, displayName, receipts); clients.push(c); return c; }
   async function user(displayName) { return connect(await register(displayName)); }
   function headers(identity) { return { Authorization: `Bearer ${identity.token}`, 'X-User-Id': identity.userId }; }
   async function friends(a, b) {
@@ -99,7 +102,26 @@ async function fixture(t, options = {}) {
   async function offer(a, b, bytes, fields = {}) {
     return a.command('export.offer', { userId: b.identity.userId, kind: 'map', name: 'Map package', size: bytes.length, sha256: sha256(bytes), ...fields });
   }
-  return { relay, dataDir, base, ws, user, register, connect, headers, friends, offer };
+  async function restart({ wipe = false, ...replacement } = {}) {
+    await relay.close();
+    if (wipe) {
+      assert.ok(path.resolve(dataDir).startsWith(path.resolve(os.tmpdir()) + path.sep) && path.basename(dataDir).startsWith('edmw-relay-test-'));
+      await rm(dataDir, { recursive: true, force: true });
+    }
+    relayOptions = { ...relayOptions, ...replacement };
+    relay = await createRelay({ dataDir, ...relayOptions });
+    address = await relay.listen(0, '127.0.0.1');
+    base = `http://127.0.0.1:${address.port}`; ws = base.replace('http:', 'ws:') + '/ws';
+  }
+  async function rejectedAuth(identity, receipts = identity.friendReceipts ?? [], fields = {}) {
+    const socket = new WebSocket(ws); await once(socket, 'open');
+    const response = once(socket, 'message');
+    socket.send(JSON.stringify({ type: 'auth', requestId: randomUUID(), protocol: 1, userId: identity.userId,
+      token: identity.token, displayName: identity.displayName, friendReceipts: receipts, ...fields }));
+    const [raw] = await response; socket.terminate();
+    const parsed = JSON.parse(raw.toString()); assert.equal(parsed.ok, false); return parsed.error;
+  }
+  return { get relay() { return relay; }, dataDir, get base() { return base; }, get ws() { return ws; }, user, register, connect, headers, friends, offer, restart, rejectedAuth };
 }
 
 test('identities and explicitly accepted friends persist; token hashes, presence and renamed profiles are correct', async t => {
@@ -374,4 +396,170 @@ test('legacy optional cliff masks preserve authorship; automatic elevation clear
   assert.equal(preserved.elevationMask[0], 60);
   const automatic = applyDelta(preserved, delta([0], [3], { cliffMask: 'AQ==', elevationMask: [127] }));
   assert.equal(Buffer.from(automatic.cliffMask, 'base64')[0], 0);
+});
+
+const stableSecret = 'test signing secret that survives Render ephemeral restarts';
+test('free relay restores signed device identity and offline friend roster after total filesystem loss; sharing requires bilateral proofs', async t => {
+  const f = await fixture(t, { identitySecret: stableSecret });
+  const a = await f.user('Alice'), b = await f.user('Bob'); await f.friends(a, b);
+  await a.command('friends.list');
+  const savedA = structuredClone(a.identity), savedB = structuredClone(b.identity);
+  assert.ok(savedA.token.startsWith('d1.') && savedA.token.length <= 512);
+  assert.equal(savedA.friendReceipts.length, 1); assert.ok(savedA.friendReceipts[0].startsWith('f1.'));
+  const proof = JSON.parse(Buffer.from(savedA.friendReceipts[0].split('.')[1], 'base64url'));
+  assert.equal(proof.users.length, 2); assert.ok(!JSON.stringify(proof).includes(savedA.token));
+  assert.deepEqual(savedA.friendReceipts, savedB.friendReceipts);
+  await f.restart({ wipe: true });
+  const first = await f.connect(savedA);
+  assert.equal(first.friends.user.userId, savedA.userId); assert.equal(first.friends.user.friendCode, savedA.friendCode);
+  assert.equal(first.friends.friends[0].displayName, 'Bob'); assert.equal(first.friends.friends[0].online, false);
+  const staged = JSON.parse(await readFile(path.join(f.dataDir, 'identities.json'), 'utf8'));
+  assert.equal(staged.friendships.length, 0); assert.equal(staged.users[savedB.userId].declared, false);
+  assert.equal(staged.users[savedB.userId].tokenHash, undefined);
+  const room = await first.command('collab.create', { project: project() });
+  await first.command('collab.invite', { sessionId: room.sessionId, userId: savedB.userId }, false);
+  await first.command('export.offer', { userId: savedB.userId, kind: 'map', name: 'Map', size: 7, sha256: sha256('payload') }, false);
+  const second = await f.connect(savedB);
+  assert.equal(second.friends.user.userId, savedB.userId); assert.equal(second.friends.user.friendCode, savedB.friendCode);
+  assert.equal(second.friends.friends[0].online, true);
+  assert.equal((await first.command('friends.list')).friends[0].online, true);
+  await first.command('collab.invite', { sessionId: room.sessionId, userId: savedB.userId });
+  assert.equal((await second.command('collab.join', { sessionId: room.sessionId })).members.length, 2);
+  const bytes = Buffer.from('payload'), offered = await f.offer(first, second, bytes);
+  assert.equal((await fetch(f.base + '/v1/exports/' + offered.exportId, { method: 'PUT', headers: f.headers(savedA), body: bytes })).status, 200);
+  assert.equal((await fetch(f.base + '/v1/exports/' + offered.exportId, { headers: f.headers(savedB) })).status, 200);
+  await second.command('export.decide', { exportId: offered.exportId, status: 'denied' });
+});
+
+test('removed friendship receipts cannot resurrect after a wiped filesystem in either reconnection order', async t => {
+  for (const staleFirst of [true, false]) await t.test(staleFirst ? 'stale device first' : 'removing device first', async sub => {
+    const f = await fixture(sub, { identitySecret: stableSecret });
+    const a = await f.user('Remover'), b = await f.user('Offline stale device'); await f.friends(a, b);
+    await a.command('friends.list');
+    const staleB = structuredClone(b.identity), oldProofs = [...staleB.friendReceipts];
+    await b.close(); await a.command('friends.remove', { userId: b.identity.userId });
+    const currentA = structuredClone(a.identity); assert.deepEqual(currentA.friendReceipts, []);
+    await f.restart({ wipe: true });
+    let remover, stale;
+    if (staleFirst) { stale = await f.connect(staleB); assert.equal(stale.friends.friends[0].online, false); remover = await f.connect(currentA); }
+    else { remover = await f.connect(currentA); stale = await f.connect(staleB); }
+    assert.deepEqual((await remover.command('friends.list')).friends, []);
+    assert.deepEqual((await stale.command('friends.list')).friends, []);
+    assert.deepEqual(stale.identity.friendReceipts, []);
+    const room = await stale.command('collab.create', { project: project() });
+    await stale.command('collab.invite', { sessionId: room.sessionId, userId: currentA.userId }, false);
+    await stale.command('export.offer', { userId: currentA.userId, kind: 'map', name: 'Map', size: 1, sha256: sha256('a') }, false);
+    // Even presenting the revoked proof from both devices in this relay cannot undo removal.
+    await stale.close(); await remover.close();
+    stale = await f.connect(staleB, undefined, oldProofs);
+    remover = await f.connect(currentA, undefined, oldProofs);
+    assert.deepEqual((await stale.command('friends.list')).friends, []);
+    assert.deepEqual((await remover.command('friends.list')).friends, []);
+  });
+});
+
+test('receipt forgery, cross-user proofs, overlong declarations and a changed signing key fail authentication', async t => {
+  const f = await fixture(t, { identitySecret: stableSecret });
+  const a = await f.user('Alice'), b = await f.user('Bob'), outsider = await f.user('Outsider'); await f.friends(a, b);
+  await a.command('friends.list');
+  const saved = structuredClone(a.identity), receipt = saved.friendReceipts[0]; await a.close();
+  const mutated = receipt.slice(0, -1) + (receipt.endsWith('a') ? 'b' : 'a');
+  assert.match(await f.rejectedAuth(saved, [mutated]), /receipt/i);
+  assert.match(await f.rejectedAuth(outsider.identity, [receipt]), /belong/i);
+  assert.match(await f.rejectedAuth(saved, Array(257).fill(receipt)), /256/i);
+  assert.match(await f.rejectedAuth(saved, [receipt, receipt]), /duplicate/i);
+  const badDevice = saved.token.slice(0, -1) + (saved.token.endsWith('a') ? 'b' : 'a');
+  assert.match(await f.rejectedAuth(saved, [], { token: badDevice }), /credentials/i);
+  await f.restart({ wipe: true, identitySecret: 'another signing secret that cannot authenticate existing devices' });
+  assert.match(await f.rejectedAuth(saved), /credentials/i);
+});
+
+test('bilateral restore clears duplicate requests without issuing a second receipt that would lock out reconnect', async t => {
+  const f = await fixture(t, { identitySecret: stableSecret });
+  const a = await f.user('Alice'), b = await f.user('Bob'); await f.friends(a, b); await a.command('friends.list');
+  const savedA = structuredClone(a.identity), savedB = structuredClone(b.identity), proof = savedA.friendReceipts[0];
+  await f.restart({ wipe: true });
+  const first = await f.connect(savedA);
+  await first.command('friends.request', { friendCode: savedB.friendCode });
+  const second = await f.connect(savedB);
+  assert.deepEqual((await second.command('friends.list')).incoming, []);
+  await second.command('friends.accept', { userId: savedA.userId }, false);
+  assert.deepEqual(first.identity.friendReceipts, [proof]); assert.deepEqual(second.identity.friendReceipts, [proof]);
+  await first.close(); await second.close();
+  const reconnectedA = await f.connect(first.identity), reconnectedB = await f.connect(second.identity);
+  assert.equal((await reconnectedA.command('friends.list')).friends[0].online, true);
+  assert.deepEqual(reconnectedB.friends.friendReceipts, [proof]);
+});
+
+test('offline request acceptance delivers a fresh receipt on reconnect; removal clears that pending handoff', async t => {
+  const f = await fixture(t, { identitySecret: stableSecret });
+  const a = await f.user('Acceptor'), b = await f.user('Requester');
+  await b.command('friends.request', { friendCode: a.identity.friendCode }); await b.close();
+  await a.event('friends.changed', value => value.incoming.some(peer => peer.userId === b.identity.userId && !peer.online));
+  const accepted = await a.command('friends.accept', { userId: b.identity.userId });
+  assert.equal(accepted.friendReceipts.length, 1); assert.equal(accepted.friends[0].online, false);
+  assert.deepEqual(b.identity.friendReceipts, []);
+  let requester = await f.connect(b.identity);
+  assert.equal(requester.friends.friendReceipts.length, 1); assert.equal(requester.friends.friends[0].online, true);
+  await requester.command('friends.remove', { userId: a.identity.userId });
+  a.events.length = 0;
+  await requester.command('friends.request', { friendCode: a.identity.friendCode }); await requester.close();
+  // Wait until the current socket has been removed before testing deferred delivery.
+  await a.command('friends.list');
+  await a.event('friends.changed', value => value.incoming.some(peer => peer.userId === b.identity.userId && !peer.online));
+  await a.command('friends.accept', { userId: b.identity.userId });
+  await a.command('friends.remove', { userId: b.identity.userId });
+  requester = await f.connect(b.identity);
+  assert.deepEqual(requester.friends.friendReceipts, []); assert.deepEqual(requester.friends.friends, []);
+});
+
+test('relay restart aborts active uploads and never recovers offers from temporary files', async t => {
+  const f = await fixture(t, { identitySecret: stableSecret });
+  const a = await f.user('Sender'), b = await f.user('Recipient'); await f.friends(a, b);
+  const bytes = Buffer.alloc(8 * MiB, 3), offered = await f.offer(a, b, bytes);
+  let upload;
+  const failed = new Promise(resolve => {
+    upload = http.request(f.base + '/v1/exports/' + offered.exportId, { method: 'PUT', headers: { ...f.headers(a.identity), 'Content-Length': bytes.length } },
+      response => { response.resume(); response.on('close', resolve); }); upload.on('error', resolve);
+  });
+  const created = new Promise(resolve => {
+    const watcher = watch(path.join(f.dataDir, 'exports'), (type, file) => { if (file === offered.exportId + '.part') { watcher.close(); resolve(); } });
+    t.after(() => watcher.close());
+  });
+  upload.write(bytes.subarray(0, 64 * 1024)); await created;
+  await f.restart(); await failed;
+  assert.deepEqual(await readdir(path.join(f.dataDir, 'exports')), []);
+  const resumedA = await f.connect(a.identity), resumedB = await f.connect(b.identity);
+  assert.equal((await resumedA.command('friends.list')).friends[0].online, true);
+  assert.equal((await fetch(f.base + '/v1/exports/' + offered.exportId, { headers: f.headers(resumedB.identity) })).status, 404);
+  await resumedB.command('export.decide', { exportId: offered.exportId, status: 'installed' }, false);
+});
+
+test('free Render blueprint has no disk or paid dependency and requires a durable environment signing key', async t => {
+  const blueprint = await readFile(new URL('../../render.yaml', import.meta.url), 'utf8');
+  assert.match(blueprint, /plan: free/); assert.doesNotMatch(blueprint, /\bdisk:|plan: starter|databases:/);
+  assert.match(blueprint, /key: IDENTITY_SECRET\s+generateValue: true/); assert.match(blueprint, /value: \/tmp\/edmw-relay/);
+  const f = await fixture(t, { identitySecret: stableSecret }); await f.relay.close();
+  await assert.rejects(createRelay({ dataDir: f.dataDir, identitySecret: '', requireIdentitySecret: true }), /IDENTITY_SECRET is required/);
+  await assert.rejects(createRelay({ dataDir: f.dataDir, identitySecret: 'short' }), /32-1024/);
+});
+
+test('free relay bounds room memory and rejects an oversized replacement without losing the prior snapshot', async t => {
+  const f = await fixture(t, { identitySecret: stableSecret });
+  const hosts = [];
+  for (let i = 0; i < 8; i++) {
+    const host = await f.user(`Host ${i}`); hosts.push(host);
+    await host.command('collab.create', { project: project(512) });
+  }
+  const extra = await f.user('Extra host');
+  await extra.command('collab.create', { project: project() }, false);
+  await hosts[0].command('collab.leave');
+  const small = await extra.command('collab.create', { project: project() });
+  const filler = await f.user('Filler host');
+  await filler.command('collab.create', { project: project(511) });
+  await extra.command('collab.project', { sessionId: small.sessionId, baseRevision: 0, project: project(512) }, false);
+  const intact = await extra.command('collab.sync', { sessionId: small.sessionId });
+  assert.equal(intact.revision, 0); assert.equal(intact.project.gridSize, 8);
+  await filler.command('collab.leave');
+  await extra.command('collab.project', { sessionId: small.sessionId, baseRevision: 0, project: project(512) });
 });

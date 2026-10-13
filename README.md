@@ -92,7 +92,7 @@ The online features are available in source builds after the v1.0.0 release link
 
 The relay uses HTTPS/WSS, authenticates device identities, and checks accepted friendships for invitations and exports. The app protects its local credential with Windows DPAPI. Export recipients review and approve installation through the existing package validation and installation system.
 
-Deploy the included Node.js service using [render.yaml](render.yaml). A persistent disk retains identities and friendships across deployments; shared map sessions and pending offers end on disconnect or relay restart. See [online sharing and Render setup](docs/online-sharing.md) for local setup, deployment, operational limits, and verification.
+Deploy the included Node.js service on Render's **Free** plan using [render.yaml](render.yaml). It requires no persistent disk or external database. The desktop saves signed identity and friendship credentials; both friends confirm their saved approvals when reconnecting after the relay loses its temporary files. Shared map sessions and pending offers end on disconnect or relay restart. See [online sharing and Render setup](docs/online-sharing.md) for deployment, cold starts, recovery, and verification.
 
 ## LAN behavior
 
@@ -154,7 +154,7 @@ native/EDMWResourceSnapshot/ Optional diagnostic resource probe
 native/EDMWStringProbe/      Optional diagnostic string probe
 tools/                      Geography generators and native diagnostic tools
 relay/                      Node.js friends, map collaboration, and export relay
-render.yaml                 Single-instance Render service and persistent disk
+render.yaml                 Free Render service and stable signing secret
 docs/                       User guide, development notes, attribution, engineering report
 build.ps1                   Complete production build
 global.json                 SDK selection
