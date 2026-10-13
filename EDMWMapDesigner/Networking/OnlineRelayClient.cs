@@ -25,6 +25,7 @@ public sealed class OnlineRelayClient : IDisposable
     private readonly ConcurrentDictionary<Guid, TaskCompletionSource<OnlineExportResult>> _exportResults = new();
     private readonly ConcurrentDictionary<Guid, IncomingOffer> _incomingOffers = new();
     private Connection? _connection;
+    private Task _disconnectTask = Task.CompletedTask;
     private CancellationTokenSource? _connectingCancellation;
     private OnlineIdentity? _identity;
     private Uri? _endpoint;
@@ -32,6 +33,7 @@ public sealed class OnlineRelayClient : IDisposable
 
     public OnlineRelayClient(OnlinePreferences? preferences = null) => Preferences = preferences ?? OnlinePreferences.Load();
     public OnlinePreferences Preferences { get; }
+    internal string LastCloseDiagnostic { get; private set; } = "No WebSocket close attempted.";
     public bool IsConnected { get { lock (_gate) return _connection is { Authenticated: true }; } }
     public OnlineProfile? User { get; private set; }
     public OnlineFriendsSnapshot Friends { get; private set; } = new(new(Guid.Empty, "", ""), [], [], []);
@@ -53,7 +55,7 @@ public sealed class OnlineRelayClient : IDisposable
         CancellationTokenSource? connecting = null;
         try
         {
-            Disconnect();
+            await DisconnectAsync().WaitAsync(cancellationToken).ConfigureAwait(false);
             var timeout = connecting = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             lock (_gate) _connectingCancellation = timeout;
             timeout.CancelAfter(ConnectTimeout);
@@ -117,12 +119,12 @@ public sealed class OnlineRelayClient : IDisposable
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
-            if (connection is not null) EndConnection(connection, "The online relay connection timed out.");
+            if (connection is not null) _ = EndConnection(connection, "The online relay connection timed out.");
             throw new TimeoutException("The online relay did not wake and connect within 150 seconds. Try connecting again after it wakes up.");
         }
         catch
         {
-            if (connection is not null) EndConnection(connection, "Could not connect to the online relay.");
+            if (connection is not null) _ = EndConnection(connection, "Could not connect to the online relay.");
             throw;
         }
         finally
@@ -260,13 +262,17 @@ public sealed class OnlineRelayClient : IDisposable
         RemoveIncomingOffer(exportId);
     }
 
-    public void Disconnect()
+    public void Disconnect() => _ = DisconnectAsync();
+
+    /// <summary>Ends local online state immediately and awaits a bounded WebSocket close handshake.</summary>
+    public Task DisconnectAsync()
     {
         Connection? connection;
         CancellationTokenSource? connecting;
         lock (_gate) { connection = _connection; connecting = _connectingCancellation; }
         try { connecting?.Cancel(); } catch (ObjectDisposedException) { }
-        if (connection is not null) EndConnection(connection, "Disconnected from the online relay.");
+        if (connection is not null) return EndConnection(connection, "Disconnected from the online relay.");
+        lock (_gate) return _disconnectTask;
     }
 
     private async Task ReceiveLoopAsync(Connection connection)
@@ -287,6 +293,7 @@ public sealed class OnlineRelayClient : IDisposable
                         throw new InvalidDataException("The online relay sent an invalid or oversized message.");
                     data.Write(buffer, 0, received.Count);
                 } while (!received.EndOfMessage);
+                lock (_gate) if (_connection != connection) continue;
                 using var document = JsonDocument.Parse(data.ToArray(), new JsonDocumentOptions { MaxDepth = 64 });
                 HandleMessage(connection, document.RootElement);
             }
@@ -294,7 +301,11 @@ public sealed class OnlineRelayClient : IDisposable
         catch (OperationCanceledException) when (connection.Lifetime.IsCancellationRequested) { }
         catch (ObjectDisposedException) when (connection.Lifetime.IsCancellationRequested) { }
         catch (Exception error) { message = $"Online connection ended: {CleanText(error.Message, 250)}"; }
-        finally { EndConnection(connection, message); }
+        finally
+        {
+            connection.ReceiveEnded.TrySetResult(true);
+            _ = EndConnection(connection, message);
+        }
     }
 
     private void HandleMessage(Connection connection, JsonElement message)
@@ -386,35 +397,85 @@ public sealed class OnlineRelayClient : IDisposable
         FriendsChanged?.Invoke(this, snapshot);
     }
 
-    private void EndConnection(Connection connection, string message)
+    private Task EndConnection(Connection connection, string message)
     {
+        TaskCompletionSource<bool> closing;
         lock (_gate)
         {
-            if (_connection != connection) return;
+            if (_connection != connection) return connection.ClosingTask ?? Task.CompletedTask;
             _connection = null;
             connection.Authenticated = false;
+            // Reconnect must wait for local waiter/presence cleanup as well as transport closure.
+            closing = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            connection.ClosingTask = _disconnectTask = closing.Task;
         }
-        connection.Lifetime.Cancel();
-        connection.Socket.Abort();
-        connection.Socket.Dispose();
-        foreach (var pending in connection.Pending.Values) pending.Completion.TrySetException(new IOException(message));
-        connection.Pending.Clear();
-        foreach (var completion in _exportResults.Values) completion.TrySetException(new IOException(message));
-        _exportResults.Clear();
-        foreach (var offer in _incomingOffers.Keys) RemoveIncomingOffer(offer);
-        var offline = Friends with { Friends = Friends.Friends.Select(friend => friend with { Online = false }).ToArray() };
-        Friends = offline;
-        // Event consumers marshal onto the UI thread. Their failures cannot create an unobserved receive task.
-        try { Disconnected?.Invoke(this, EventArgs.Empty); } catch (Exception) { }
-        try { FriendsChanged?.Invoke(this, offline); } catch (Exception) { }
-        try { StatusChanged?.Invoke(this, message); } catch (Exception) { }
+        try
+        {
+            foreach (var pending in connection.Pending.Values) pending.Completion.TrySetException(new IOException(message));
+            connection.Pending.Clear();
+            foreach (var completion in _exportResults.Values) completion.TrySetException(new IOException(message));
+            _exportResults.Clear();
+            foreach (var offer in _incomingOffers.Keys)
+            {
+                try { RemoveIncomingOffer(offer); } catch (Exception) { }
+            }
+            var offline = Friends with { Friends = Friends.Friends.Select(friend => friend with { Online = false }).ToArray() };
+            Friends = offline;
+            // Event consumers marshal onto the UI thread. Their failures cannot create an unobserved receive task.
+            try { Disconnected?.Invoke(this, EventArgs.Empty); } catch (Exception) { }
+            try { FriendsChanged?.Invoke(this, offline); } catch (Exception) { }
+            try { StatusChanged?.Invoke(this, message); } catch (Exception) { }
+        }
+        finally
+        {
+            // Leave the receive token alive long enough to exchange close frames.
+            _ = Task.Run(() => CompleteDisconnectSafelyAsync(connection, closing));
+        }
+        return closing.Task;
+    }
+
+    private async Task CompleteDisconnectSafelyAsync(Connection connection, TaskCompletionSource<bool> completion)
+    {
+        try { await CloseSocketSafelyAsync(connection).ConfigureAwait(false); }
+        catch (Exception) { /* Transport failure must not fault the shared reconnect barrier. */ }
+        finally { completion.TrySetResult(true); }
+    }
+
+    private async Task CloseSocketSafelyAsync(Connection connection)
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        var sendLockTaken = false;
+        var completedNormally = false;
+        string? errorType = null;
+        try
+        {
+            await connection.SendLock.WaitAsync(timeout.Token).ConfigureAwait(false);
+            sendLockTaken = true;
+            if (connection.Socket.State is WebSocketState.Open or WebSocketState.CloseReceived)
+                await connection.Socket.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, "Device disconnected.", timeout.Token).ConfigureAwait(false);
+            connection.SendLock.Release();
+            sendLockTaken = false;
+            if (connection.Socket.State is WebSocketState.CloseSent or WebSocketState.CloseReceived)
+                await connection.ReceiveEnded.Task.WaitAsync(timeout.Token).ConfigureAwait(false);
+            completedNormally = connection.Socket.State == WebSocketState.Closed;
+        }
+        catch (Exception error) { errorType = error.GetType().Name; }
+        finally
+        {
+            if (sendLockTaken) connection.SendLock.Release();
+            LastCloseDiagnostic = $"state={connection.Socket.State}; closeStatus={connection.Socket.CloseStatus?.ToString() ?? "none"}; completedNormally={completedNormally}; errorType={errorType ?? "none"}";
+            try { connection.Lifetime.Cancel(); } catch (Exception) { }
+            // A completed close handshake needs normal disposal; abort is a fallback.
+            if (!completedNormally) try { connection.Socket.Abort(); } catch (Exception) { }
+            try { connection.Socket.Dispose(); } catch (Exception) { }
+        }
     }
 
     private void RemoveIncomingOffer(Guid id)
     {
         if (!_incomingOffers.TryRemove(id, out var offer)) return;
-        offer.Lifetime.Cancel();
-        offer.Lifetime.Dispose();
+        try { offer.Lifetime.Cancel(); }
+        finally { offer.Lifetime.Dispose(); }
     }
 
     private Connection RequireConnection()
@@ -565,6 +626,8 @@ public sealed class OnlineRelayClient : IDisposable
         public CancellationTokenSource Lifetime { get; } = new();
         public SemaphoreSlim SendLock { get; } = new(1, 1);
         public ConcurrentDictionary<Guid, PendingRequest> Pending { get; } = new();
+        public TaskCompletionSource<bool> ReceiveEnded { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public Task? ClosingTask { get; set; }
         public bool Authenticated { get; set; }
     }
     private sealed record PendingRequest(TaskCompletionSource<JsonElement> Completion, Action<JsonElement>? OnResponse);

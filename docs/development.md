@@ -111,6 +111,7 @@ The self-test exercises project persistence and identity, generated scripts and 
 | --- | --- |
 | `--self-test` | Core map and collaboration checks; does not require an installed game. |
 | `--verify-online <loopback-relay-url> [control-directory]` | Actual C# clients against Node: authentication, friendship permissions, map invitations, map masks, simultaneous edits, cursors, export decisions, reconnect, and revocation. The isolated runner supplies a control directory to verify identity/contact recovery across complete filesystem replacements. Does not install game data. |
+| `--verify-online-live <https-relay-url> <output-folder>` | Explicit public-relay check using three temporary profiles: friends, 512 by 512 map synchronization, valid map/civilization archive transfer and decoding, integrity failures, cancellation, disconnect, reconnect and revocation. Reports cleanup and PASS/FAIL; does not install game data or restart the relay. |
 | `--verify-online-ui <output-folder>` | Offscreen Friends and recipient picker layout, toolbar availability, and pending local stroke preservation across acknowledgements; no network connection or account changes. |
 | `--verify-civilization-navigation` | Catalog selection shortcuts, paging, and resizing; does not require an installed game. |
 | `--verify-stock-profiles <stock-scripts-folder>` | Original map-template/resource policy import across 13 profiles, five sizes, and 2–8-player branches. |
@@ -137,6 +138,8 @@ The civilization installer also provides `--verify-layout <game-folder>` and `--
 These checks do not replace in-game visual inspection or a real multiplayer session with matching installed gameplay data.
 
 For the Node relay, run `npm ci` and `npm test` inside `relay`. The tests use temporary storage and local listeners. For desktop/relay compatibility, run `tools/Verify-Online.ps1` from the repository root after generating the embedded resources with `build.ps1`. It starts `tools/OnlineVerificationRelay.mjs` on loopback, builds the editor, runs `--verify-online`, replaces the relay's filesystem twice while retaining its signing secret, and stops the relay. The restart control files exist only in this local verification runner; production exposes no reset endpoint. Test identities and output stay under ignored `.verification`. Document results with the GitHub change; exclude credentials, relay data, game fixtures, and generated executables.
+
+For an explicitly selected deployed relay, run `tools/Verify-LiveOnline.ps1 -Endpoint https://<service-name>.onrender.com`. It builds the editor, starts the desktop check with hidden process windows, writes a unique `.verification/live-online-*` directory, and limits execution to four minutes. `-SkipBuild` reuses an existing Release assembly. The independent Node check is `node tools/Verify-LiveRelay.mjs https://<service-name>.onrender.com .verification/live-relay/node-report.json`; it bounds application traffic to 256 KiB and waits up to 150 seconds for Render readiness. These checks create named test profiles, remove their friendship, and disconnect them. Offline identity records remain because the protocol has no account-delete operation. See the [live relay verification record](live-relay-verification.md) for results and coverage limits.
 
 ## Maintenance and evidence commands
 

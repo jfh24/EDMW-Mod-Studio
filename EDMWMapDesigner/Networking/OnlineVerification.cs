@@ -2,34 +2,69 @@ using System.Threading.Channels;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
+using System.Text.Json;
 using EDMWMapDesigner.Collaboration;
+using EDMWMapDesigner.Civilizations;
+using EDMWMapDesigner.Generation;
 using EDMWMapDesigner.Models;
 
 namespace EDMWMapDesigner.Networking;
 
-/// <summary>Exercises the desktop protocol against an isolated local Node relay.</summary>
+/// <summary>Exercises the desktop protocol with isolated clients and bounded traffic.</summary>
 internal static class OnlineVerification
 {
-    public static async Task RunAsync(string endpoint, string? restartControlDirectory = null)
+    public static Task RunAsync(string endpoint, string? restartControlDirectory = null) =>
+        RunCoreAsync(endpoint, restartControlDirectory, false, null);
+
+    public static Task RunLiveAsync(string endpoint, string outputDirectory) =>
+        RunCoreAsync(endpoint, null, true, outputDirectory);
+
+    private static async Task RunCoreAsync(string endpoint, string? restartControlDirectory,
+        bool live, string? outputDirectory)
     {
-        if (!Uri.TryCreate(endpoint, UriKind.Absolute, out var uri) || !uri.IsLoopback)
-            throw new ArgumentException("Online verification requires an isolated loopback relay.");
-        await VerifyColdStartAsync();
+        if (!Uri.TryCreate(endpoint, UriKind.Absolute, out var uri) ||
+            (live ? uri.Scheme != Uri.UriSchemeHttps || uri.IsLoopback : !uri.IsLoopback))
+            throw new ArgumentException(live ? "Live verification requires the explicitly selected HTTPS relay." : "Online verification requires an isolated loopback relay.");
+        if (live) Directory.CreateDirectory(Path.GetFullPath(outputDirectory!));
+        else await VerifyColdStartAsync();
+        var started = DateTimeOffset.UtcNow;
+        var prefix = live ? $"Live test {Guid.NewGuid().ToString("N")[..8]}" : "Verification";
+        var checks = new List<string>();
+        var cleanupChecks = new List<string>();
+        var mapArchiveBytes = 0;
+        var civilizationArchiveBytes = 0;
+        double? recipientDisconnectSeconds = null;
+        Exception? failure = null;
+        var completed = false;
+        var reportPath = live ? Path.Combine(Path.GetFullPath(outputDirectory!), "desktop-live-report.json") : null;
+        if (live) await File.WriteAllTextAsync(reportPath!, JsonSerializer.Serialize(new
+        { relay = uri.AbsoluteUri, startedAtUtc = started, outcome = "RUNNING", profilePrefix = prefix }));
         using var hostClient = new OnlineRelayClient(new OnlinePreferences { PersistIdentity = false });
         using var friendClient = new OnlineRelayClient(new OnlinePreferences { PersistIdentity = false });
         using var strangerClient = new OnlineRelayClient(new OnlinePreferences { PersistIdentity = false });
-        await hostClient.ConnectAsync(endpoint, "Verification host");
-        await friendClient.ConnectAsync(endpoint, "Verification friend");
-        await strangerClient.ConnectAsync(endpoint, "Verification stranger");
-        var hostId = hostClient.User!.UserId;
-        var friendId = friendClient.User!.UserId;
-        var hostCode = hostClient.User.FriendCode;
-        var friendCode = friendClient.User.FriendCode;
+        var hostId = Guid.Empty;
+        var friendId = Guid.Empty;
+        var hostCode = "";
+        var friendCode = "";
+        try
+        {
+        await hostClient.ConnectAsync(endpoint, prefix + " host");
+        await friendClient.ConnectAsync(endpoint, prefix + " friend");
+        await strangerClient.ConnectAsync(endpoint, prefix + " stranger");
+        checks.Add("HTTPS and WSS authentication for three isolated device profiles");
+        hostId = hostClient.User!.UserId;
+        friendId = friendClient.User!.UserId;
+        hostCode = hostClient.User.FriendCode;
+        friendCode = friendClient.User.FriendCode;
         await ExpectRejectedAsync(() => strangerClient.SendExportAsync(hostId, "map", "Unsolicited", [1, 2, 3]));
         await hostClient.RequestFriendAsync(friendClient.User.FriendCode);
         await WaitUntilAsync(() => friendClient.Friends.Incoming.Any(profile => profile.UserId == hostId));
         await friendClient.AcceptFriendAsync(hostId);
         await WaitUntilAsync(() => hostClient.Friends.Friends.Any(profile => profile.UserId == friendId && profile.Online));
+        await WaitUntilAsync(() => hostClient.Friends.FriendReceipts.Length == 1 && friendClient.Friends.FriendReceipts.Length == 1);
+        var receipt = hostClient.Friends.FriendReceipts.Single();
+        Require(friendClient.Friends.FriendReceipts.Single() == receipt, "Accepted friendship receipts differ between peers.");
+        checks.Add("Friend request, explicit acceptance, online presence, and non-friend export rejection");
 
         using var host = new OnlineCollaborationSession(hostClient);
         using var friend = new OnlineCollaborationSession(friendClient);
@@ -57,6 +92,7 @@ internal static class OnlineVerification
                 joined.ComponentRoles.SequenceEqual(baseline.ComponentRoles) &&
                 joined.ElevationMask.SequenceEqual(baseline.ElevationMask),
             "Full-sized desktop map and base64 masks did not survive joining.");
+        checks.Add("Invitation-only map join and 512 by 512 desktop project serialization");
         var hostStroke = baseline.Clone();
         hostStroke.SetCell(10, 10, TerrainKind.Hills);
         hostStroke.ElevationMask[10 * baseline.GridSize + 10] = 25;
@@ -77,6 +113,7 @@ internal static class OnlineVerification
         var canonical = await host.SynchronizeAsync();
         Require(canonical[10, 10] == TerrainKind.Hills && canonical[20, 20] == TerrainKind.Forest,
             "A stale full replacement erased accepted edits.");
+        checks.Add("Concurrent map strokes converge; stale full replacement is rejected; authoritative synchronization");
         var cursor = new TaskCompletionSource<CollaboratorCursorUpdate>(TaskCreationOptions.RunContinuationsAsynchronously);
         host.CursorReceived += (_, update) => cursor.TrySetResult(update);
         await friend.SendCursorAsync(new Point(20, 20));
@@ -88,21 +125,62 @@ internal static class OnlineVerification
         await host.SendProjectAsync(resized);
         await WaitUntilAsync(() => { lock (gate) return friendMap.GridSize == 64; });
         await ExpectRejectedAsync(() => friend.SendDeltaAsync(MapDelta.Create(baseline, friendStroke)!));
+        checks.Add("Authenticated named cursor, whole-map resize, and incompatible-grid rejection");
 
         var offers = Channel.CreateUnbounded<OnlineExportOffer>();
         friendClient.ExportOfferReceived += (_, offer) => offers.Writer.TryWrite(offer);
-        var bytes = new byte[1024 * 1024 + 37];
-        Random.Shared.NextBytes(bytes);
+        var fixture = live ? MapLanVerification.CreatePackage(outputDirectory!) : null;
+        var bytes = fixture is not null ? MapLanPackageCodec.Encode(fixture) : new byte[1024 * 1024 + 37];
+        mapArchiveBytes = bytes.Length;
+        if (fixture is null) Random.Shared.NextBytes(bytes);
         var sending = hostClient.SendExportAsync(friendId, "map", "Verification payload", bytes);
         var offer = await offers.Reader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(15));
+        if (live)
+        {
+            await ExpectInvalidDownloadAsync(() => friendClient.DownloadExportAsync(offer with { Sha256 = new string('0', 64) }));
+            await ExpectInvalidDownloadAsync(() => friendClient.DownloadExportAsync(offer with { Size = offer.Size - 1 }));
+        }
         var received = await friendClient.DownloadExportAsync(offer);
         Require(received.SequenceEqual(bytes), "The downloaded export differs from the reviewed upload.");
-        await friendClient.DecideExportAsync(offer.ExportId, "installed", "Verified test bytes; no game files changed.");
+        if (fixture is not null)
+        {
+            var decoded = MapLanPackageCodec.Decode(received);
+            Require(decoded.MapId == fixture.MapId && decoded.PreviewBytes.SequenceEqual(fixture.PreviewBytes) && decoded.Files.Count == fixture.Files.Count,
+                "The actual desktop map archive did not survive live delivery and validation.");
+        }
+        await friendClient.DecideExportAsync(offer.ExportId, "installed", "Transport verification: simulated installed status; no game files changed.");
         Require((await sending.WaitAsync(TimeSpan.FromSeconds(10))).Status == "installed", "Installation status did not reach sender.");
-        var denying = hostClient.SendExportAsync(friendId, "civilization", "Denied fixture", [3, 2, 1]);
+        var civilizationFixture = live ? OnlineCivilizationFixture.CreateCodecFixture() : null;
+        var civilizationBytes = civilizationFixture is null ? new byte[] { 3, 2, 1 } : CivilizationInstallerPackageCodec.Encode(civilizationFixture);
+        civilizationArchiveBytes = civilizationBytes.Length;
+        var denying = hostClient.SendExportAsync(friendId, "civilization", "Denied fixture", civilizationBytes);
         var deniedOffer = await offers.Reader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10));
+        if (civilizationFixture is not null)
+        {
+            var civilizationReceived = await friendClient.DownloadExportAsync(deniedOffer);
+            Require(civilizationReceived.SequenceEqual(civilizationBytes), "Civilization package bytes changed in transit.");
+            var decoded = CivilizationInstallerPackageCodec.Decode(civilizationReceived);
+            Require(decoded.PackageId == civilizationFixture.PackageId && decoded.ProjectJson == civilizationFixture.ProjectJson &&
+                    decoded.Files.Single().Patches.Single().Replacement.SequenceEqual(civilizationFixture.Files.Single().Patches.Single().Replacement),
+                "The actual civilization package did not survive live delivery and validation.");
+        }
         await friendClient.DecideExportAsync(deniedOffer.ExportId, "denied", "Recipient declined.");
         Require((await denying.WaitAsync(TimeSpan.FromSeconds(10))).Status == "denied", "Denial did not reach sender.");
+        checks.Add(fixture is null ? "Export byte/hash delivery and recipient decision propagation" :
+            $"Valid desktop map ({bytes.Length} bytes) and civilization ({civilizationBytes.Length} bytes) archives survive download and codec validation; incorrect SHA-256 and size are rejected; simulated installed and denied statuses propagate");
+
+        if (live)
+        {
+            using var earlyWithdrawal = new CancellationTokenSource();
+            var earlySending = hostClient.SendExportAsync(friendId, "map", "Cancelled before upload", [6, 5, 4],
+                progress: progress => { if (progress.Status == CivilizationLanStatus.Submitted) earlyWithdrawal.Cancel(); },
+                cancellationToken: earlyWithdrawal.Token);
+            try { await earlySending.WaitAsync(TimeSpan.FromSeconds(10)); throw new InvalidOperationException("Early cancellation reported success."); }
+            catch (OperationCanceledException) when (earlyWithdrawal.IsCancellationRequested) { }
+            await hostClient.RefreshFriendsAsync();
+            Require(hostClient.IsConnected && !offers.Reader.TryRead(out _), "Pre-upload cancellation disconnected the client or produced a ready offer.");
+            checks.Add("Cancellation before HTTP upload withdraws the offer and keeps the authenticated client usable");
+        }
 
         using var withdrawal = new CancellationTokenSource();
         var withdrawing = hostClient.SendExportAsync(friendId, "map", "Withdrawn fixture", [9, 8, 7], cancellationToken: withdrawal.Token);
@@ -111,12 +189,45 @@ internal static class OnlineVerification
         try { await withdrawing.WaitAsync(TimeSpan.FromSeconds(10)); throw new InvalidOperationException("A withdrawn export reported success."); }
         catch (OperationCanceledException) { }
         await WaitUntilAsync(() => withdrawnOffer.CancellationToken.IsCancellationRequested);
+        checks.Add("Sender withdrawal cancels the recipient's pending offer");
 
         hostClient.Disconnect();
         await WaitUntilAsync(() => !friend.IsConnected);
-        await hostClient.ConnectAsync(endpoint, "Verification host reconnected");
-        Require(hostClient.User!.UserId == hostId && hostClient.Friends.Friends.Any(profile => profile.UserId == friendId),
+        await hostClient.ConnectAsync(endpoint, prefix + " host reconnected");
+        Require(hostClient.User!.UserId == hostId && hostClient.User.FriendCode == hostCode &&
+                hostClient.Friends.FriendReceipts.Single() == receipt && hostClient.Friends.Friends.Any(profile => profile.UserId == friendId),
             "Reconnect lost the device identity or accepted friendship.");
+        checks.Add("Host disconnect ends the room; reconnect retains device identity and accepted contact");
+        if (live)
+        {
+            var uploadAcknowledged = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var interrupted = hostClient.SendExportAsync(friendId, "map", "Disconnected recipient", [4, 3, 2], progress: progress =>
+            {
+                Console.WriteLine($"LIVE RECIPIENT-DISCONNECT: sender {progress.Status} at {DateTimeOffset.UtcNow:O}");
+                if (progress.Status == CivilizationLanStatus.Awaiting) uploadAcknowledged.TrySetResult();
+            });
+            var interruptedOffer = await offers.Reader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10));
+            await uploadAcknowledged.Task.WaitAsync(TimeSpan.FromSeconds(15));
+            var recipientDisconnectStarted = DateTimeOffset.UtcNow;
+            friendClient.Disconnect();
+            await friendClient.DisconnectAsync();
+            Console.WriteLine($"LIVE RECIPIENT-DISCONNECT: client close completed at {DateTimeOffset.UtcNow:O}");
+            Console.WriteLine($"LIVE RECIPIENT-DISCONNECT: {friendClient.LastCloseDiagnostic}");
+            await hostClient.RefreshFriendsAsync();
+            Console.WriteLine($"LIVE RECIPIENT-DISCONNECT: relay reports recipient online={hostClient.Friends.Friends.Single(profile => profile.UserId == friendId).Online} at {DateTimeOffset.UtcNow:O}");
+            // Hosting can acknowledge a close before relay cleanup finishes (~10 seconds observed).
+            Require((await interrupted.WaitAsync(TimeSpan.FromSeconds(20))).Status == "failed", "Recipient disconnect did not fail the pending transfer.");
+            await WaitUntilAsync(() => hostClient.Friends.Friends.Any(profile => profile.UserId == friendId && !profile.Online));
+            recipientDisconnectSeconds = (DateTimeOffset.UtcNow - recipientDisconnectStarted).TotalSeconds;
+            Require(interruptedOffer.CancellationToken.IsCancellationRequested, "Disconnect did not cancel the recipient review token.");
+            await friendClient.ConnectAsync(endpoint, prefix + " friend reconnected");
+            Require(friendClient.User!.UserId == friendId && friendClient.User.FriendCode == friendCode &&
+                    friendClient.Friends.FriendReceipts.Single() == receipt,
+                "Recipient reconnect lost its signed identity, friend code, or friendship receipt.");
+            await WaitUntilAsync(() => hostClient.Friends.Friends.Any(profile => profile.UserId == friendId && profile.Online));
+            Require(!offers.Reader.TryRead(out _), "Reconnect restored an interrupted export.");
+            checks.Add("Recipient disconnect fails pending delivery and cancels review; both peers retain signed identities, codes and receipt on reconnect");
+        }
         if (restartControlDirectory is not null)
         {
             Require(hostClient.Friends.FriendReceipts.Length == 1 && friendClient.Friends.FriendReceipts.Length == 1,
@@ -145,6 +256,7 @@ internal static class OnlineVerification
         await WaitUntilAsync(() => revokedOffer.CancellationToken.IsCancellationRequested);
         await WaitUntilAsync(() => !friendClient.Friends.Friends.Any(profile => profile.UserId == hostId));
         await ExpectRejectedAsync(() => hostClient.SendExportAsync(friendId, "map", "Revoked", [1]));
+        checks.Add("Unfriend revokes a pending export, cancels the review token, and prevents later sharing");
         if (restartControlDirectory is not null)
         {
             Require(hostClient.Friends.FriendReceipts.Length == 0 && friendClient.Friends.FriendReceipts.Length == 0,
@@ -158,8 +270,41 @@ internal static class OnlineVerification
                 "A removed friendship reappeared after the free relay lost its files.");
             await ExpectRejectedAsync(() => hostClient.SendExportAsync(friendId, "map", "Removed after reset", [1]));
         }
-        Console.WriteLine("ONLINE PASS: cold-start 503/HTML readiness and cancellation, desktop/Node authentication, friendship ACL, invitation-only rooms, 512-cell grid serialization, concurrent strokes, cursors, resize, bounded export bytes and approval status, reconnect and revocation" +
+        completed = true;
+        if (!live) Console.WriteLine("ONLINE PASS: cold-start 503/HTML readiness and cancellation, desktop/Node authentication, friendship ACL, invitation-only rooms, 512-cell grid serialization, concurrent strokes, cursors, resize, bounded export bytes and approval status, reconnect and revocation" +
             (restartControlDirectory is null ? "." : "; free-service identity/contact recovery across two complete filesystem replacements."));
+        }
+        catch (Exception error) { failure = error; throw; }
+        finally
+        {
+            if (live)
+            {
+                using var cleanup = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+                try
+                {
+                    if (hostClient.IsConnected && hostClient.Friends.Friends.Any(profile => profile.UserId == friendId))
+                        await hostClient.RemoveFriendAsync(friendId, cleanup.Token);
+                    else if (friendClient.IsConnected && friendClient.Friends.Friends.Any(profile => profile.UserId == hostId))
+                        await friendClient.RemoveFriendAsync(hostId, cleanup.Token);
+                    Require((!hostClient.IsConnected || !hostClient.Friends.Friends.Any(profile => profile.UserId == friendId)) &&
+                            (!friendClient.IsConnected || !friendClient.Friends.Friends.Any(profile => profile.UserId == hostId)), "Test friendship cleanup was not confirmed.");
+                    cleanupChecks.Add("Test friendship removal confirmed by connected clients");
+                }
+                catch (Exception error) { failure ??= error; cleanupChecks.Add("Friendship cleanup could not be confirmed"); }
+                await Task.WhenAll(hostClient.DisconnectAsync(), friendClient.DisconnectAsync(), strangerClient.DisconnectAsync());
+                cleanupChecks.Add("All three test clients cleared local online state and completed bounded WebSocket closure");
+                var outcome = completed && failure is null ? "PASS" : "FAIL";
+                var report = new { relay = OnlineRelayClient.NormalizeEndpoint(endpoint).AbsoluteUri, startedAtUtc = started,
+                    completedAtUtc = DateTimeOffset.UtcNow, outcome, profilePrefix = prefix, checks, cleanup = cleanupChecks,
+                    mapArchiveBytes, civilizationArchiveBytes, recipientDisconnectSeconds, gameFilesChanged = false, failureType = failure?.GetType().Name,
+                    limitations = new[] { "Recipient installed status was simulated; no game installation was performed.",
+                        "Production service restart, idle spin-down, expiry waits, capacity limits and stress were not exercised.",
+                        "Offline identity records remain until the service loses its cache; there is no account-delete endpoint." } };
+                await File.WriteAllTextAsync(reportPath!, JsonSerializer.Serialize(report, new JsonSerializerOptions { WriteIndented = true }));
+                if (completed && failure is not null) throw new InvalidOperationException("Live test cleanup failed; see the verification report.", failure);
+                if (outcome == "PASS") Console.WriteLine("LIVE DESKTOP PASS: " + string.Join("; ", checks));
+            }
+        }
     }
 
     private static async Task WaitUntilAsync(Func<bool> condition)
@@ -181,7 +326,12 @@ internal static class OnlineVerification
         var request = Guid.NewGuid().ToString("D");
         await File.WriteAllTextAsync(Path.Combine(control, "restart.request"), request);
         var ready = Path.Combine(control, "restart.done");
-        await WaitUntilAsync(() => File.Exists(ready) && File.ReadAllText(ready).Trim() == request);
+        await WaitUntilAsync(() =>
+        {
+            // The local Node runner may still hold its completion file open when Windows observes it.
+            try { return File.Exists(ready) && File.ReadAllText(ready).Trim() == request; }
+            catch (IOException) { return false; }
+        });
     }
 
     private static async Task VerifyColdStartAsync()
@@ -292,6 +442,13 @@ internal static class OnlineVerification
         catch (Exception error) when (error is InvalidOperationException or InvalidDataException or UnauthorizedAccessException)
         { return; }
         throw new InvalidOperationException("The relay accepted an unauthorized or incompatible operation.");
+    }
+
+    private static async Task ExpectInvalidDownloadAsync(Func<Task<byte[]>> action)
+    {
+        try { _ = await action().WaitAsync(TimeSpan.FromSeconds(15)); }
+        catch (InvalidDataException) { return; }
+        throw new InvalidOperationException("The desktop accepted an export with incorrect integrity metadata.");
     }
 
     private static void Require(bool condition, string message)

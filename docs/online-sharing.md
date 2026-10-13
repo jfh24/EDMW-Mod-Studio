@@ -19,7 +19,7 @@ $env:RELAY_DATA_DIR = Join-Path (Get-Location) 'data'
 npm start
 ```
 
-Connect the desktop to `http://localhost:10000`. Plain HTTP/WS is permitted only for loopback development; use HTTPS for a remote relay. Local identities and relationships live in the data directory, which is ignored by Git. Stop the server with Ctrl+C. Do not point verification clients at a production relay.
+Connect the desktop to `http://localhost:10000`. Plain HTTP/WS is permitted only for loopback development; use HTTPS for a remote relay. Local identities and relationships live in the data directory, which is ignored by Git. Stop the server with Ctrl+C. The local verification runner is restricted to loopback; use the separate bounded live runners only against an explicitly selected public service.
 
 ## Deploy to Render
 
@@ -78,10 +78,19 @@ Run desktop/relay compatibility from the repository root after the embedded nati
 .\tools\Verify-Online.ps1
 ```
 
-This starts a local isolated relay and three real desktop protocol clients, checks friendship permissions, map invitation access, a 512 by 512 map, concurrent strokes, cursors, resize, package delivery and decision status, reconnect, and friendship removal. It also replaces the relay filesystem twice while retaining its signing secret, verifying stable device IDs/codes, bilateral contact recovery, and continued removal. It does not install packages or change game files. Logs stay in `.verification`; the runner stops the test server. Actual in-game installation and internet behavior still require validation with two deployed clients.
+This starts a local isolated relay and three real desktop protocol clients, checks friendship permissions, map invitation access, a 512 by 512 map, concurrent strokes, cursors, resize, package delivery and decision status, reconnect, and friendship removal. It also replaces the relay filesystem twice while retaining its signing secret, verifying stable device IDs/codes, bilateral contact recovery, and continued removal. It does not install packages or change game files. Logs stay in `.verification`; the runner stops the test server.
+
+For a deployed service, run these separate checks from the repository root:
+
+```powershell
+node tools/Verify-LiveRelay.mjs https://edmw-mod-studio.onrender.com .verification/live-relay/node-report.json
+.\tools\Verify-LiveOnline.ps1 -Endpoint https://edmw-mod-studio.onrender.com
+```
+
+Use the URL of the relay you intend to test. The Node runner verifies HTTP/WSS permissions, ordered edits, malformed-delta rejection, byte integrity, export decisions, cancellation and reconnect. The desktop runner adds actual C# serialization and valid map/civilization package codec checks. Both use temporary named profiles and clean up their own friendships, rooms and transfers. Credentials stay in memory; reports contain no tokens or friendship receipts. Neither runner restarts the service or installs game files. They simulate the `installed` acknowledgement to verify status delivery. A real two-machine UI and in-game installation check remains separate.
 
 Include these documentation files and verification results in the GitHub change. Mention the Free service with no disk/database, stable signing secret, desktop receipt recovery, cold-start handling, both export types, and transient sessions/requests. Do not commit signing secrets, production tokens, protected preferences, relay caches, downloaded game data, or generated executables.
 
-The relay suite covers free-service filesystem loss, stable signed identities, bilateral restore, removed-friend replay, tampered credentials/receipts, and the existing map/export behavior. The desktop integration checks the same recovery flow across the actual C#/Node protocol. A production Render deployment and two-client internet/game installation check remain to be performed.
+The relay suite covers free-service filesystem loss, stable signed identities, bilateral restore, removed-friend replay, tampered credentials/receipts, and the existing map/export behavior. The desktop integration checks the same recovery flow across the actual C#/Node protocol. Deployed-service results and remaining coverage are recorded in [live relay verification](live-relay-verification.md).
 
 Validation for the Free-plan change: all 21 relay tests passed; Release compilation succeeded with no warnings or errors; the desktop/Node integration passed across two complete filesystem replacements and checked wake-up 503/HTML responses plus cancellation. No Render resources or paid services were created by these checks.

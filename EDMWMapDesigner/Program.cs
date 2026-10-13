@@ -13,6 +13,19 @@ internal static class Program
     [STAThread]
     private static int Main(string[] args)
     {
+        if (args.Length == 3 && args[0].Equals("--verify-online-live", StringComparison.OrdinalIgnoreCase))
+        {
+            try
+            {
+                Networking.OnlineVerification.RunLiveAsync(args[1], args[2]).GetAwaiter().GetResult();
+                return 0;
+            }
+            catch (Exception error)
+            {
+                Console.Error.WriteLine("LIVE ONLINE FAIL: " + error);
+                return 1;
+            }
+        }
         if (args.Length == 2 && args[0].Equals("--verify-online-ui", StringComparison.OrdinalIgnoreCase))
         {
             try

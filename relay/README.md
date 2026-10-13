@@ -19,6 +19,11 @@ npm start
 Connect the desktop's **Friends > Relay URL** to `http://localhost:10000`.
 Use HTTPS/WSS for public deployments. Health check: `GET /health`.
 
+The bounded public-service checks are `tools/Verify-LiveRelay.mjs` and
+`tools/Verify-LiveOnline.ps1` in the repository root. See the
+[verification instructions](../docs/online-sharing.md#verification-and-github-documentation)
+and [deployed relay test record](../docs/live-relay-verification.md).
+
 ## Deploy on Render
 
 Use the repository's root [render.yaml](../render.yaml) as a Render Blueprint.
