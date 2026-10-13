@@ -4,6 +4,10 @@
 
 The application is version **1.0.0**. It is built with C#/.NET Windows Forms and includes a native, 32-bit map generator for the game.
 
+**[Download v1.0.0 for Windows](https://github.com/jfh24/EDMW-Mod-Studio/releases/download/v1.0.0/EDMW.Mod.Studio.exe)** · [Release notes and assets](https://github.com/jfh24/EDMW-Mod-Studio/releases/tag/v1.0.0)
+
+The source repository does not include the compiled executable. Download it from the release or build it locally using the instructions below.
+
 ## Features
 
 - **Map design:** paint terrain, elevation, cliffs, ramps, forests, resources, wildlife, fish, and player starts for lobby slots 1–8.
@@ -18,15 +22,31 @@ The application is version **1.0.0**. It is built with C#/.NET Windows Forms and
 
 See the [user guide](docs/user-guide.md) for controls and detailed workflows.
 
+## Screenshots
+
+**Home:** open a workspace and manage installed maps and civilization edits.
+
+![EDMW Mod Studio Home](docs/screenshots/home.png)
+
+**Map Designer:** paint terrain, shape elevation, and place resources and player starts.
+
+![EDMW Mod Studio Map Designer](docs/screenshots/map-designer.png)
+
+**Civilization Editor:** browse game data and author supported civilization changes.
+
+![EDMW Mod Studio Civilization Editor](docs/screenshots/civilization-editor.png)
+
 ## Run the application
 
-On 64-bit Windows 10 or later, open:
+On 64-bit Windows 10 or later, download and run [EDMW.Mod.Studio.exe](https://github.com/jfh24/EDMW-Mod-Studio/releases/download/v1.0.0/EDMW.Mod.Studio.exe). You can keep that filename or rename it to `EDMW Mod Studio.exe`.
+
+If you build from source, open:
 
 ```text
 dist\EDMW Mod Studio.exe
 ```
 
-The published executable is self-contained; the .NET SDK is needed only to build from source. Generated executables are not committed to this source repository.
+The published executable is self-contained; the .NET SDK is needed only to build from source. Generated executables are distributed as release assets rather than committed to the source repository. See [dist/README.md](dist/README.md) for the output folder details.
 
 1. Open **Settings** from the top-right toolbar and select the game folder containing `Empires_DMW.exe`.
 2. Choose **Map Designer** or **Civ Editor** from Home.
@@ -126,7 +146,7 @@ tools/                      Geography generators and native diagnostic tools
 docs/                       User guide, development notes, attribution, engineering report
 build.ps1                   Complete production build
 global.json                 SDK selection
-dist/                       Generated application output (ignored)
+dist/                       Output-folder README; generated executable is ignored
 ```
 
 The public product name is **EDMW Mod Studio**. Existing source paths, namespaces, resource identifiers, and file formats retain `EDMWMapDesigner` where needed for compatibility.
