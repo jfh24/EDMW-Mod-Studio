@@ -51,7 +51,7 @@ internal static class OnlineDialogVerification
             checks.Add("Friends is available in every workspace; maps retain direct LAN and friends export at 1200 and 1920 pixels; civilization Game offers both exports.");
         }
 
-        var preferences = new OnlinePreferences { PersistIdentity = false, Endpoint = "https://edmw-relay.onrender.com", DisplayName = "Offline layout check" };
+        var preferences = new OnlinePreferences { PersistIdentity = false, DisplayName = "Offline layout check" };
         using var client = new OnlineRelayClient(preferences);
         using (var friends = new FriendsDialog(client, preferences, () => [], () => true, () => false,
             _ => Task.CompletedTask, _ => Task.CompletedTask, () => Task.CompletedTask))

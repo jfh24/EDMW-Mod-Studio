@@ -10,8 +10,9 @@ namespace EDMWMapDesigner.Networking;
 /// <summary>Remembers relay profiles, protecting each device credential for the current Windows user.</summary>
 public sealed class OnlinePreferences
 {
+    public const string DefaultEndpoint = "https://edmw-mod-studio.onrender.com";
     private const int MaximumPreferencesBytes = 4 * 1024 * 1024;
-    public string Endpoint { get; set; } = "";
+    public string Endpoint { get; set; } = DefaultEndpoint;
     public string DisplayName { get; set; } = Environment.UserName;
     public Dictionary<string, string> ProtectedIdentities { get; set; } = new(StringComparer.Ordinal);
     [JsonIgnore] public bool PersistIdentity { get; set; } = true;
@@ -25,6 +26,7 @@ public sealed class OnlinePreferences
             if (new FileInfo(PreferencePath).Length > MaximumPreferencesBytes)
                 throw new InvalidDataException("The saved online profiles exceed the supported size limit.");
             var preferences = JsonSerializer.Deserialize<OnlinePreferences>(File.ReadAllText(PreferencePath)) ?? new();
+            if (string.IsNullOrWhiteSpace(preferences.Endpoint)) preferences.Endpoint = DefaultEndpoint;
             preferences.ProtectedIdentities ??= new(StringComparer.Ordinal);
             return preferences;
         }

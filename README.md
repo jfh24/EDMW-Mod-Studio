@@ -18,7 +18,7 @@ The source repository does not include the compiled executable. Download it from
 - **Model previews:** inspect installed models, textures, player colors, and animation clips; embed replacement `.cem` or `.obj` assets in civilization projects.
 - **LAN collaboration:** host or join a shared map with synchronized paint strokes and named live cursors.
 - **LAN export:** install an export on the sender and offer it to other running instances for recipient approval.
-- **Online friends:** exchange friend codes, accept requests, and see online presence through a Node.js relay.
+- **Online friends:** exchange friend codes, accept requests, and see online presence through the prefilled EDMW Mod Studio relay or a relay you choose.
 - **Online collaboration and export:** invite accepted friends to edit maps, or send map and civilization exports for recipient approval. Includes a Render deployment blueprint.
 - **Installed content:** review and uninstall tracked maps and civilization packages from Home.
 
@@ -88,11 +88,11 @@ See [development and verification](docs/development.md) for build details, exist
 
 ## Online sharing in source builds
 
-The online features are available in source builds after the v1.0.0 release linked above. Open **Friends**, enter the relay's `https://<service-name>.onrender.com` URL and your display name, and choose **Connect**. Exchange friend codes and accept a request before inviting a friend into a shared map or choosing **Export to friends**. Both users must connect to the same relay and run matching application builds. LAN features remain available independently.
+The online features are available in source builds after the v1.0.0 release linked above. Open **Friends**, enter your display name, and choose **Connect**. **Relay URL** is prefilled with [the EDMW Mod Studio relay](https://edmw-mod-studio.onrender.com), so its address needs no manual entry. You can edit **Relay URL** to use another service; saved custom URLs are retained. Exchange friend codes and accept a request before inviting a friend into a shared map or choosing **Export to friends**. Both users must connect to the same relay and run matching application builds. LAN features remain available independently.
 
-The relay uses HTTPS/WSS, authenticates device identities, and checks accepted friendships for invitations and exports. The app protects its local credential with Windows DPAPI. Export recipients review and approve installation through the existing package validation and installation system.
+The relay uses HTTPS/WSS, authenticates device identities, and checks accepted friendships for invitations and exports. The app protects its local credential with Windows DPAPI and keeps a separate identity for each relay endpoint. Export recipients review and approve installation through the existing package validation and installation system.
 
-Deploy the included Node.js service on Render's **Free** plan using [render.yaml](render.yaml). It requires no persistent disk or external database. The desktop saves signed identity and friendship credentials; both friends confirm their saved approvals when reconnecting after the relay loses its temporary files. Shared map sessions and pending offers end on disconnect or relay restart. See [online sharing and Render setup](docs/online-sharing.md) for deployment, cold starts, recovery, and verification.
+To host your own relay, deploy the included Node.js service on Render's **Free** plan using [render.yaml](render.yaml). It requires no persistent disk or external database. The desktop saves signed identity and friendship credentials; both friends confirm their saved approvals when reconnecting after the relay loses its temporary files. Shared map sessions and pending offers end on disconnect or relay restart. See [online sharing and Render setup](docs/online-sharing.md) for deployment, cold starts, recovery, and verification.
 
 ## LAN behavior
 

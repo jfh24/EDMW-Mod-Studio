@@ -2,9 +2,11 @@
 
 The source build adds a friends system and internet sharing to the Windows application. The release tagged v1.0.0 predates these changes. Both players need matching builds, the same relay URL, and a valid local game installation for exports. Shared map editing itself does not require the game to be installed.
 
-Open **Friends**, enter the relay URL and a display name, then choose **Connect**. Exchange the generated friend codes, send a request, and have the recipient accept it. Accepted friends can invite each other into a shared map and send exports. Incoming requests and invitations require a deliberate acceptance. A display name is editable; the relay authenticates the underlying device identity.
+Open **Friends**, enter a display name, then choose **Connect**. **Relay URL** is prefilled with [the EDMW Mod Studio relay](https://edmw-mod-studio.onrender.com), so users of that service need not enter an address. You can edit **Relay URL** to connect to a different service; the app retains saved custom URLs. Exchange the generated friend codes, send a request, and have the recipient accept it. Accepted friends can invite each other into a shared map and send exports. Incoming requests and invitations require a deliberate acceptance. A display name is editable; the relay authenticates the underlying device identity.
 
 The [user guide](user-guide.md#friends-and-online-sharing) describes the controls. [The protocol](online-protocol.md) specifies the desktop/server contract.
+
+New profiles and older saved profiles with a blank relay URL use the built-in default. Existing custom URLs are preserved. Disconnect before editing the URL; connecting successfully saves the selected relay for later use.
 
 ## Run the relay locally
 
@@ -19,23 +21,23 @@ $env:RELAY_DATA_DIR = Join-Path (Get-Location) 'data'
 npm start
 ```
 
-Connect the desktop to `http://localhost:10000`. Plain HTTP/WS is permitted only for loopback development; use HTTPS for a remote relay. Local identities and relationships live in the data directory, which is ignored by Git. Stop the server with Ctrl+C. The local verification runner is restricted to loopback; use the separate bounded live runners only against an explicitly selected public service.
+In **Friends**, override **Relay URL** with `http://localhost:10000` to connect to the local service. Plain HTTP/WS is permitted only for loopback development; use HTTPS for a remote relay. Local identities and relationships live in the data directory, which is ignored by Git. Stop the server with Ctrl+C. The local verification runner is restricted to loopback; use the separate bounded live runners only against an explicitly selected public service.
 
 ## Deploy to Render
 
-The repository includes [render.yaml](../render.yaml). Commit the desktop sources, relay sources and lockfile, deployment blueprint, and documentation together to GitHub. Keep relay data and Windows credentials out of the commit.
+The default public relay is `https://edmw-mod-studio.onrender.com`. To deploy a separate relay, use the repository's [render.yaml](../render.yaml). Commit the desktop sources, relay sources and lockfile, deployment blueprint, and documentation together to GitHub. Keep relay data and Windows credentials out of the commit.
 
 1. In the [Render dashboard](https://dashboard.render.com), create a **Blueprint** from this repository and the branch containing these changes.
 2. Confirm the Node web service uses the **Free** instance type. The blueprint provisions no disk, database, or paid service. It generates `IDENTITY_SECRET` as an environment variable. Keep that value unchanged across deployments; it verifies saved desktop identities and friend approvals.
 3. Deploy the blueprint. The service's root directory is `relay`, build command is `npm ci --omit=dev`, and start command is `npm start`. It binds `0.0.0.0` on Render's supplied `PORT`. The health endpoint is `/health`. Render routes HTTP and WebSockets through the same public listener. [Render web services](https://render.com/docs/web-services), [Render WebSockets](https://render.com/docs/websocket).
-4. Copy the service's actual `https://<service-name>.onrender.com` URL from Render into **Friends > Relay URL** on each desktop. The client derives the secure `/ws` URL automatically.
+4. If using your own service, copy its actual `https://<service-name>.onrender.com` URL from Render into **Friends > Relay URL** on each desktop. The app keeps this custom URL for later use and derives the secure `/ws` URL automatically. Users of `https://edmw-mod-studio.onrender.com` can use the prefilled default.
 5. Connect two matching builds, exchange friend codes, accept the request, and test a map invitation and a small export. Each export recipient must explicitly approve installation.
 
 For manual service creation, choose **Free**, Node 24, root directory `relay`, build `npm ci --omit=dev`, start `npm start`, and health check `/health`. Set `RELAY_DATA_DIR=/tmp/edmw-relay` and add a private `IDENTITY_SECRET` containing at least 32 random bytes encoded as base64. One way to generate it locally is `node -e "console.log(require('node:crypto').randomBytes(32).toString('base64'))"`; put the resulting value into Render's Environment settings, not GitHub. Run exactly one instance and attach no disk. The Blueprint generates the secret automatically and keeps an existing value on updates. [Render secret generation](https://render.com/docs/blueprint-spec#generating-random-secrets).
 
 Free services sleep after 15 minutes without inbound traffic. Waking takes about a minute, and sleeping, restarting, or redeploying discards local files. The desktop waits for a valid health response before authentication, with a cancellable 150-second connection deadline. Free workspace usage allowances still apply. [Render's free-service documentation](https://render.com/docs/free).
 
-The service name in the blueprint is a deployment default; the URL is assigned by Render. The code does not assume a particular public hostname. Deployment credentials and a provisioned Render service are not part of the repository.
+The desktop defaults to `https://edmw-mod-studio.onrender.com`; the relay server remains portable and supports other public hostnames. Render assigns each deployed service its actual URL. Saved custom desktop URLs override the default, and device credentials and friendship receipts remain scoped to their relay endpoint. Deployment credentials are not part of the repository.
 
 ## Identity and access
 
@@ -94,3 +96,5 @@ Include these documentation files and verification results in the GitHub change.
 The relay suite covers free-service filesystem loss, stable signed identities, bilateral restore, removed-friend replay, tampered credentials/receipts, and the existing map/export behavior. The desktop integration checks the same recovery flow across the actual C#/Node protocol. Deployed-service results and remaining coverage are recorded in [live relay verification](live-relay-verification.md).
 
 Validation for the Free-plan change: all 21 relay tests passed; Release compilation succeeded with no warnings or errors; the desktop/Node integration passed across two complete filesystem replacements and checked wake-up 503/HTML responses plus cancellation. No Render resources or paid services were created by these checks.
+
+Validation for the default relay update (2026-10-13): Release compilation passed with no warnings or errors, and the existing online UI verification passed. The Friends capture shows `https://edmw-mod-studio.onrender.com` prefilled in the editable relay field.

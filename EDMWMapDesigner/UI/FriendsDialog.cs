@@ -65,7 +65,7 @@ internal sealed class FriendsDialog : Form
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 38));
 
-        _endpoint = new TextBox { Dock = DockStyle.Fill, MaxLength = 2048, Text = preferences.Endpoint, PlaceholderText = "https://your-relay.onrender.com", AccessibleName = "Relay HTTPS URL" };
+        _endpoint = new TextBox { Dock = DockStyle.Fill, MaxLength = 2048, Text = preferences.Endpoint, PlaceholderText = OnlinePreferences.DefaultEndpoint, AccessibleName = "Relay HTTPS URL" };
         _displayName = new TextBox { Dock = DockStyle.Fill, MaxLength = 64, Text = preferences.DisplayName, AccessibleName = "Online display name" };
         layout.Controls.Add(LabeledInput("Relay URL", _endpoint), 0, 0);
         _connect = MakeButton("Connect", () => RunAsync(async () =>
