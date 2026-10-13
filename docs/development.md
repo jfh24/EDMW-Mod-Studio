@@ -35,12 +35,14 @@ Use the full build after native or shared installer-domain changes. A standalone
 | `EDMWMapDesigner/Generation` | Random and seeded terrain, original stock-template import, RMV generation, native sidecars, map packages, installation helpers, and map LAN transfer. |
 | `EDMWMapDesigner/Civilizations` | Civilization project/history/schema, original game catalog and asset reading, verified native bindings, model decoding, package review, installation, rollback, and ownership. |
 | `EDMWMapDesigner/Collaboration` | Host-ordered map deltas, project synchronization, collaborator presence, and cursors. |
-| `EDMWMapDesigner/Networking` | Shared bounded package transport and discovery for civilization and map exports. |
+| `EDMWMapDesigner/Networking` | Shared LAN package transport, online relay client, friends models, protected device preferences, and desktop/relay verification. |
 | `EDMWMapDesigner/UI` | Home, both workspaces, canvas, themed controls, model viewport, review dialogs, and existing verification entry points. |
 | `EDMWMapDesigner/Assets` | Embedded art and retained, attributed geography sources for offline mask regeneration. |
 | `EDMWMultiplayerInstaller` | Map package executable template, package integrity checks, and installation UI. |
 | `EDMWCivilizationInstaller` | Civilization package executable template and UI; links the editor's package and game-installation domain code. |
 | `native/EDMWAnchored` | Game-facing generator exports, stock generator integration, authored terrain/elevation/marker behavior, and resource alignment. |
+| `relay` | Node.js HTTP/WebSocket service for authenticated identities, accepted friendships, map sessions, and temporary export delivery. |
+| `render.yaml` | Render deployment blueprint with one Node service and durable identity storage. |
 
 The legacy `EDMWMapDesigner` directory and namespace are intentional. The rebrand changes the public product and executable name while retaining resource identities, persisted formats, and existing project paths.
 
@@ -57,6 +59,14 @@ The editor reads game database records, localized names, producer and prerequisi
 Export reviews supported targets and creates a verified package. Installation tracks ownership and backups; uninstall checks owned bytes before restoring them. Different, nonoverlapping fields can be independently owned. Overlapping edits or model replacements must have their owning package removed first. Some progression operations own entire affected tables, so their conflict scope is broader than an individual field.
 
 The LAN recipient rebuilds its review using local game data. Received packages are installed through the package system rather than by executing a received installer.
+
+### Online friends and sharing
+
+The desktop authenticates a device identity over HTTPS/WSS and stores its credential using Windows DPAPI. Friends require a request and acceptance. The relay controls presence, invitation and export access, room membership, and ordered map revisions. Online map editing uses the existing `MapDelta` and `MapProject` formats. Public connections require TLS; unencrypted loopback endpoints are available for local verification.
+
+Online exports reuse map archives and `CivilizationInstallerPackageCodec` payloads. The relay checks upload length and SHA-256, permits downloads only by the intended accepted friend, and forwards recipient decisions. The desktop then applies the existing package validation, review, and tracked installation flow. Received installer executables are never run. Friends and identities are durable; rooms and package offers are transient.
+
+See [online setup and operations](online-sharing.md) and [the wire protocol](online-protocol.md). The relay is a separate service and is not embedded in the Windows executable. Source builds include the online feature; the existing v1.0.0 release does not.
 
 ## Game compatibility
 
@@ -100,6 +110,8 @@ The self-test exercises project persistence and identity, generated scripts and 
 | Switch and arguments | Coverage / output |
 | --- | --- |
 | `--self-test` | Core map and collaboration checks; does not require an installed game. |
+| `--verify-online <loopback-relay-url>` | Actual C# clients against Node: authentication, friendship permissions, map invitations, full-sized map masks, simultaneous edits, cursors, export bytes and decision status, reconnect, and revocation. Requires an isolated local relay; does not install game data. |
+| `--verify-online-ui <output-folder>` | Offscreen Friends and recipient picker layout, toolbar availability, and pending local stroke preservation across acknowledgements; no network connection or account changes. |
 | `--verify-civilization-navigation` | Catalog selection shortcuts, paging, and resizing; does not require an installed game. |
 | `--verify-stock-profiles <stock-scripts-folder>` | Original map-template/resource policy import across 13 profiles, five sizes, and 2–8-player branches. |
 | `--verify-map-lan <game-folder> <output-folder>` | Map export integration, preview redaction, approval and sender dialogs, and map transfer checks. |
@@ -123,6 +135,8 @@ Game-dependent fixture outputs can contain copied game data. They are local veri
 The civilization installer also provides `--verify-layout <game-folder>` and `--verify-package <game-folder>`. The latter reviews the package appended to a generated installer executable without installing it; a bare template does not contain an authored package.
 
 These checks do not replace in-game visual inspection or a real multiplayer session with matching installed gameplay data.
+
+For the Node relay, run `npm ci` and `npm test` inside `relay`. The tests use temporary storage and local listeners. For desktop/relay compatibility, run `tools/Verify-Online.ps1` from the repository root after generating the embedded resources with `build.ps1`. It starts an isolated loopback relay, builds the editor, runs `--verify-online`, and stops the relay. Test identities and output stay under the ignored `.verification` directory. Document check results and remaining limitations with the GitHub change; exclude credentials, local relay data, game fixtures, and generated executables from commits.
 
 ## Maintenance and evidence commands
 

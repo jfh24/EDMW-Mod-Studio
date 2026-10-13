@@ -2,7 +2,7 @@ using EDMWMapDesigner.Civilizations;
 
 namespace EDMWMapDesigner.UI;
 
-/// <summary>Discovers recipients and immediately offers an export to every discovered endpoint.</summary>
+/// <summary>Offers an export to the supplied recipients and shows their installation decisions.</summary>
 internal class LanExportStatusDialog : Form
 {
     private const string LocalEndpoint = "local:0";
@@ -10,6 +10,7 @@ internal class LanExportStatusDialog : Form
     private readonly Func<CivilizationLanPeer, Action<CivilizationLanProgress>, CancellationToken, Task<CivilizationLanResult>> _send;
     private readonly Func<CancellationToken, Task<CivilizationLanResult>>? _installLocal;
     private readonly bool _verificationMode;
+    private readonly bool _onlineFriends;
     private readonly CancellationTokenSource _lifetime = new();
     private readonly CancellationToken _cancellationToken;
     private readonly Label _status;
@@ -26,12 +27,14 @@ internal class LanExportStatusDialog : Form
     public LanExportStatusDialog(string title, string packageName,
         Func<CancellationToken, Task<IReadOnlyList<CivilizationLanPeer>>> discover,
         Func<CivilizationLanPeer, Action<CivilizationLanProgress>, CancellationToken, Task<CivilizationLanResult>> send,
-        bool verificationMode = false, Func<CancellationToken, Task<CivilizationLanResult>>? installLocal = null)
+        bool verificationMode = false, Func<CancellationToken, Task<CivilizationLanResult>>? installLocal = null,
+        bool onlineFriends = false)
     {
         _discover = discover ?? throw new ArgumentNullException(nameof(discover));
         _send = send ?? throw new ArgumentNullException(nameof(send));
         _installLocal = installLocal;
         _verificationMode = verificationMode;
+        _onlineFriends = onlineFriends;
         _cancellationToken = _lifetime.Token;
         Text = title;
         ClientSize = new Size(510, 280);
@@ -68,9 +71,9 @@ internal class LanExportStatusDialog : Form
             Dock = DockStyle.Fill, View = View.Details, CheckBoxes = false, FullRowSelect = true,
             MultiSelect = false, HideSelection = true, ShowItemToolTips = true,
             BackColor = MedievalTheme.Input, ForeColor = MedievalTheme.Text,
-            BorderStyle = BorderStyle.FixedSingle, AccessibleName = "LAN recipient decisions"
+            BorderStyle = BorderStyle.FixedSingle, AccessibleName = onlineFriends ? "Selected friend decisions" : "LAN recipient decisions"
         };
-        _peers.Columns.Add("Computer", 240);
+        _peers.Columns.Add(onlineFriends ? "Friend" : "Computer", 240);
         _peers.Columns.Add("Status", 200);
         MedievalDialogFrame.StyleListView(_peers);
         _peers.Resize += (_, _) => ResizeColumns();
@@ -79,7 +82,8 @@ internal class LanExportStatusDialog : Form
         {
             Dock = DockStyle.Fill, ForeColor = MedievalTheme.TextMuted,
             TextAlign = ContentAlignment.MiddleLeft, AutoEllipsis = true, Margin = Padding.Empty,
-            AccessibleName = "LAN transfer status", Text = "Searching for recipients…"
+            AccessibleName = onlineFriends ? "Online export status" : "LAN transfer status",
+            Text = onlineFriends ? "Preparing selected friends…" : "Searching for recipients…"
         };
         layout.Controls.Add(_status, 0, 2);
 
@@ -200,7 +204,8 @@ internal class LanExportStatusDialog : Form
                 recipients = _rows.Where(pair => pair.Key != LocalEndpoint).Select(pair =>
                     (Row: pair.Value, Peer: (CivilizationLanPeer)pair.Value.Tag!)).ToArray();
                 _discoveryComplete = true;
-                _discoveryMessage = recipients.Length == 0 ? "No recipients found on this LAN." : null;
+                _discoveryMessage = recipients.Length == 0
+                    ? _onlineFriends ? "No selected friends are available." : "No recipients found on this LAN." : null;
                 UpdateStatus();
             });
             if (recipients.Length == 0 || !CanUpdate) return;
@@ -277,7 +282,7 @@ internal class LanExportStatusDialog : Form
             if (!string.Equals(peer.Name, peer.Address, StringComparison.Ordinal)) existing.Text = peer.Name;
             return;
         }
-        var row = new ListViewItem(peer.Name) { Tag = peer, ToolTipText = key };
+        var row = new ListViewItem(peer.Name) { Tag = peer, ToolTipText = _onlineFriends ? peer.Name : key };
         row.SubItems.Add("Awaiting");
         _rows.Add(key, row);
         _peers.Items.Add(row);
@@ -302,7 +307,7 @@ internal class LanExportStatusDialog : Form
 
     private void UpdateStatus()
     {
-        var pending = !_discoveryComplete ? "Searching for recipients…" :
+        var pending = !_discoveryComplete ? _onlineFriends ? "Preparing selected friends…" : "Searching for recipients…" :
             _results.Count < _rows.Count ? $"Waiting · {_results.Count}/{_rows.Count} complete" : null;
         _status.Text = string.Join(" · ", new[] { Summary(), pending, _discoveryMessage }.Where(text => !string.IsNullOrEmpty(text)));
     }

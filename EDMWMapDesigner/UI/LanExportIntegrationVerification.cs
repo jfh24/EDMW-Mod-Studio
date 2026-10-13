@@ -22,7 +22,7 @@ internal static class LanExportIntegrationVerification
         var export = toolbar.Items.Cast<ToolStripItem>().Single(item => item.Text == "Export over LAN");
         Require(!toolbar.Items.Cast<ToolStripItem>().Any(item => item.Text?.Contains("Installer", StringComparison.OrdinalIgnoreCase) == true) &&
             !Descendants(main).OfType<CheckBox>().Any(control => control.Text.Contains("Run installer", StringComparison.OrdinalIgnoreCase)),
-            "Map export exposes only LAN delivery and has no installer action or run-installer toggle.");
+            "Map export exposes LAN and friends delivery and has no installer action or run-installer toggle.");
         foreach (var size in new[] { new Size(1200, 760), new Size(1920, 1080) })
         {
             main.ClientSize = size;
@@ -42,9 +42,10 @@ internal static class LanExportIntegrationVerification
         var gameMenu = Descendants(civilizations).OfType<Button>().Single(control => control.Text == "Game ▾");
         var exportActions = gameMenu.ContextMenuStrip!.Items.Cast<ToolStripItem>().Where(item =>
             item.Text?.StartsWith("Export", StringComparison.OrdinalIgnoreCase) == true).ToArray();
-        Require(gameMenu.Visible && gameMenu.Enabled && exportActions.Length == 1 && exportActions[0].Text == "Export over LAN",
-            "The civilization Game menu exposes only Export over LAN.");
-        checks.Add("Maps and civilizations expose LAN export only; installer export actions and the run-installer option are absent.");
+        Require(gameMenu.Visible && gameMenu.Enabled && exportActions.Select(item => item.Text).Order(StringComparer.Ordinal)
+            .SequenceEqual(new[] { "Export over LAN", "Export to friends" }),
+            "The civilization Game menu exposes LAN and friends export.");
+        checks.Add("Maps and civilizations expose LAN and friends export; installer export actions and the run-installer option are absent.");
 
         VerifySettings(main, outputDirectory, checks);
         main.Hide();

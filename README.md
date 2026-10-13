@@ -1,6 +1,6 @@
 # EDMW Mod Studio
 
-**EDMW Mod Studio** is a Windows modding workspace for **Empires: Dawn of the Modern World**. It combines a visual Map Designer, a Civilization Editor, and tracked installation and sharing over a local network.
+**EDMW Mod Studio** is a Windows modding workspace for **Empires: Dawn of the Modern World**. It combines a visual Map Designer, a Civilization Editor, and tracked installation and sharing over LAN or online with friends.
 
 The application is version **1.0.0**. It is built with C#/.NET Windows Forms and includes a native, 32-bit map generator for the game.
 
@@ -18,6 +18,8 @@ The source repository does not include the compiled executable. Download it from
 - **Model previews:** inspect installed models, textures, player colors, and animation clips; embed replacement `.cem` or `.obj` assets in civilization projects.
 - **LAN collaboration:** host or join a shared map with synchronized paint strokes and named live cursors.
 - **LAN export:** install an export on the sender and offer it to other running instances for recipient approval.
+- **Online friends:** exchange friend codes, accept requests, and see online presence through a Node.js relay.
+- **Online collaboration and export:** invite accepted friends to edit maps, or send map and civilization exports for recipient approval. Includes a Render deployment blueprint.
 - **Installed content:** review and uninstall tracked maps and civilization packages from Home.
 
 See the [user guide](docs/user-guide.md) for controls and detailed workflows.
@@ -84,6 +86,14 @@ The native DLL is x86 because it is loaded by the 32-bit game; the editor and in
 
 See [development and verification](docs/development.md) for build details, existing checks, and optional tooling.
 
+## Online sharing in source builds
+
+The online features are available in source builds after the v1.0.0 release linked above. Open **Friends**, enter the relay's `https://<service-name>.onrender.com` URL and your display name, and choose **Connect**. Exchange friend codes and accept a request before inviting a friend into a shared map or choosing **Export to friends**. Both users must connect to the same relay and run matching application builds. LAN features remain available independently.
+
+The relay uses HTTPS/WSS, authenticates device identities, and checks accepted friendships for invitations and exports. The app protects its local credential with Windows DPAPI. Export recipients review and approve installation through the existing package validation and installation system.
+
+Deploy the included Node.js service using [render.yaml](render.yaml). A persistent disk retains identities and friendships across deployments; shared map sessions and pending offers end on disconnect or relay restart. See [online sharing and Render setup](docs/online-sharing.md) for local setup, deployment, operational limits, and verification.
+
 ## LAN behavior
 
 Each recipient must run the same version of EDMW Mod Studio with receiving enabled. Export discovery operates independently of a collaboration session.
@@ -134,7 +144,7 @@ EDMWMapDesigner/              Main application; legacy source directory/namespac
   Generation/                Terrain generation, RMV/payload export, map LAN packages
   Civilizations/             Game catalog, native bindings, models, package installation
   Collaboration/             Shared map editing protocol
-  Networking/                Common LAN package transport
+  Networking/                LAN transport, online relay client, protected identity
   UI/                        Windows Forms views, canvas, previews, existing verifications
   Assets/                    UI art and retained geographic regeneration inputs
 EDMWMultiplayerInstaller/    Embedded map installer template and standalone package UI
@@ -143,6 +153,8 @@ native/EDMWAnchored/         Production x86 map generator and resource-alignment
 native/EDMWResourceSnapshot/ Optional diagnostic resource probe
 native/EDMWStringProbe/      Optional diagnostic string probe
 tools/                      Geography generators and native diagnostic tools
+relay/                      Node.js friends, map collaboration, and export relay
+render.yaml                 Single-instance Render service and persistent disk
 docs/                       User guide, development notes, attribution, engineering report
 build.ps1                   Complete production build
 global.json                 SDK selection
@@ -155,6 +167,8 @@ The public product name is **EDMW Mod Studio**. Existing source paths, namespace
 
 - [User guide](docs/user-guide.md)
 - [Development, architecture, and verification](docs/development.md)
+- [Online sharing and Render setup](docs/online-sharing.md)
+- [Online relay protocol](docs/online-protocol.md)
 - [Geographic data and artwork credits](docs/credits.md)
 - [Manual wildlife and fish engineering report](docs/manual-wildlife-and-fish.md)
 

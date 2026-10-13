@@ -13,6 +13,35 @@ internal static class Program
     [STAThread]
     private static int Main(string[] args)
     {
+        if (args.Length == 2 && args[0].Equals("--verify-online-ui", StringComparison.OrdinalIgnoreCase))
+        {
+            try
+            {
+                Application.SetUnhandledExceptionMode(UnhandledExceptionMode.ThrowException);
+                ApplicationConfiguration.Initialize();
+                OnlineDialogVerification.Verify(args[1]);
+                Console.WriteLine("ONLINE UI PASS: Friends, recipient picker, and toolbar layout.");
+                return 0;
+            }
+            catch (Exception error)
+            {
+                Console.Error.WriteLine("ONLINE UI FAIL: " + error);
+                return 1;
+            }
+        }
+        if (args.Length == 2 && args[0].Equals("--verify-online", StringComparison.OrdinalIgnoreCase))
+        {
+            try
+            {
+                Networking.OnlineVerification.RunAsync(args[1]).GetAwaiter().GetResult();
+                return 0;
+            }
+            catch (Exception error)
+            {
+                Console.Error.WriteLine("ONLINE FAIL: " + error);
+                return 1;
+            }
+        }
         if (args.Length == 1 && args[0].Equals("--verify-civilization-navigation", StringComparison.OrdinalIgnoreCase))
         {
             Application.SetUnhandledExceptionMode(UnhandledExceptionMode.ThrowException);

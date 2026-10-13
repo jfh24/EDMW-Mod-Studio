@@ -9,6 +9,7 @@ public sealed class CivilizationEditorView : UserControl
 {
     private readonly Func<string?> _locateGame;
     private readonly Action<CivilizationInstallerPackage>? _sendOverLan;
+    private readonly Action<CivilizationInstallerPackage>? _sendToFriends;
     private readonly CivilizationEditHistory _history = new(CivilizationEditProject.CreateDefault());
     private readonly TextBox _projectName = new() { Width = 220, Height = 27, MaxLength = 200, AccessibleName = "Civilization project name" };
     private readonly TextBox _civilizationSearch = new() { Dock = DockStyle.Fill, PlaceholderText = "Find civilization…", AccessibleName = "Find civilization" };
@@ -59,11 +60,13 @@ public sealed class CivilizationEditorView : UserControl
     public string ProjectName => string.IsNullOrWhiteSpace(_projectName.Text) ? _history.Current.Name : _projectName.Text.Trim();
     internal CivilizationEditProject SnapshotProject { get { if (!CommitPending()) throw new InvalidOperationException("Resolve invalid fields before reading the project."); return _history.Current.Clone(); } }
 
-    public CivilizationEditorView(Func<string?> locateGame, Action<CivilizationInstallerPackage>? sendOverLan = null)
+    public CivilizationEditorView(Func<string?> locateGame, Action<CivilizationInstallerPackage>? sendOverLan = null,
+        Action<CivilizationInstallerPackage>? sendToFriends = null)
     {
         ArgumentNullException.ThrowIfNull(locateGame);
         _locateGame = locateGame;
         _sendOverLan = sendOverLan;
+        _sendToFriends = sendToFriends;
         Dock = DockStyle.Fill;
         BackColor = MedievalTheme.Shell;
         ForeColor = MedievalTheme.Text;
@@ -114,7 +117,8 @@ public sealed class CivilizationEditorView : UserControl
         ]));
         toolbar.Controls.Add(MakeActionMenu("Game", [
             MakeAction("Reload current values", LoadGameCatalog), new ToolStripSeparator(),
-            MakeAction("Export over LAN", ExportOverLan)
+            MakeAction("Export over LAN", ExportOverLan),
+            MakeAction("Export to friends", ExportToFriends)
         ]));
         var nameLabel = MakeLabel("Project", 9);
         nameLabel.Margin = new Padding(16, 6, 7, 0);
@@ -189,7 +193,7 @@ public sealed class CivilizationEditorView : UserControl
         _status.AutoSize = false;
         _status.AutoEllipsis = true;
         footer.Controls.Add(_status, 0, 0);
-        var footnote = MakeLabel("Current game values · Export over LAN in Game menu", 8.5f);
+        var footnote = MakeLabel("Current game values · Export in Game menu", 8.5f);
         footnote.ForeColor = MedievalTheme.TextSecondary;
         footnote.Dock = DockStyle.Fill;
         footnote.AutoSize = false;
@@ -686,7 +690,7 @@ public sealed class CivilizationEditorView : UserControl
             _tips.SetToolTip(heading, entity is null ? $"Source civilization ID: {civilization.SourceCivilizationId}; source table row: {civilization.SourceRowIndex}" : $"{civilization.Name} · {_category}\n{(entity.SourcePowerId is int powerId ? $"Source civilization power: {powerId}" : entity.SourceObjectId is int id ? $"Source catalog row: {id}" : entity.SourceTechnologyId is int technologyId ? $"Source technology ID: {technologyId}" : "Draft entry without a source definition")}");
             Add(heading);
             Add(Hint(entity is null
-                ? "Edit project values, then Export over LAN to load them into the game."
+                ? "Edit project values, then export from the Game menu to load them into the game."
                 : $"{civilization.Name} · {_category} · Current game values"));
             if (_category == CivilizationCategory.Overview || entity is not null)
                 Add(BuildNameRow(civilization, entity));
@@ -707,7 +711,7 @@ public sealed class CivilizationEditorView : UserControl
             if (_category == CivilizationCategory.Ages && _gameData is not null && BuildProgressionPreview(civilization, displayValues))
             {
                 currentValues = displayValues.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
-                Add(Hint("Project progression preview · These changes load into the game when you Export over LAN."));
+                Add(Hint("Project progression preview · These changes load into the game when you export from the Game menu."));
             }
             foreach (var authored in entity?.Properties ?? civilization.Properties)
                 displayValues.TryAdd(authored.Key, authored.Value);
@@ -1236,7 +1240,7 @@ public sealed class CivilizationEditorView : UserControl
         });
         RefreshSectionHeaders();
         UpdateEntryActions();
-        SetStatus("Updated civilization progression. Export over LAN to load the project into the game.");
+        SetStatus("Updated civilization progression. Export from the Game menu to load the project into the game.");
     }
 
     private void ApplyAgeProgression(AgeProgressionDialog dialog)
@@ -1249,7 +1253,7 @@ public sealed class CivilizationEditorView : UserControl
             project.Civilizations[index] = civilization.Clone();
         });
         RefreshWorkspace();
-        SetStatus("Applied progression edits to the project. Export over LAN to load them into the game.");
+        SetStatus("Applied progression edits to the project. Export from the Game menu to load them into the game.");
     }
 
     private void AddDraft()
@@ -1426,22 +1430,26 @@ public sealed class CivilizationEditorView : UserControl
     private string DisplayName(CivilizationEntityDraft entity) => _gameData?.GetDisplayName(entity) ?? entity.Name;
     private static bool HasSource(CivilizationEntityDraft entity) => entity.SourceObjectId is not null || entity.SourceTechnologyId is not null || entity.SourcePowerId is not null;
 
-    private void ExportOverLan()
+    private void ExportOverLan() => ExportPackage(_sendOverLan, "LAN export");
+
+    private void ExportToFriends() => ExportPackage(_sendToFriends, "Export to friends");
+
+    private void ExportPackage(Action<CivilizationInstallerPackage>? send, string title)
     {
-        if (!CommitPending() || _sendOverLan is null) return;
+        if (!CommitPending() || send is null) return;
         var path = ResolveGamePath();
         if (string.IsNullOrWhiteSpace(path)) { SetStatus("Choose the EDMW game folder in Settings first."); return; }
         try
         {
             var package = CivilizationLanLocalExport.Prepare(_history.Current, path);
-            _sendOverLan(package);
+            send(package);
         }
         catch (Exception exception) when (exception is IOException or InvalidDataException or UnauthorizedAccessException or
             ArgumentException or InvalidOperationException)
         {
             SetStatus(exception.Message);
             MedievalDialog.Show((IWin32Window?)FindForm() ?? this, exception.Message,
-                "LAN export", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                title, MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
     }
 

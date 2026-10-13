@@ -58,7 +58,7 @@ internal sealed class CivilizationLanReviewDialog : Form
         {
             Text = "From " + offer.SenderAddress, Dock = DockStyle.Fill, ForeColor = MedievalTheme.TextMuted,
             TextAlign = ContentAlignment.MiddleLeft, Margin = Padding.Empty,
-            AccessibleName = "Sending computer IP address"
+            AccessibleName = "Export sender"
         }, 0, 1);
 
         var pathRow = new TableLayoutPanel

@@ -112,6 +112,27 @@ internal static class MedievalDialogFrame
             using var background = new SolidBrush(selected ? MedievalTheme.SurfaceRaised : list.BackColor);
             args.Graphics.FillRectangle(background, args.Bounds);
             var textBounds = Rectangle.Inflate(args.Bounds, -7, 0);
+            if (list.CheckBoxes && args.ColumnIndex == 0)
+            {
+                // Owner drawing covers the native state image; paint its visible
+                // equivalent in the same hit area and leave room for the label.
+                var side = Math.Max(12, Math.Min(18, args.Bounds.Height - 4));
+                var box = new Rectangle(args.Bounds.Left + 4,
+                    args.Bounds.Top + (args.Bounds.Height - side) / 2, side, side);
+                using var border = new Pen(item.Checked ? MedievalTheme.GoldBright : MedievalTheme.BorderStrong);
+                args.Graphics.DrawRectangle(border, box);
+                if (item.Checked)
+                {
+                    using var tick = new Pen(MedievalTheme.GoldBright, 2);
+                    args.Graphics.DrawLines(tick,
+                    [new Point(box.Left + 3, box.Top + side / 2),
+                     new Point(box.Left + side / 2 - 1, box.Bottom - 4),
+                     new Point(box.Right - 3, box.Top + 3)]);
+                }
+                var indent = box.Right + 5 - textBounds.Left;
+                textBounds.X += indent;
+                textBounds.Width -= indent;
+            }
             if (textBounds.Width <= 0) return;
             var color = selected ? MedievalTheme.GoldBright : item.ForeColor;
             if (color.IsEmpty) color = list.ForeColor;

@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: edmw-online-relay
+    runtime: node
+    plan: starter
+    rootDir: relay
+    buildCommand: npm ci --omit=dev
+    startCommand: npm start
+    healthCheckPath: /health
+    numInstances: 1
+    envVars:
+      - key: NODE_VERSION
+        value: 24.18.0
+      - key: RELAY_DATA_DIR
+        value: /var/data/edmw-relay
+    disk:
+      name: edmw-identities
+      mountPath: /var/data
+      sizeGB: 1

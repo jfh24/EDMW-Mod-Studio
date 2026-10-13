@@ -2,6 +2,7 @@ using EDMWMapDesigner.Analysis;
 using EDMWMapDesigner.Generation;
 using EDMWMapDesigner.Models;
 using EDMWMapDesigner.Collaboration;
+using EDMWMapDesigner.Networking;
 using EDMWMapDesigner.Civilizations;
 using System.Diagnostics;
 using System.Globalization;
@@ -12,7 +13,7 @@ using System.Runtime.InteropServices;
 
 namespace EDMWMapDesigner.UI;
 
-public sealed class MainForm : Form
+public sealed partial class MainForm : Form
 {
     private const int SceneRailWidth = 264;
     private readonly bool _verificationMode;
@@ -225,6 +226,8 @@ public sealed class MainForm : Form
     public MainForm(bool verificationMode = false)
     {
         _verificationMode = verificationMode;
+        _online = new OnlineRelayClient(_onlinePreferences);
+        _onlineCollaboration = new OnlineCollaborationSession(_online);
         Text = "EDMW Mod Studio";
         MinimumSize = new Size(1200, 760);
         StartPosition = FormStartPosition.CenterScreen;
@@ -281,6 +284,7 @@ public sealed class MainForm : Form
 
         Controls.Add(BuildWorkspaceLayout());
         Controls.Add(BuildToolStrip());
+        InitializeOnlineSharing();
         _canvas.Project = _project;
         _canvas.StrokeStarted += (_, _) => _strokeSnapshot = _project.Clone();
         _canvas.StrokeEnded += (_, _) =>
@@ -292,7 +296,7 @@ public sealed class MainForm : Form
         _canvas.MapChanged += (_, _) =>
         {
             MarkDirty();
-            if (!_applyingRemoteProject && _collaboration.IsConnected)
+            if (!_applyingRemoteProject && MapSessionConnected)
                 QueueCollaborationUpdate();
         };
         _canvas.TerrainPicked += (_, terrain) => SelectTerrain(terrain);
@@ -300,7 +304,7 @@ public sealed class MainForm : Form
         _canvas.HoverTextChanged += (_, text) => _status.Text = string.IsNullOrEmpty(text) ? StatusSummary() : text;
         _canvas.CursorMoved += async (_, cell) =>
         {
-            if (_collaboration.IsConnected)
+            if (MapSessionConnected)
                 await SendCollaborationCursorAsync(cell);
         };
         // Apply document messages synchronously in receive-stream order. This keeps
@@ -328,14 +332,14 @@ public sealed class MainForm : Form
             if (_applyingRemoteProject) return;
             _project.Name = _nameBox.Text;
             MarkDirty();
-            if (_collaboration.IsConnected) QueueCollaborationUpdate();
+            if (MapSessionConnected) QueueCollaborationUpdate();
         };
         _authorBox.TextChanged += (_, _) =>
         {
             if (_applyingRemoteProject) return;
             _project.Author = _authorBox.Text;
             MarkDirty();
-            if (_collaboration.IsConnected) QueueCollaborationUpdate();
+            if (MapSessionConnected) QueueCollaborationUpdate();
         };
         _gridSize.ValueChanged += (_, _) => ResizeGrid();
         _brushAugmentSlider.ValueChanged += (_, _) => ApplyBrushAugmentSlider();
@@ -346,7 +350,7 @@ public sealed class MainForm : Form
             _varianceValue.Text = $"{_variance.Value}%";
             MarkDirty();
             UpdateAnalysis();
-            if (_collaboration.IsConnected) QueueCollaborationUpdate();
+            if (MapSessionConnected) QueueCollaborationUpdate();
         };
         _randomLandOverwrite.ValueChanged += (_, _) =>
             _randomLandOverwriteValue.Text = $"{_randomLandOverwrite.Value}%";
@@ -474,7 +478,7 @@ public sealed class MainForm : Form
         if (view == _activeView && confirm) return;
         if (view == AppView.Civilizations && _civilizationEditorView is null)
         {
-            _civilizationEditorView = new CivilizationEditorView(FindGamePath, SendCivilizationsOverLan);
+            _civilizationEditorView = new CivilizationEditorView(FindGamePath, SendCivilizationsOverLan, SendCivilizationsToFriends);
             _civilizationEditorView.StateChanged += (_, _) =>
             {
                 if (_activeView != AppView.Civilizations) return;
@@ -2066,7 +2070,7 @@ public sealed class MainForm : Form
         var settingsButton = WindowButton("\uE713", "Game installation settings", "settings", (_, _) => ShowGameSettings());
         settingsButton.Size = new Size(38, 34);
         strip.Items.Add(settingsButton);
-        strip.Items.Add(new ToolStripLabel("EDMW Mod Studio")
+        var studioLabel = new ToolStripLabel("EDMW Mod Studio")
         {
             Image = MedievalIconFactory.Create(MedievalIcon.Generator, 20),
             DisplayStyle = ToolStripItemDisplayStyle.ImageAndText,
@@ -2075,13 +2079,16 @@ public sealed class MainForm : Form
             Font = MedievalTheme.DisplayFont(12f),
             ForeColor = MedievalTheme.GoldBright,
             Margin = new Padding(4, 0, 16, 0)
-        });
+        };
+        strip.Items.Add(studioLabel);
         _homeButton = Button("Home", MedievalIcon.Generator, "Return to the workspace chooser", (_, _) => ShowView(AppView.Home));
         strip.Items.Add(_homeButton);
         _viewSwitchButton = Button("Civilizations", MedievalIcon.Civilizations,
             "Open your civilization workspace", (_, _) => ShowView(
                 _activeView == AppView.Civilizations ? AppView.MapGenerator : AppView.Civilizations));
         strip.Items.Add(_viewSwitchButton);
+        _friendsButton = Button("Friends", MedievalIcon.Bundle, "Connect to your online friends, share a map, and manage requests", (_, _) => ShowFriends());
+        strip.Items.Add(_friendsButton);
 
         var centerSpacer = new ToolStripLabel { AutoSize = false, Width = 0 };
         var newButton = Button("New", MedievalIcon.NewMap, "Create a new map project", (_, _) => NewProject());
@@ -2089,6 +2096,8 @@ public sealed class MainForm : Form
         var saveButton = Button("Save", MedievalIcon.Save, "Save the current map project", (_, _) => SaveProject(false));
         var lanExportButton = Button("Export over LAN", MedievalIcon.Bundle,
             "Install this map here and send it to every designer on the LAN for acceptance", (_, _) => ExportMapOverLan(), true);
+        var friendsExportButton = Button("Export to friends", MedievalIcon.Bundle,
+            "Install this map here and offer it to selected online friends", async (_, _) => await ExportMapToFriendsAsync(), true);
         _hideMapPreviewToggle.Margin = Padding.Empty;
         var exportOptions = new TableLayoutPanel
         {
@@ -2112,7 +2121,7 @@ public sealed class MainForm : Form
         foreach (var item in new ToolStripItem[]
                  {
                      newButton, openButton, saveButton, new ToolStripSeparator(),
-                     lanExportButton, exportOptionsHost
+                     lanExportButton, friendsExportButton, exportOptionsHost
                  })
         {
             _mapToolbarItems.Add(item);
@@ -2121,6 +2130,14 @@ public sealed class MainForm : Form
         strip.Items.Add(_launchButton);
         void CenterPrimaryActions()
         {
+            // Keep both export choices and Friends directly accessible on the
+            // supported 1200-pixel workspace; icon actions retain their labels
+            // for tooltips and accessibility.
+            var compact = strip.ClientSize.Width < 1500 && _activeView == AppView.MapGenerator;
+            studioLabel.Visible = !compact;
+            foreach (var action in new[] { newButton, openButton, saveButton })
+                action.DisplayStyle = compact ? ToolStripItemDisplayStyle.Image : ToolStripItemDisplayStyle.ImageAndText;
+            _viewSwitchButton.DisplayStyle = compact ? ToolStripItemDisplayStyle.Image : ToolStripItemDisplayStyle.ImageAndText;
             var groupWidth = _mapToolbarItems
                 .Where(item => item.Visible)
                 .Sum(item => item.Width + item.Margin.Horizontal);
@@ -2321,7 +2338,7 @@ public sealed class MainForm : Form
         CommitUndo(snapshot);
         MarkDirty();
         UpdateAnalysis();
-        if (_collaboration.IsConnected)
+        if (MapSessionConnected)
             await ShareCurrentMapAsync();
     }
 
@@ -2334,7 +2351,7 @@ public sealed class MainForm : Form
         CommitUndo(snapshot);
         MarkDirty();
         UpdateAnalysis();
-        if (_collaboration.IsConnected)
+        if (MapSessionConnected)
             await ShareCurrentMapAsync();
     }
 
@@ -2346,7 +2363,7 @@ public sealed class MainForm : Form
         CommitUndo(snapshot);
         MarkDirty();
         UpdateAnalysis();
-        if (_collaboration.IsConnected)
+        if (MapSessionConnected)
             await ShareCurrentMapAsync();
     }
 
@@ -2359,7 +2376,7 @@ public sealed class MainForm : Form
         CommitUndo(snapshot);
         MarkDirty();
         UpdateAnalysis();
-        if (_collaboration.IsConnected) await ShareCurrentMapAsync();
+        if (MapSessionConnected) await ShareCurrentMapAsync();
     }
 
     private async void ClearAllManualPlayerStarts()
@@ -2370,7 +2387,7 @@ public sealed class MainForm : Form
         CommitUndo(snapshot);
         MarkDirty();
         UpdateAnalysis();
-        if (_collaboration.IsConnected) await ShareCurrentMapAsync();
+        if (MapSessionConnected) await ShareCurrentMapAsync();
     }
 
     private static int NewGenerationSeed() => (int)Random.Shared.NextInt64(int.MinValue, (long)int.MaxValue + 1);
@@ -2429,7 +2446,7 @@ public sealed class MainForm : Form
             MarkDirty();
             UpdateAnalysis();
             _status.Text = $"Generated map with seed {seed}. Ctrl+Z to undo.";
-            if (_collaboration.IsConnected) await ShareCurrentMapAsync();
+            if (MapSessionConnected) await ShareCurrentMapAsync();
         }
         finally
         {
@@ -2477,7 +2494,7 @@ public sealed class MainForm : Form
             _canvas.Project = _project;
             MarkDirty();
             UpdateAnalysis();
-            if (_collaboration.IsConnected)
+            if (MapSessionConnected)
                 await ShareCurrentMapAsync();
             var fallback = requestedTerrain == terrain
                 ? string.Empty
@@ -2508,7 +2525,7 @@ public sealed class MainForm : Form
         _variance.Value = project.Variance;
         _varianceValue.Text = $"{project.Variance}%";
         ResetManualDrawingTools();
-        _lastSharedProject = project.Clone();
+        if (!_onlineCollaboration.IsConnected) _lastSharedProject = project.Clone();
         _undo.Clear();
         _redo.Clear();
         _dirty = dirty;
@@ -2528,7 +2545,7 @@ public sealed class MainForm : Form
         _canvas.ResetView();
         MarkDirty();
         UpdateAnalysis();
-        if (_collaboration.IsConnected) QueueCollaborationUpdate();
+        if (MapSessionConnected) QueueCollaborationUpdate();
     }
 
     private void CommitUndo(MapProject before)
@@ -2557,7 +2574,7 @@ public sealed class MainForm : Form
         ResetManualDrawingTools();
         MarkDirty();
         UpdateAnalysis();
-        if (_collaboration.IsConnected) await ShareCurrentMapAsync();
+        if (MapSessionConnected) await ShareCurrentMapAsync();
     }
 
     private async void Redo()
@@ -2571,7 +2588,7 @@ public sealed class MainForm : Form
         ResetManualDrawingTools();
         MarkDirty();
         UpdateAnalysis();
-        if (_collaboration.IsConnected) await ShareCurrentMapAsync();
+        if (MapSessionConnected) await ShareCurrentMapAsync();
     }
 
     private void RestoreSnapshot(MapProject snapshot)
@@ -2604,7 +2621,7 @@ public sealed class MainForm : Form
 
     private async Task HostCollaborationAsync()
     {
-        if (_collaboration.IsConnected || _collaboration.IsHosting)
+        if (MapSessionConnected || _collaboration.IsHosting)
         {
             _status.Text = "Collaboration is already active.";
             UpdateCollaborationPanel();
@@ -2633,7 +2650,7 @@ public sealed class MainForm : Form
 
     private async Task JoinCollaborationAsync()
     {
-        if (_collaboration.IsConnected || _collaboration.IsHosting)
+        if (MapSessionConnected || _collaboration.IsHosting)
         {
             _status.Text = "Leave the current session before joining another.";
             return;
@@ -2740,15 +2757,18 @@ public sealed class MainForm : Form
         try
         {
             _hostListeningToggle.Checked = _collaboration.IsHosting;
-            _joinCollaborationButton.Enabled = !_collaboration.IsConnected;
+            _hostListeningToggle.Enabled = !_onlineCollaboration.IsConnected;
+            _joinCollaborationButton.Enabled = !MapSessionConnected;
             _collaboratorList.SuspendLayout();
             _collaboratorList.Controls.Clear();
-            if (!_collaboration.IsConnected)
+            if (!MapSessionConnected)
             {
                 _collaboratorList.Controls.Add(new Label { Text = "No active session", AutoSize = true, ForeColor = MedievalTheme.TextMuted, Font = MedievalTheme.UiFont(8.25f) });
                 return;
             }
-            var you = _collaboration.IsHosting && !string.IsNullOrWhiteSpace(_hostLanAddress)
+            var you = _onlineCollaboration.IsConnected
+                ? $"You · {_online.User?.DisplayName} · Online"
+                : _collaboration.IsHosting && !string.IsNullOrWhiteSpace(_hostLanAddress)
                 ? $"You · {_project.Author} · {_hostLanAddress}"
                 : $"You · {_project.Author}";
             _collaboratorList.Controls.Add(new Label { Text = you, AutoSize = true, ForeColor = MedievalTheme.GoldBright, Font = MedievalTheme.UiFont(8.25f, FontStyle.Bold) });
@@ -2796,12 +2816,25 @@ public sealed class MainForm : Form
             await ShareCurrentMapCoreAsync();
             return true;
         }
+        catch (OnlineReplacementRejectedException error)
+        {
+            _collaborationUpdatePending = false;
+            _collaborationFullProjectPending = false;
+            if (!_closingDesigner && !IsDisposed && IsHandleCreated) _status.Text = error.Message;
+            return false;
+        }
         catch (Exception)
         {
-            _collaborationUpdatePending = _collaboration.IsConnected;
+            if (_closingDesigner || IsDisposed || !IsHandleCreated)
+            {
+                _collaborationUpdatePending = false;
+                return false;
+            }
+            _collaborationUpdatePending = MapSessionConnected;
             if (_collaborationUpdatePending && !_collaborationSyncTimer.Enabled)
                 _collaborationSyncTimer.Start();
-            BeginInvoke(() => _status.Text = "Map update could not be shared; retrying.");
+            PostOnlineUi(() => _status.Text = _collaborationUpdatePending
+                ? "Map update could not be shared; retrying." : "Map update could not be shared; session disconnected.");
             return false;
         }
         finally { _collaborationSendLock.Release(); }
@@ -2813,6 +2846,20 @@ public sealed class MainForm : Form
         var snapshot = _project.Clone();
         if (_collaborationFullProjectPending || before.GridSize != snapshot.GridSize)
         {
+            if (_onlineCollaboration.IsConnected)
+            {
+                // The ordered echo updates the baseline before this resumes;
+                // a newer collaborator revision may already have arrived too.
+                _onlineSubmittedProject = snapshot;
+                try { await _onlineCollaboration.SendProjectAsync(snapshot); }
+                catch (InvalidOperationException) { await CancelRejectedOnlineReplacementAsync(); }
+                catch (TimeoutException)
+                {
+                    await CancelRejectedOnlineReplacementAsync("The replacement could not be confirmed. Shared map refreshed; retry only if still needed.");
+                }
+                finally { _onlineSubmittedProject = null; }
+                return;
+            }
             await _collaboration.SendProjectAsync(snapshot);
             _collaborationFullProjectPending = false;
             _lastSharedProject = snapshot;
@@ -2821,6 +2868,13 @@ public sealed class MainForm : Form
 
         var delta = MapDelta.Create(before, snapshot);
         if (delta is null) return;
+        if (_onlineCollaboration.IsConnected)
+        {
+            _onlineSubmittedDelta = delta;
+            try { await _onlineCollaboration.SendDeltaAsync(delta); }
+            finally { _onlineSubmittedDelta = null; }
+            return;
+        }
         await _collaboration.SendDeltaAsync(delta);
         var acknowledgedBaseline = _lastSharedProject ?? before.Clone();
         if (acknowledgedBaseline.GridSize == before.GridSize)
@@ -2830,8 +2884,16 @@ public sealed class MainForm : Form
 
     private async Task SendCollaborationCursorAsync(Point cell)
     {
-        try { await _collaboration.SendCursorAsync(cell); }
-        catch (Exception) { BeginInvoke(() => _status.Text = "Cursor position could not be shared."); }
+        try
+        {
+            if (_onlineCollaboration.IsConnected) await _onlineCollaboration.SendCursorAsync(cell);
+            else await _collaboration.SendCursorAsync(cell);
+        }
+        catch (Exception)
+        {
+            if (_closingDesigner || IsDisposed || !IsHandleCreated) return;
+            PostOnlineUi(() => _status.Text = "Cursor position could not be shared.");
+        }
     }
 
     private void ApplyRemoteProject(MapProject project)
@@ -3014,11 +3076,11 @@ public sealed class MainForm : Form
     {
         if (!ConfirmDiscard()) return;
         SetProject(MapProject.CreateDefault((int)_gridSize.Value), null, false);
-        if (_collaboration.IsConnected)
+        if (MapSessionConnected)
         {
             _collaborationFullProjectPending = true;
             QueueCollaborationUpdate();
-            if (!await ShareCurrentMapAsync())
+            if (!await ShareCurrentMapAsync() && _collaborationUpdatePending)
                 _status.Text = "New map could not be shared; retrying.";
         }
     }
@@ -3043,11 +3105,11 @@ public sealed class MainForm : Form
                 MedievalDialog.Show(this,
                     "This project contains fauna types that are no longer placeable. They are preserved as inert compatibility data and will not spawn or replace animals in game.",
                     "Removed Fauna Markers", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-            if (_collaboration.IsConnected)
+            if (MapSessionConnected)
             {
                 _collaborationFullProjectPending = true;
                 QueueCollaborationUpdate();
-                if (!await ShareCurrentMapAsync())
+                if (!await ShareCurrentMapAsync() && _collaborationUpdatePending)
                     _status.Text = "Opened map could not be shared; retrying.";
             }
         }
@@ -3243,6 +3305,9 @@ public sealed class MainForm : Form
         _civilizationLanTransfer?.Dispose();
         _mapLanTransfer?.Dispose();
         _collaboration.Dispose();
+        _onlineLifetime.Cancel();
+        _onlineCollaboration.Dispose();
+        _online.Dispose();
     }
 
     private void UpdateToolbarAutoHide()
@@ -3415,6 +3480,8 @@ public sealed class MainForm : Form
                 if (_closingDesigner || IsDisposed || !IsHandleCreated || cancellationToken.IsCancellationRequested)
                     return new(CivilizationLanStatus.Denied, "Designer closed.");
                 var completion = new TaskCompletionSource<CivilizationLanDecision>(TaskCreationOptions.RunContinuationsAsynchronously);
+                using var designerClosing = _onlineLifetime.Token.Register(() => completion.TrySetResult(
+                    new(CivilizationLanStatus.Denied, "Designer closed.")));
                 BeginInvoke(new Action(() =>
                 {
                     if (_closingDesigner || IsDisposed || cancellationToken.IsCancellationRequested)
@@ -3468,6 +3535,8 @@ public sealed class MainForm : Form
                 if (_closingDesigner || IsDisposed || !IsHandleCreated || cancellationToken.IsCancellationRequested)
                     return new(CivilizationLanStatus.Denied, "Designer closed.");
                 var completion = new TaskCompletionSource<CivilizationLanDecision>(TaskCreationOptions.RunContinuationsAsynchronously);
+                using var designerClosing = _onlineLifetime.Token.Register(() => completion.TrySetResult(
+                    new(CivilizationLanStatus.Denied, "Designer closed.")));
                 BeginInvoke(new Action(() =>
                 {
                     if (_closingDesigner || IsDisposed || cancellationToken.IsCancellationRequested)
