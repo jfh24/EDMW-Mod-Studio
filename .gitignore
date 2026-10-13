@@ -3,7 +3,8 @@
 **/obj/
 **/build/
 **/publish/
-/dist/
+/dist/*
+!/dist/README.md
 /publish-staging/
 *.exe
 *.dll

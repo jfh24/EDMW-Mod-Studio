@@ -24,7 +24,7 @@ This guide covers version 1.0.0. For source builds, architecture, and verificati
 
 ## Getting started
 
-1. Open `dist/EDMW Mod Studio.exe`.
+1. Download and open [EDMW.Mod.Studio.exe from the v1.0.0 release](https://github.com/jfh24/EDMW-Mod-Studio/releases/download/v1.0.0/EDMW.Mod.Studio.exe), or open `dist/EDMW Mod Studio.exe` after a local source build.
 2. Use the small settings button in the top-right toolbar to confirm or change the EDMW installation folder.
 3. Choose a terrain type and paint directly on the map canvas.
 4. Use the left rail to adjust the brush or generate random land. Terrain, resources, and player starts are arranged as full-width sections in the right inspector, with Elevation and Ramps side by side at the bottom.

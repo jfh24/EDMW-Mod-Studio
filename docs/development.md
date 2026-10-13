@@ -22,7 +22,7 @@ The production build follows these dependencies:
 
 The .NET projects target `net9.0-windows`, enable nullable analysis, and treat warnings as errors. The editor assembly name is `EDMW Mod Studio`. The native generator is a 32-bit DLL because the game loads it into an x86 process.
 
-`dist/`, staging/publish directories, `bin/`, `obj/`, native build directories, and generated installer executables are build products. Keep them out of source commits. The complete build recreates the embedded binaries from their included source.
+The generated executable in `dist/`, staging/publish directories, `bin/`, `obj/`, native build directories, and generated installer executables are build products. Keep them out of source commits. `dist/README.md` is tracked and explains release downloads and local output. The complete build recreates the embedded binaries from their included source.
 
 Use the full build after native or shared installer-domain changes. A standalone editor build cannot resolve its embedded generated resources in a fresh checkout until they have been produced.
 

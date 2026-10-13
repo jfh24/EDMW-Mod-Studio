@@ -54,11 +54,9 @@ $publishedExecutable = Join-Path $stagingOutput 'EDMW Mod Studio.exe'
 if (!(Test-Path -LiteralPath $publishedExecutable -PathType Leaf)) {
     throw "The published executable is missing: $publishedExecutable"
 }
-if (Test-Path -LiteralPath $resolvedOutput) {
-    Remove-Item -LiteralPath $resolvedOutput -Recurse -Force
-}
-New-Item -ItemType Directory -Path $resolvedOutput | Out-Null
-Copy-Item -LiteralPath $publishedExecutable -Destination (Join-Path $resolvedOutput 'EDMW Mod Studio.exe')
+# Keep the tracked distribution README when refreshing the generated executable.
+New-Item -ItemType Directory -Path $resolvedOutput -Force | Out-Null
+Copy-Item -LiteralPath $publishedExecutable -Destination (Join-Path $resolvedOutput 'EDMW Mod Studio.exe') -Force
 
 Write-Host "Built EDMW Mod Studio: $publishedExecutable"
 Write-Host "Distribution: $resolvedOutput\EDMW Mod Studio.exe"
