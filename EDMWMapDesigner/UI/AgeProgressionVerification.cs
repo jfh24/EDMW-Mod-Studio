@@ -33,6 +33,7 @@ internal static class AgeProgressionVerification
             var sender = CopyFixture(source, output, "sender");
             var recipient = CopyFixture(source, output, "recipient");
             var checks = new List<string>();
+            VerifyIdentityAvailability(sender, output, checks);
             var project = VerifyEditor(sender, output, checks);
             VerifyInvalidSources(sender, project, checks);
             VerifyForgedLan(sender, project, checks);
@@ -108,6 +109,113 @@ internal static class AgeProgressionVerification
             Console.Error.WriteLine("AGE PROGRESSION LAYOUT VERIFICATION FAIL: " + error);
             return 1;
         }
+    }
+
+    private static void VerifyIdentityAvailability(string fixture, string output, List<string> checks)
+    {
+        var gameData = new CivilizationGameData(fixture, CivilizationGameCatalog.Load(fixture));
+        var original = File.ReadAllBytes(Path.Combine(fixture, TechnologyFile));
+        var originalRecords = CivilizationTechnologyBindings.ReadRecords(original);
+        foreach (var category in new[] { CivilizationCategory.Units, CivilizationCategory.Buildings, CivilizationCategory.Technologies })
+        {
+            using var host = new Form
+            {
+                ShowInTaskbar = false, StartPosition = FormStartPosition.Manual,
+                Location = new Point(-30000, -30000), Size = new Size(1500, 1000)
+            };
+            using var view = new CivilizationEditorView(() => fixture);
+            host.Controls.Add(view);
+            host.Show();
+            var civilization = view.SnapshotProject.Civilizations.Single(civ => civ.Name == "England");
+            var candidates = gameData.GetAgeProgressionCandidates(civilization);
+            var rosterIds = gameData.GetRoster(civilization, category).Select(entity => entity.Id).ToHashSet(StringComparer.Ordinal);
+            var item = candidates.Where(item => item.Entity.Category == category && item.IncludedByDefault && rosterIds.Contains(item.Entity.Id))
+                .OrderByDescending(item => originalRecords.Single(record => record.TechId == item.TechnologyId).UniversalCivilizationMembership)
+                .First();
+            void SelectIdentity()
+            {
+                view.SelectCivilization(civilization.Id);
+                view.SelectCategory(category);
+                view.SelectEntityForVerification(item.Entity.Id);
+            }
+            SelectIdentity();
+            var pristine = view.SnapshotProject.Serialize();
+            Require(view.IsFieldWritableForVerification("available") && bool.Parse(view.GetFieldForVerification("available")) && !view.IsDirty,
+                $"{category} identity availability is not editable or browsing authored an override.");
+            view.SetFieldForVerification("available", "false");
+            var edited = view.SnapshotProject.Civilizations.Single(civ => civ.Id == civilization.Id).Entities.Single(entity => entity.Id == item.Entity.Id);
+            Require(edited.Properties.GetValueOrDefault(item.MembershipKey) == "false" && !edited.Properties.ContainsKey("available"),
+                $"{category} identity availability did not use the installable progression membership.");
+            view.HandleShortcut(Keys.Control | Keys.Z);
+            Require(!view.IsDirty && view.SnapshotProject.Serialize() == pristine && bool.Parse(view.GetFieldForVerification("available")),
+                $"{category} availability undo did not restore the source value.");
+            view.HandleShortcut(Keys.Control | Keys.Y);
+            Require(!bool.Parse(view.GetFieldForVerification("available")), $"{category} availability redo was lost.");
+            var path = Path.Combine(output, $"identity-availability-{category}.edmwciv");
+            view.SaveProjectFile(path);
+            view.SetFieldForVerification("available", "true");
+            Require(view.SnapshotProject.Serialize() == pristine, $"{category} re-enabling availability retained a redundant override.");
+            view.OpenProjectFile(path);
+            SelectIdentity();
+            Require(!view.IsDirty && !bool.Parse(view.GetFieldForVerification("available")),
+                $"{category} unavailable selection did not survive save/reopen.");
+
+            var package = CivilizationInstallerPackage.Create(view.SnapshotProject, fixture);
+            Require(CivilizationPackageManager.Install(package, fixture).Success, $"{category} availability could not be installed in the fixture.");
+            try
+            {
+                var changed = CivilizationTechnologyBindings.ReadRecords(File.ReadAllBytes(Path.Combine(fixture, TechnologyFile)));
+                var selected = changed.Single(record => record.TechId == item.TechnologyId);
+                Require(!selected.AllowsCivilizationRow(civilization.SourceRowIndex!.Value), $"{category} export left the item available.");
+                foreach (var before in originalRecords)
+                {
+                    var after = changed.Single(record => record.TechId == before.TechId);
+                    for (var row = 3; row <= 11; row++)
+                        if (before.TechId != item.TechnologyId || row != civilization.SourceRowIndex)
+                            Require(after.AllowsCivilizationRow(row) == before.AllowsCivilizationRow(row),
+                                $"{category} availability changed another item or civilization's membership.");
+                }
+            }
+            finally
+            {
+                Require(CivilizationPackageManager.Uninstall(fixture, package.PackageId).Success, $"{category} fixture uninstall failed.");
+            }
+            Require(File.ReadAllBytes(Path.Combine(fixture, TechnologyFile)).AsSpan().SequenceEqual(original),
+                $"{category} availability uninstall did not restore the original table.");
+
+            foreach (var alias in candidates.Where(alias => alias.TechnologyId == item.TechnologyId && alias.Entity.Id != item.Entity.Id && alias.IncludedByDefault))
+            {
+                view.SelectCategory(alias.Entity.Category);
+                view.SelectEntityForVerification(alias.Entity.Id);
+                Require(!bool.Parse(view.GetFieldForVerification("available")), "A linked identity did not show shared unavailability.");
+                view.ResetCategoryForVerification();
+                SelectIdentity();
+                Require(bool.Parse(view.GetFieldForVerification("available")), "Resetting a linked identity left conflicting membership.");
+                view.SetFieldForVerification("available", "false");
+            }
+            view.SelectCategory(CivilizationCategory.Ages);
+            Require(!view.ProgressionPanelForVerification.IsIncludedForVerification(item.Entity.Id),
+                $"{category} identity unavailability was not reflected in progression.");
+            view.ProgressionPanelForVerification.AddItemForVerification(item.Entity.Id);
+            SelectIdentity();
+            Require(bool.Parse(view.GetFieldForVerification("available")), $"{category} progression re-enable was not reflected in identity.");
+            view.SelectCategory(CivilizationCategory.Ages);
+            view.ProgressionPanelForVerification.RemoveItemForVerification(item.Entity.Id);
+            SelectIdentity();
+            Require(!bool.Parse(view.GetFieldForVerification("available")), $"{category} progression removal was not reflected in identity.");
+            var costKey = item.MembershipKey.Replace("progressionIncluded", "foodCost", StringComparison.Ordinal);
+            view.SetFieldForVerification(costKey, (uint.Parse(view.GetFieldForVerification(costKey), CultureInfo.InvariantCulture) + 1).ToString(CultureInfo.InvariantCulture));
+            view.ResetFieldForVerification("available");
+            Require(bool.Parse(view.GetFieldForVerification("available")) &&
+                view.SnapshotProject.Civilizations.Single(civ => civ.Id == civilization.Id).Entities.Single(entity => entity.Id == item.Entity.Id).Properties.ContainsKey(costKey),
+                $"{category} availability reset removed unrelated edits.");
+            view.SetFieldForVerification("available", "false");
+            view.ResetCategoryForVerification();
+            Require(view.SnapshotProject.Serialize() == pristine && bool.Parse(view.GetFieldForVerification("available")),
+                $"{category} category reset did not restore inherited availability.");
+            Console.WriteLine($"IDENTITY AVAILABILITY PASS: {category} editing, persistence, progression and isolated installation.");
+        }
+        checks.Add("Identity availability for units, buildings and technologies supports unavailable/available, undo/redo, save/reopen, field/category reset, linked records and progression synchronization; exported masks preserve other civilizations and uninstall exactly.");
     }
 
     private static CivilizationEditProject VerifyEditor(string fixture, string output, List<string> checks)

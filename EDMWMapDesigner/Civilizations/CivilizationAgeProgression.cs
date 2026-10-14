@@ -26,6 +26,52 @@ public sealed record CivilizationAgeProgressionItem(
 /// <summary>Verified existing production, research and age-advance definitions.</summary>
 public static class CivilizationAgeProgression
 {
+    internal static CivilizationEntityDraft? FindEntity(CivilizationDraft civilization, CivilizationEntityDraft source) =>
+        civilization.Entities.FirstOrDefault(entity => entity.Id == source.Id) ?? civilization.Entities.FirstOrDefault(entity =>
+            entity.Category == source.Category && (source.SourceObjectId is int objectId ? entity.SourceObjectId == objectId :
+                source.SourceTechnologyId is int technologyId && entity.SourceObjectId is null && entity.SourceTechnologyId == technologyId));
+
+    internal static string? MembershipOverride(CivilizationDraft civilization,
+        IReadOnlyList<CivilizationAgeProgressionItem> items, CivilizationAgeProgressionItem item) =>
+        FindEntity(civilization, item.Entity)?.Properties.GetValueOrDefault(item.MembershipKey) ??
+        items.Where(alias => alias.TechnologyId == item.TechnologyId)
+            .Select(alias => FindEntity(civilization, alias.Entity)?.Properties.GetValueOrDefault(alias.MembershipKey))
+            .FirstOrDefault(value => value is not null);
+
+    // Identity and progression edit the same per-civilization mask. Keep aliases
+    // of a shared production/research record consistent and preserve other edits.
+    internal static void SetMembership(CivilizationDraft civilization,
+        IReadOnlyList<CivilizationAgeProgressionItem> items, CivilizationAgeProgressionItem item,
+        bool included, bool inherit, int? producerId = null)
+    {
+        var aliases = items.Where(alias => alias.TechnologyId == item.TechnologyId).ToArray();
+        foreach (var alias in aliases)
+        {
+            var authored = FindEntity(civilization, alias.Entity);
+            authored?.Properties.Remove(alias.MembershipKey);
+            if (inherit || !included) authored?.Properties.Remove(alias.ProducerKey);
+        }
+        var entity = FindEntity(civilization, item.Entity);
+        if (entity is null)
+        {
+            entity = item.Entity.Clone();
+            civilization.Entities.Add(entity);
+        }
+        var originallyIncluded = aliases.Any(alias => alias.IncludedByDefault);
+        var retainedEdits = aliases.Any(alias => FindEntity(civilization, alias.Entity) is { } authored &&
+            (authored.Properties.Count > 0 || authored.Name != alias.Entity.Name));
+        if (inherit || included && item.IncludedByDefault || !included && !originallyIncluded && !retainedEdits)
+            entity.Properties.Remove(item.MembershipKey);
+        else entity.Properties[item.MembershipKey] = included ? "true" : "false";
+        if (!included && !originallyIncluded && retainedEdits) entity.Properties[item.MembershipKey] = "false";
+        if (inherit) entity.Properties.Remove(item.ProducerKey);
+        else if (included && item.AddedProducerIds.Count > 0)
+            entity.Properties[item.ProducerKey] = (producerId ?? item.AddedProducerIds[0]).ToString(CultureInfo.InvariantCulture);
+        if (entity.Properties.Count == 0 && entity.Name == item.Entity.Name) civilization.Entities.Remove(entity);
+        civilization.Entities.RemoveAll(entry => entry.Properties.Count == 0 &&
+            items.Any(source => source.Entity.Id == entry.Id && source.Entity.Name == entry.Name));
+    }
+
     public static IReadOnlyList<CivilizationAgeProgressionItem> GetItems(
         byte[] objects, byte[] civilizations, IReadOnlyList<CivilizationTechnologyRecord> records,
         CivilizationGameCatalog catalog, CivilizationDraft civilization,

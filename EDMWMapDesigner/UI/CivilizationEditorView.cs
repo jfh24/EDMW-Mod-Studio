@@ -695,6 +695,12 @@ public sealed class CivilizationEditorView : UserControl
             if (_category == CivilizationCategory.Overview || entity is not null)
                 Add(BuildNameRow(civilization, entity));
             var currentValues = entity is null ? _gameData?.GetValues(civilization) : _gameData?.GetValues(entity);
+            var availabilityItems = _gameData is not null && entity is not null && HasSource(entity) &&
+                entity.Category is CivilizationCategory.Units or CivilizationCategory.Buildings or CivilizationCategory.Technologies
+                ? _gameData.GetAgeProgressionCandidates(civilization) : [];
+            var availabilityItem = entity is null ? null : availabilityItems.FirstOrDefault(item => item.Entity.Category == entity.Category &&
+                (entity.SourceObjectId is int objectId ? item.Entity.SourceObjectId == objectId :
+                    entity.SourceTechnologyId is int technologyId && item.Entity.SourceTechnologyId == technologyId));
             if (_gameData is not null && entity is not null && HasSource(entity))
             {
                 var effective = currentValues!.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
@@ -702,6 +708,8 @@ public sealed class CivilizationEditorView : UserControl
                     entity.SourcePowerId is not null ? source.SourcePowerId == entity.SourcePowerId :
                     entity.SourceObjectId is not null ? source.SourceObjectId == entity.SourceObjectId :
                     source.SourceTechnologyId == entity.SourceTechnologyId) ? "true" : "false";
+                if (availabilityItem is not null)
+                    effective["available"] = availabilityItem.IncludedByDefault ? "true" : "false";
                 if (entity.SourceObjectId is not null && int.TryParse(effective.GetValueOrDefault(entity.Category == CivilizationCategory.Units ? "unit.graphicsId" : "building.graphicsId"), out var graphics))
                     if (_gameAssets?.FindModelName(graphics) is { } modelName)
                         effective[entity.Category == CivilizationCategory.Units ? "unit.model" : "building.model"] = modelName;
@@ -764,11 +772,14 @@ public sealed class CivilizationEditorView : UserControl
                     if (_category == CivilizationCategory.Ages && group.Key == "Progression") continue;
                     var properties = entity?.Properties ?? civilization.Properties;
                     properties.TryGetValue(definition.Key, out var authoredValue);
+                    var membership = definition.Key == "available" ? availabilityItem : null;
+                    if (membership is not null)
+                        authoredValue = CivilizationAgeProgression.MembershipOverride(civilization, availabilityItems, membership);
                     var gameValue = currentValues?.GetValueOrDefault(definition.Key);
                     var value = string.IsNullOrWhiteSpace(authoredValue) ? gameValue ?? "" : authoredValue;
                     var input = CreateFieldInput(definition, value);
                     var isNote = definition.Key.EndsWith(".notes", StringComparison.Ordinal);
-                    var writable = input is not NamedAgeSetInput && (isNote || (entity is not null && !HasSource(entity)) ||
+                    var writable = input is not NamedAgeSetInput && (membership is not null || isNote || (entity is not null && !HasSource(entity)) ||
                         (entity is not null ? _gameData?.CanWrite(entity, definition.Key) == true : _gameData?.CanWrite(_category, definition.Key, false) == true));
                     if (!writable)
                     {
@@ -781,7 +792,10 @@ public sealed class CivilizationEditorView : UserControl
                     label.TextAlign = ContentAlignment.MiddleLeft;
                     label.Margin = new Padding(0, 0, 10, 0);
                     var binding = new FieldBinding(civilization.Id, entity?.Id, definition, input, GetInputValue(input), false)
-                    { GameValue = gameValue, HadOverride = !string.IsNullOrWhiteSpace(authoredValue) && !SameValue(definition, value, gameValue), Writable = writable };
+                    {
+                        GameValue = gameValue, HadOverride = !string.IsNullOrWhiteSpace(authoredValue) && !SameValue(definition, value, gameValue),
+                        Writable = writable, AvailabilityItem = membership, AvailabilityItems = availabilityItems
+                    };
                     _bindings.Add(binding);
                     var reset = MakeButton("↶", () => ResetBinding(binding), $"Inherit {definition.Label}", 29);
                     reset.Height = 28;
@@ -792,7 +806,9 @@ public sealed class CivilizationEditorView : UserControl
                     _tips.SetToolTip(reset, "Reset this property to its current game value.");
                     _tips.SetToolTip(input, !writable
                         ? gameValue is null ? "This property has no verified game-data mapping yet." : "Current game value; this property is read-only."
-                        : definition.Help ?? "Current game value. Editing this field creates an override.");
+                        : membership is not null
+                            ? $"Availability applies to {civilization.Name} only and is shared with the progression editor. Linked items using the same production or research record change together."
+                            : definition.Help ?? "Current game value. Editing this field creates an override.");
                     grid.RowStyles.Add(input is MedievalChoiceSelector ? new RowStyle(SizeType.AutoSize) : new RowStyle(SizeType.Absolute, definition.Kind == CivilizationFieldKind.Multiline ? 88 : 38));
                     grid.Controls.Add(label, 0, row);
                     var frame = input is MedievalChoiceSelector ? input : MedievalTheme.FrameInput(input);
@@ -1065,6 +1081,12 @@ public sealed class CivilizationEditorView : UserControl
                         var civilization = project.Civilizations.Single(c => c.Id == binding.CivilizationId);
                         var entity = binding.EntityId is null ? null : civilization.Entities.FirstOrDefault(entry => entry.Id == binding.EntityId);
                         var inherit = !binding.IsName && (string.IsNullOrWhiteSpace(value) || SameValue(binding.Definition!, value, binding.GameValue));
+                        if (binding.AvailabilityItem is { } membership)
+                        {
+                            CivilizationAgeProgression.SetMembership(civilization, binding.AvailabilityItems, membership,
+                                inherit ? membership.IncludedByDefault : bool.Parse(value), inherit);
+                            continue;
+                        }
                         if (binding.EntityId is not null && entity is null)
                         {
                             if (inherit) continue;
@@ -1209,8 +1231,13 @@ public sealed class CivilizationEditorView : UserControl
         {
             var draft = project.Civilizations.Single(c => c.Id == civilization.Id);
             var properties = entityId is null ? draft.Properties : draft.Entities.FirstOrDefault(entity => entity.Id == entityId)?.Properties;
-            if (properties is null) return;
-            foreach (var key in keys) properties.Remove(key);
+            if (properties is not null)
+                foreach (var key in keys) properties.Remove(key);
+            foreach (var binding in _bindings.Where(binding => binding.AvailabilityItem is not null))
+            {
+                var membership = binding.AvailabilityItem!;
+                CivilizationAgeProgression.SetMembership(draft, binding.AvailabilityItems, membership, membership.IncludedByDefault, true);
+            }
             if (progressionItems is not null && _gameData is not null)
                 foreach (var item in progressionItems)
                 {
@@ -2069,5 +2096,7 @@ public sealed class CivilizationEditorView : UserControl
         public string? GameValue { get; init; }
         public bool HadOverride { get; set; }
         public bool Writable { get; init; } = true;
+        public CivilizationAgeProgressionItem? AvailabilityItem { get; init; }
+        public IReadOnlyList<CivilizationAgeProgressionItem> AvailabilityItems { get; init; } = [];
     }
 }

@@ -211,9 +211,7 @@ internal sealed class AgeProgressionPanel : UserControl
     }
 
     private static CivilizationEntityDraft? FindEntity(CivilizationDraft civilization, CivilizationEntityDraft source) =>
-        civilization.Entities.FirstOrDefault(entity => entity.Id == source.Id) ?? civilization.Entities.FirstOrDefault(entity =>
-            entity.Category == source.Category && (source.SourceObjectId is int objectId ? entity.SourceObjectId == objectId :
-                source.SourceTechnologyId is int technologyId && entity.SourceObjectId is null && entity.SourceTechnologyId == technologyId));
+        CivilizationAgeProgression.FindEntity(civilization, source);
 
     private string? SharedOverride(CivilizationAgeProgressionItem item, string key)
     {
@@ -427,31 +425,8 @@ internal sealed class AgeProgressionPanel : UserControl
     private bool SetMembership(CivilizationAgeProgressionItem item, bool included, bool inherit)
     {
         var before = _candidate.Clone();
-        var aliases = _items.Where(alias => alias.TechnologyId == item.TechnologyId).ToArray();
-        foreach (var alias in aliases)
-        {
-            var authored = FindEntity(_candidate, alias.Entity);
-            authored?.Properties.Remove(alias.MembershipKey);
-            if (inherit || !included) authored?.Properties.Remove(alias.ProducerKey);
-        }
-        var entity = FindEntity(_candidate, item.Entity);
-        if (entity is null)
-        {
-            entity = item.Entity.Clone();
-            _candidate.Entities.Add(entity);
-        }
-        var originallyIncluded = aliases.Any(alias => alias.IncludedByDefault);
-        var retainedEdits = aliases.Any(alias => FindEntity(_candidate, alias.Entity) is { } authored &&
-            (authored.Properties.Count > 0 || authored.Name != alias.Entity.Name));
-        if (inherit || included && item.IncludedByDefault || !included && !originallyIncluded && !retainedEdits)
-            entity.Properties.Remove(item.MembershipKey);
-        else entity.Properties[item.MembershipKey] = included ? "true" : "false";
-        if (!included && !originallyIncluded && retainedEdits) entity.Properties[item.MembershipKey] = "false";
-        if (inherit) entity.Properties.Remove(item.ProducerKey);
-        else if (included && item.AddedProducerIds.Count > 0)
-            entity.Properties[item.ProducerKey] = SelectedProducerId(item).ToString(CultureInfo.InvariantCulture);
-        if (entity.Properties.Count == 0 && entity.Name == item.Entity.Name) _candidate.Entities.Remove(entity);
-        PruneEmptyEntries();
+        CivilizationAgeProgression.SetMembership(_candidate, _items, item, included, inherit,
+            included && !inherit && item.AddedProducerIds.Count > 0 ? SelectedProducerId(item) : null);
         return PublishChange(before);
     }
 

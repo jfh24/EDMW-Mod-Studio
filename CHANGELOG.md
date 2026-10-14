@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Added enable/disable controls for Technologies, Units, and Buildings in the Civ Editor.
+
 ## 1.1.0 — 2026-10-13
 
 This release includes all source changes since v1.0.0, including online work published between releases and the Home/Friends updates. See the [release notes](docs/releases/v1.1.0.md) for usage, compatibility, and verification scope.
