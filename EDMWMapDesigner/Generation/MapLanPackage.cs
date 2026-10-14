@@ -123,6 +123,13 @@ public sealed partial class MapLanPackage
         return FromArchive(memory.ToArray());
     }
 
+    internal static byte[] ReadInstalledPreview(string payloadPath, uint mapId)
+    {
+        CheckPlainPath(Path.GetFullPath(payloadPath));
+        var map = ValidatePayload(ReadBounded(payloadPath, MaximumPayloadBytes), mapId);
+        return MultiplayerPackageExporter.RenderPreview(map);
+    }
+
     private static void WritePackageEntry(ZipArchive archive, string path, byte[] bytes)
     {
         var entry = archive.CreateEntry(path, CompressionLevel.Optimal);

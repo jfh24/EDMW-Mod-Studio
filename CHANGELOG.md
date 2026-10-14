@@ -1,8 +1,9 @@
 # Changelog
 
-## Unreleased
+## 1.1.1 — 2026-10-14
 
 - Added enable/disable controls for Technologies, Units, and Buildings in the Civ Editor.
+- Simplified Home mod entries with context-menu actions, LAN/Friends sharing choices, and map previews in Details.
 
 ## 1.1.0 — 2026-10-13
 

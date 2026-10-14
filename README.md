@@ -2,9 +2,9 @@
 
 **EDMW Mod Studio** is a Windows modding workspace for **Empires: Dawn of the Modern World**. It combines a visual Map Designer, a Civilization Editor, and tracked installation and sharing over LAN or online with friends.
 
-The application is version **1.1.0**. It is built with C#/.NET Windows Forms and includes a native, 32-bit map generator for the game.
+The application is version **1.1.1**. It is built with C#/.NET Windows Forms and includes a native, 32-bit map generator for the game.
 
-**[Download v1.1.0 for Windows](https://github.com/jfh24/EDMW-Mod-Studio/releases/download/v1.1.0/EDMW.Mod.Studio.exe)** · [Release notes and assets](https://github.com/jfh24/EDMW-Mod-Studio/releases/tag/v1.1.0) · [Changelog](CHANGELOG.md)
+**[Download v1.1.1 for Windows](https://github.com/jfh24/EDMW-Mod-Studio/releases/download/v1.1.1/EDMW.Mod.Studio.exe)** · [Release notes and assets](https://github.com/jfh24/EDMW-Mod-Studio/releases/tag/v1.1.1) · [Changelog](CHANGELOG.md)
 
 The source repository does not include the compiled executable. Download it from the release or build it locally using the instructions below.
 
@@ -40,7 +40,7 @@ See the [user guide](docs/user-guide.md) for controls and detailed workflows.
 
 ## Run the application
 
-On 64-bit Windows 10 or later, download and run [EDMW.Mod.Studio.exe](https://github.com/jfh24/EDMW-Mod-Studio/releases/download/v1.1.0/EDMW.Mod.Studio.exe). You can keep that filename or rename it to `EDMW Mod Studio.exe`.
+On 64-bit Windows 10 or later, download and run [EDMW.Mod.Studio.exe](https://github.com/jfh24/EDMW-Mod-Studio/releases/download/v1.1.1/EDMW.Mod.Studio.exe). You can keep that filename or rename it to `EDMW Mod Studio.exe`.
 
 If you build from source, open:
 
@@ -54,7 +54,7 @@ The published executable is self-contained; the .NET SDK is needed only to build
 2. Choose **Map Designer** or **Civ Editor** from Home.
 3. Create your changes and save the editable project.
 4. Choose **Export over LAN** in the active workspace to install locally and offer the same export to discovered recipients.
-5. Use Home to inspect or uninstall installed content. To share an installed item, check **LAN**, **Friends**, or both beside it, then choose **Share**. Friends delivery asks you to select online friends; recipients review the package before installing it.
+5. Right-click a Home entry for **Details**, **Share**, or **Uninstall**. Share opens a **LAN** or **Friends** choice; Friends then asks you to select recipients. Details shows the map preview or civilization changes.
 
 A valid, separately installed copy of the game is required for game data, model assets, and exports. Game executables, original game DLLs, databases, and asset archives are not provided by this repository.
 
@@ -167,7 +167,7 @@ The public product name is **EDMW Mod Studio**. Existing source paths, namespace
 ## Documentation and credits
 
 - [User guide](docs/user-guide.md)
-- [v1.1.0 release notes](docs/releases/v1.1.0.md) and [changelog](CHANGELOG.md)
+- [v1.1.1 release](https://github.com/jfh24/EDMW-Mod-Studio/releases/tag/v1.1.1) and [changelog](CHANGELOG.md)
 - [Development, architecture, and verification](docs/development.md)
 - [Online sharing and Render setup](docs/online-sharing.md)
 - [Online relay protocol](docs/online-protocol.md)

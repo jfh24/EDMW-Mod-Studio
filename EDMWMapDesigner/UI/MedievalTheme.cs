@@ -344,7 +344,7 @@ internal sealed class DashboardRecessedWell : Panel
     }
 }
 
-internal sealed class DashboardMapRow : TableLayoutPanel
+internal class DashboardMapRow : TableLayoutPanel
 {
     public DashboardMapRow()
     {

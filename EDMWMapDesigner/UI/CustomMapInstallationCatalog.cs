@@ -8,6 +8,16 @@ internal sealed record CustomMapInstallation(string Name, string MapId, string? 
 {
     internal bool IsComplete => ScriptPath is not null && File.Exists(ScriptPath) &&
                                 File.Exists(GeneratorPath) && File.Exists(PayloadPath);
+
+    internal string UpdatedDescription
+    {
+        get
+        {
+            var updated = new[] { ScriptPath, GeneratorPath, PayloadPath }.Where(File.Exists)
+                .Select(path => (DateTime?)File.GetLastWriteTime(path!)).Max();
+            return updated is { } time ? "Updated " + time.ToString("g", System.Globalization.CultureInfo.CurrentCulture) : "Files missing";
+        }
+    }
 }
 
 internal static class CustomMapInstallationCatalog
@@ -65,6 +75,14 @@ internal static class CustomMapInstallationCatalog
         }
 
         return result;
+    }
+
+    internal static byte[] ReadPreview(CustomMapInstallation map)
+    {
+        if (!TryNormalizeMapId(map.MapId, out var id))
+            throw new InvalidDataException("The installed map identity is invalid.");
+        return MapLanPackage.ReadInstalledPreview(map.PayloadPath,
+            uint.Parse(id, System.Globalization.NumberStyles.HexNumber, System.Globalization.CultureInfo.InvariantCulture));
     }
 
     internal static MapLanPackage CreateSharePackage(CustomMapInstallation map, bool hidePreview = false)

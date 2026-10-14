@@ -1,6 +1,6 @@
 # Development and verification
 
-EDMW Mod Studio version 1.1.0 consists of a Windows Forms editor, two installer templates, a native map generator, and a separate online relay. This document describes the source as shipped; it does not claim that every verification has been run on every game installation. See the [release notes](releases/v1.1.0.md) and [changelog](../CHANGELOG.md) for the changes since v1.0.0.
+EDMW Mod Studio version 1.1.1 consists of a Windows Forms editor, two installer templates, a native map generator, and a separate online relay. This document describes the source as shipped; it does not claim that every verification has been run on every game installation. See the [changelog](../CHANGELOG.md) for release changes.
 
 ## Build pipeline
 
@@ -62,13 +62,13 @@ The LAN recipient rebuilds its review using local game data. Received packages a
 
 ### Home inventory sharing and repainting
 
-Each installed-map and civilization-package row exposes **LAN**, **Friends**, and **Share**. Destination selection belongs to that row. The main form checks the listed game folder against the current selection, snapshots the selected installed item, and obtains Friends recipients before starting any transfer. Sharing has no local installation delegate; it leaves the open map and civilization documents untouched.
+Installed-map and civilization-package rows show text, with **Details**, **Share**, and **Uninstall** in a context menu. Share opens a **LAN** or **Friends** choice. The main form checks the listed game folder against the current selection, snapshots the selected installed item, and obtains Friends recipients before starting any transfer. Sharing has no local installation delegate; it leaves the open map and civilization documents untouched.
 
 `CustomMapInstallationCatalog.CreateSharePackage` and `MapLanPackage.FromInstalledFiles` assemble a bounded archive from the installed RMV, native generator, and sidecar. Expected file locations, map identity, supported sidecar format/integrity, script generator reference, plain paths, and the installed generator's x86 structure are validated. The RMV and sidecar bytes remain exact. If the installed generator differs from `EmbeddedGenerator.Read()`, the archive substitutes the current verified embedded copy; it never writes the sender's files or forwards an unverified generator. The review preview comes from the validated terrain sidecar. The usual archive decoder still requires the recipient's matching verified generator. No terrain regeneration or project load is required.
 
 `CivilizationPackageManager.CreateSharePackage` selects the full persisted package by its installation ID and checks its owned fields/files and protected original backups against the current installed state. The saved package retains original baselines, portable project, replacement model bytes, and progression changes; it is not rebuilt from cumulative game modifications. Legacy installations without a portable package, externally changed owned data, damaged backups, and unfinished transactions are rejected. The ordinary recipient review, compatibility checks, and tracked installation remain in use.
 
-Mixed LAN/Friends delivery uses the same per-recipient status workflow with distinct destination identities. A separate outbound transport avoids receiver lifetime changes and excludes this app's receiver instance from discovery, preventing an offer back to the sender. LAN receiving preferences do not disable outbound sharing. Canceling Friends selection aborts the complete action before LAN delivery; closing the status dialog withdraws unfinished offers through the existing transports.
+LAN and Friends delivery use the same per-recipient status workflow with distinct destination identities. A separate outbound transport avoids receiver lifetime changes and excludes this app's receiver instance from discovery, preventing an offer back to the sender. LAN receiving preferences do not disable outbound sharing. Canceling Friends selection aborts the share; closing the status dialog withdraws unfinished offers through the existing transports.
 
 `DashboardPanel` buffers Home and composes its transparent descendants. It caches the full-screen background at the current client size, invalidates that cache when the image/size/color changes, and disposes it with the control. This targets Home's repaint glitch without changing the other workspaces' native painting lifecycle.
 

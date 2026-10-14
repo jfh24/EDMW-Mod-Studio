@@ -21,7 +21,7 @@ This guide covers version 1.1.0, including online friends and sharing installed 
 - Lets any number of editors paint the same project over a trusted LAN connection. One person hosts and shares their displayed local address; others join it from **Collaborate**. Completed paint strokes synchronize immediately, with the most recently completed change taking precedence if multiple people change the same cells. Each collaborator's map-author name appears beside their live cursor.
 - Exports maps and civilization edits over LAN, installing them locally and offering them to other players for approval.
 - Sends map and civilization exports to every running designer discovered on the LAN with one click and per-recipient approval status.
-- Shares installed maps and civilization edits directly from Home over LAN, to selected online friends, or both, without opening their editable project files.
+- Shares installed maps and civilization edits directly from Home over LAN or to selected online friends, without opening their editable project files.
 
 ## Getting started
 
@@ -60,8 +60,8 @@ Keep the application open and connected to receive invitations and exports in an
 
 Home's **Custom maps** and **Civilization edits** panels let you share the item already installed in the selected game folder. Your currently open map and civilization documents are not used or replaced.
 
-1. Beside the item, check **LAN**, **Friends**, or both. Select at least one destination to enable **Share**.
-2. Choose **Share**. If **Friends** is selected, connect if needed and choose one or more accepted online friends. Canceling that selection stops the entire share, including LAN delivery.
+1. Right-click an entry for **Details**, **Share**, or **Uninstall**. Details shows the map preview or the civilization changes.
+2. Choose **Share**, then **LAN** or **Friends** in the popup. For Friends, connect if needed and choose recipients; canceling stops the share.
 3. Follow the shared status dialog. LAN offers go to receiving designers discovered on the network; Friends offers go to the friends you selected. Each recipient returns accepted/installed, denied, or failed status. Closing an active status dialog cancels unfinished offers.
 
 Sharing reads and validates the installed item without reinstalling it on this computer. A map retains its installed `.rmv`, `.edmwa` sidecar, name, and identity. If its installed x86 generator differs from this editor's verified copy, the shared package uses the current verified generator; the sender's installed DLL stays unchanged. Its review preview is reconstructed from the sidecar, and the Map Designer's **Hide map preview** selection also applies to Home map sharing. A civilization edit uses the selected package's saved installation manifest, retaining the original source project, expected values, model payloads, and progression data. It does not combine other installed civilization edits into the offer.
@@ -86,7 +86,7 @@ Use **Game > Export over LAN** to install the authored edits on this computer an
 
 The designer receives LAN offers automatically while open, including on Home and in the Map Designer. No Host/Join session or pairing is required. **Settings > Receive civ edits over LAN** controls receiving and shows the local address. The default TCP port is **42819**, configurable in Settings; discovery uses UDP **42820**. Accepted edits appear in Home's **Civilization edits** panel for Details and Uninstall. Recipients need the designer open with receiving enabled, and LAN discovery and transfer must be allowed by their firewall.
 
-The Home screen's **Civilization edits** panel lists installed projects with their recorded changes, installation time, Details, Share, and Uninstall. Returning Home or activating the app refreshes the list; Refresh also detects changes made by a separately run installer. Different fields can be installed as independent packages and uninstalled in either order. Overlapping fields and model replacements are rejected until their owning package is uninstalled. The installer validates the supported executable and source records, retains transaction backups, recovers interrupted operations, and refuses to overwrite externally changed owned fields. Earlier installations made directly by the designer also appear for uninstall.
+The Home screen's **Civilization edits** panel lists project names and installation times, with Details, Share, and Uninstall in each entry's context menu. Returning Home or activating the app refreshes the list; Refresh also detects changes made by a separately run installer. Different fields can be installed as independent packages and uninstalled in either order. Overlapping fields and model replacements are rejected until their owning package is uninstalled. The installer validates the supported executable and source records, retains transaction backups, recovers interrupted operations, and refuses to overwrite externally changed owned fields. Earlier installations made directly by the designer also appear for uninstall.
 
 Installation supports verified existing object fields, unit/building/research/command costs, civilization age/name-reference fields, verified scalar modifier effects, and native `.cem` replacement models. Civilization powers expose their actual assignments and activation chains; only verified linked effect operands are writable. `.obj` files can be uploaded and previewed, but native conversion is required before installation. New civilization/definition insertion, unmapped rules and native power parameters, and in-game/multiplayer validation remain incomplete; an unsupported change blocks export rather than being silently skipped. Every multiplayer participant needs matching installed gameplay data.
 

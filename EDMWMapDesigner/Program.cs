@@ -13,6 +13,22 @@ internal static class Program
     [STAThread]
     private static int Main(string[] args)
     {
+        if (args.Length == 2 && args[0].Equals("--verify-installed-content-ui", StringComparison.OrdinalIgnoreCase))
+        {
+            try
+            {
+                Application.SetUnhandledExceptionMode(UnhandledExceptionMode.ThrowException);
+                ApplicationConfiguration.Initialize();
+                InstalledContentUiVerification.Verify(args[1]);
+                Console.WriteLine("INSTALLED CONTENT UI PASS: text rows, context actions, share choices, and installed map preview.");
+                return 0;
+            }
+            catch (Exception error)
+            {
+                Console.Error.WriteLine("INSTALLED CONTENT UI FAIL: " + error);
+                return 1;
+            }
+        }
         if (args.Length == 2 && args[0].Equals("--verify-installed-sharing", StringComparison.OrdinalIgnoreCase))
         {
             try

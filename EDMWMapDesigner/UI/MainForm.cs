@@ -717,41 +717,31 @@ public sealed partial class MainForm : Form
                 }
                 foreach (var map in maps)
                 {
-                    var row = new DashboardMapRow { Size = new Size(Math.Max(1, list.ClientSize.Width), 94), RowCount = 2 };
-                    row.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-                    row.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
-                    row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-                    row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 102));
-                    var label = new Label { Text = map.IsComplete ? map.Name : $"{map.Name} (incomplete)", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft, AutoEllipsis = true, ForeColor = MedievalTheme.Text, Font = MedievalTheme.UiFont(9.5f), Padding = new Padding(10, 0, 0, 0) };
-                    var uninstall = new DashboardPlaqueButton
-                    {
-                        Text = "Uninstall", Anchor = AnchorStyles.Top | AnchorStyles.Right,
-                        Size = new Size(98, 30), TabStop = false, Margin = new Padding(2)
-                    };
-                    uninstall.Click += (_, _) =>
-                    {
-                        if (IsEdmwRunning())
+                    var row = new DashboardInstalledItemRow(map.Name, map.UpdatedDescription,
+                        map.IsComplete ? null : "Incomplete installation", map.IsComplete,
+                        () =>
                         {
-                            MedievalDialog.Show(this, "Close EDMW before uninstalling a map.", "Close EDMW", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                            return;
-                        }
-                        if (MedievalDialog.Show(this, $"Remove {map.Name}?", "Remove Map", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
-                        try
+                            using var dialog = new InstalledMapDetailsDialog(map);
+                            dialog.ShowDialog(this);
+                        }, () =>
                         {
-                            CustomMapInstallationCatalog.Uninstall(map);
-                            RefreshMaps();
-                        }
-                        catch (Exception ex)
-                        {
-                            MedievalDialog.Show(this, $"The map could not be fully removed.\n\n{ex.Message}", "Removal Failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                        }
-                    };
-                    row.Controls.Add(label, 0, 0);
-                    row.Controls.Add(uninstall, 1, 0);
-                    var sharing = new DashboardShareControls(map.Name, map.IsComplete,
-                        (lan, friends) => ShareInstalledMapAsync(map, gamePath, lan, friends));
-                    row.Controls.Add(sharing, 0, 1);
-                    row.SetColumnSpan(sharing, 2);
+                            if (IsEdmwRunning())
+                            {
+                                MedievalDialog.Show(this, "Close EDMW before uninstalling a map.", "Close EDMW", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                                return;
+                            }
+                            if (MedievalDialog.Show(this, $"Remove {map.Name}?", "Remove Map", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
+                            try
+                            {
+                                CustomMapInstallationCatalog.Uninstall(map);
+                                RefreshMaps();
+                            }
+                            catch (Exception ex)
+                            {
+                                MedievalDialog.Show(this, $"The map could not be fully removed.\n\n{ex.Message}", "Removal Failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                            }
+                        }, destination => ShareInstalledMapAsync(map, gamePath,
+                            destination == InstalledShareDestination.Lan, destination == InstalledShareDestination.Friends));
                     list.Controls.Add(row);
                 }
             }

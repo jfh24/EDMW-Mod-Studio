@@ -15,7 +15,6 @@ internal sealed class CivilizationInstalledEditsPanel : UserControl
         Dock = DockStyle.Fill, AutoScroll = true, FlowDirection = FlowDirection.TopDown,
         WrapContents = false, BackColor = Color.Transparent, Margin = Padding.Empty
     };
-    private readonly ToolTip _tips = new() { AutoPopDelay = 15000 };
     private string? _listedGamePath;
     private string[] _installedNames = [];
 
@@ -108,58 +107,15 @@ internal sealed class CivilizationInstalledEditsPanel : UserControl
 
     private Control CreatePackageRow(CivilizationInstalledPackage package)
     {
-        var row = new DashboardMapRow { Height = 128, RowCount = 2, AccessibleName = package.ProjectName };
-        row.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        row.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
-        row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 102));
-        var summary = new TableLayoutPanel
-        {
-            Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3,
-            Margin = new Padding(4, 2, 6, 2), BackColor = Color.Transparent
-        };
-        summary.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        summary.RowStyles.Add(new RowStyle(SizeType.Absolute, 25));
-        summary.RowStyles.Add(new RowStyle(SizeType.Absolute, 20));
-        summary.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        var name = RowLabel(package.ProjectName, MedievalTheme.Text, 10, bold: true);
         var complete = string.Equals(package.Status, "Installed", StringComparison.OrdinalIgnoreCase);
-        var time = RowLabel((complete ? "Installed " : "Recorded ") + package.InstalledAt.ToLocalTime().ToString("g", CultureInfo.CurrentCulture),
-            MedievalTheme.TextMuted, 8.5f);
-        var preview = RowLabel(complete ? ChangePreview(package) : package.Status,
-            complete ? MedievalTheme.TextSecondary : MedievalTheme.Warning, 8.5f);
-        _tips.SetToolTip(name, package.ProjectName);
-        _tips.SetToolTip(time, package.InstalledAt.ToLocalTime().ToString("F", CultureInfo.CurrentCulture));
-        _tips.SetToolTip(preview, package.Status + "\n" +
-            string.Join("\n", package.Changes.Take(8).Select(change => change.Description)));
-        summary.Controls.Add(name, 0, 0);
-        summary.Controls.Add(time, 0, 1);
-        summary.Controls.Add(preview, 0, 2);
-        var actions = new TableLayoutPanel
-        {
-            Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2,
-            Margin = new Padding(0, 4, 0, 4), BackColor = Color.Transparent
-        };
-        actions.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        actions.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
-        actions.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
-        var details = new DashboardPlaqueButton { Text = "Details", Dock = DockStyle.Fill, Margin = new Padding(2), AccessibleName = "View changes in " + package.ProjectName };
-        var uninstall = new DashboardPlaqueButton { Text = "Uninstall", Dock = DockStyle.Fill, Margin = new Padding(2), AccessibleName = "Uninstall " + package.ProjectName };
-        details.Click += (_, _) => ShowDetails(package);
-        uninstall.Click += (_, _) => Uninstall(package);
-        actions.Controls.Add(details, 0, 0);
-        actions.Controls.Add(uninstall, 0, 1);
-        row.Controls.Add(summary, 0, 0);
-        row.Controls.Add(actions, 1, 0);
         var listedGamePath = _listedGamePath;
         var canShare = complete && package.PackageId != "legacy" && listedGamePath is not null && _share is not null;
-        var sharing = new DashboardShareControls(package.ProjectName, canShare,
-            (lan, friends) => _share!(listedGamePath!, package, lan, friends));
-        if (package.PackageId == "legacy")
-            _tips.SetToolTip(sharing, "Reinstall this edit as a managed package to enable sharing.");
-        row.Controls.Add(sharing, 0, 1);
-        row.SetColumnSpan(sharing, 2);
-        return row;
+        return new DashboardInstalledItemRow(package.ProjectName,
+            (complete ? "Installed " : "Recorded ") + package.InstalledAt.ToLocalTime().ToString("g", CultureInfo.CurrentCulture),
+            complete ? null : package.Status, canShare, () => ShowDetails(package), () => Uninstall(package),
+            destination => _share!(listedGamePath!, package, destination == InstalledShareDestination.Lan,
+                destination == InstalledShareDestination.Friends),
+            package.PackageId == "legacy" ? "Reinstall this edit as a managed package to enable sharing." : null);
     }
 
     private void ShowDetails(CivilizationInstalledPackage package)
@@ -247,18 +203,6 @@ internal sealed class CivilizationInstalledEditsPanel : UserControl
         }
     }
 
-    private static Label RowLabel(string text, Color color, float size, bool bold = false) => new()
-    {
-        Text = text, Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft,
-        AutoEllipsis = true, Margin = Padding.Empty, ForeColor = color,
-        Font = MedievalTheme.UiFont(size, bold ? FontStyle.Bold : FontStyle.Regular)
-    };
-
-    private static string ChangePreview(CivilizationInstalledPackage package) => package.Changes.Count == 0
-        ? "No recorded changes"
-        : $"{package.Changes.Count} {(package.Changes.Count == 1 ? "change" : "changes")} · " +
-            package.Changes[0].CivilizationName + ": " + package.Changes[0].Label + " → " + package.Changes[0].After;
-
     internal static string BuildDetails(CivilizationInstalledPackage package)
     {
         var details = new StringBuilder();
@@ -276,12 +220,6 @@ internal sealed class CivilizationInstalledEditsPanel : UserControl
 
     private static bool Expected(Exception exception) => exception is IOException or
         UnauthorizedAccessException or InvalidDataException or ArgumentException or InvalidOperationException;
-
-    protected override void Dispose(bool disposing)
-    {
-        if (disposing) _tips.Dispose();
-        base.Dispose(disposing);
-    }
 
     private sealed class BufferedEntriesPanel : FlowLayoutPanel
     {
