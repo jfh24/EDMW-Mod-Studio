@@ -13,6 +13,32 @@ internal static class Program
     [STAThread]
     private static int Main(string[] args)
     {
+        if (args.Length == 2 && args[0].Equals("--verify-installed-sharing", StringComparison.OrdinalIgnoreCase))
+        {
+            try
+            {
+                Console.WriteLine("INSTALLED MAP SHARING PASS: " + string.Join("; ", InstalledMapSharingVerification.Verify(args[1])));
+                return 0;
+            }
+            catch (Exception error)
+            {
+                Console.Error.WriteLine("INSTALLED MAP SHARING FAIL: " + error);
+                return 1;
+            }
+        }
+        if (args.Length == 3 && args[0].Equals("--verify-civilization-installed-share", StringComparison.OrdinalIgnoreCase))
+        {
+            try
+            {
+                Console.WriteLine("INSTALLED CIVILIZATION SHARING PASS: " + string.Join("; ", Civilizations.CivilizationInstalledShareVerification.Run(args[1], args[2])));
+                return 0;
+            }
+            catch (Exception error)
+            {
+                Console.Error.WriteLine("INSTALLED CIVILIZATION SHARING FAIL: " + error);
+                return 1;
+            }
+        }
         if (args.Length == 3 && args[0].Equals("--verify-online-live", StringComparison.OrdinalIgnoreCase))
         {
             try

@@ -11,6 +11,7 @@ internal class LanExportStatusDialog : Form
     private readonly Func<CancellationToken, Task<CivilizationLanResult>>? _installLocal;
     private readonly bool _verificationMode;
     private readonly bool _onlineFriends;
+    private readonly Func<string?>? _discoveryNotice;
     private readonly CancellationTokenSource _lifetime = new();
     private readonly CancellationToken _cancellationToken;
     private readonly Label _status;
@@ -28,13 +29,14 @@ internal class LanExportStatusDialog : Form
         Func<CancellationToken, Task<IReadOnlyList<CivilizationLanPeer>>> discover,
         Func<CivilizationLanPeer, Action<CivilizationLanProgress>, CancellationToken, Task<CivilizationLanResult>> send,
         bool verificationMode = false, Func<CancellationToken, Task<CivilizationLanResult>>? installLocal = null,
-        bool onlineFriends = false)
+        bool onlineFriends = false, string? recipientLabel = null, Func<string?>? discoveryNotice = null)
     {
         _discover = discover ?? throw new ArgumentNullException(nameof(discover));
         _send = send ?? throw new ArgumentNullException(nameof(send));
         _installLocal = installLocal;
         _verificationMode = verificationMode;
         _onlineFriends = onlineFriends;
+        _discoveryNotice = discoveryNotice;
         _cancellationToken = _lifetime.Token;
         Text = title;
         ClientSize = new Size(510, 280);
@@ -71,9 +73,10 @@ internal class LanExportStatusDialog : Form
             Dock = DockStyle.Fill, View = View.Details, CheckBoxes = false, FullRowSelect = true,
             MultiSelect = false, HideSelection = true, ShowItemToolTips = true,
             BackColor = MedievalTheme.Input, ForeColor = MedievalTheme.Text,
-            BorderStyle = BorderStyle.FixedSingle, AccessibleName = onlineFriends ? "Selected friend decisions" : "LAN recipient decisions"
+            BorderStyle = BorderStyle.FixedSingle, AccessibleName = recipientLabel is not null
+                ? "Sharing recipient decisions" : onlineFriends ? "Selected friend decisions" : "LAN recipient decisions"
         };
-        _peers.Columns.Add(onlineFriends ? "Friend" : "Computer", 240);
+        _peers.Columns.Add(recipientLabel ?? (onlineFriends ? "Friend" : "Computer"), 240);
         _peers.Columns.Add("Status", 200);
         MedievalDialogFrame.StyleListView(_peers);
         _peers.Resize += (_, _) => ResizeColumns();
@@ -204,8 +207,8 @@ internal class LanExportStatusDialog : Form
                 recipients = _rows.Where(pair => pair.Key != LocalEndpoint).Select(pair =>
                     (Row: pair.Value, Peer: (CivilizationLanPeer)pair.Value.Tag!)).ToArray();
                 _discoveryComplete = true;
-                _discoveryMessage = recipients.Length == 0
-                    ? _onlineFriends ? "No selected friends are available." : "No recipients found on this LAN." : null;
+                _discoveryMessage = _discoveryNotice?.Invoke() ?? (recipients.Length == 0
+                    ? _onlineFriends ? "No selected friends are available." : "No recipients found on this LAN." : null);
                 UpdateStatus();
             });
             if (recipients.Length == 0 || !CanUpdate) return;

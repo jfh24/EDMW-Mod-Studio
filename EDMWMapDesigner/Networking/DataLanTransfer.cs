@@ -45,6 +45,7 @@ internal sealed class DataLanTransfer<TPackage, TOffer> : IDisposable where TPac
 
     public int Port { get; private set; }
     public int DiscoveryPort { get; private set; }
+    internal string InstanceId => _instanceId;
     public bool IsListening { get { lock (_gate) return _listener is not null; } }
 
     public DataLanTransfer(Func<TOffer, CancellationToken, Task<CivilizationLanDecision>> onOffer,
@@ -128,7 +129,8 @@ internal sealed class DataLanTransfer<TPackage, TOffer> : IDisposable where TPac
         }
     }
 
-    public async Task<IReadOnlyList<CivilizationLanPeer>> DiscoverAsync(TimeSpan? duration = null, CancellationToken cancellationToken = default)
+    public async Task<IReadOnlyList<CivilizationLanPeer>> DiscoverAsync(TimeSpan? duration = null, CancellationToken cancellationToken = default,
+        string? excludedInstanceId = null)
     {
         using var operation = LinkOperation(cancellationToken);
         var interval = duration ?? TimeSpan.FromSeconds(2);
@@ -156,7 +158,8 @@ internal sealed class DataLanTransfer<TPackage, TOffer> : IDisposable where TPac
                 if (incoming.Buffer.Length is < 1 or > 2048 || !IsLanAddress(incoming.RemoteEndPoint.Address)) continue;
                 var reply = JsonSerializer.Deserialize<DiscoveryMessage>(incoming.Buffer, JsonOptions);
                 if (reply is null || reply.Magic != ProtocolMagic || reply.Version != ProtocolVersion || reply.Kind != "reply" ||
-                    reply.Nonce != nonce || reply.InstanceId == _instanceId || reply.Port is < 1 or > 65535) continue;
+                    reply.Nonce != nonce || reply.InstanceId == _instanceId ||
+                    (excludedInstanceId is not null && reply.InstanceId == excludedInstanceId) || reply.Port is < 1 or > 65535) continue;
                 var address = incoming.RemoteEndPoint.Address.ToString();
                 // One editor may answer over several active adapters. Send-all should
                 // offer to that editor once, while retaining compatibility with older replies.

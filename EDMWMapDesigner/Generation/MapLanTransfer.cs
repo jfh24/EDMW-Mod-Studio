@@ -20,6 +20,9 @@ public sealed class MapLanTransfer : IDisposable
     public int Port => _transport.Port;
     public int DiscoveryPort => _transport.DiscoveryPort;
     public bool IsListening => _transport.IsListening;
+    internal string InstanceId => _transport.InstanceId;
+    internal Task<IReadOnlyList<CivilizationLanPeer>> DiscoverForShareAsync(string? excludedInstanceId, CancellationToken cancellationToken) =>
+        _transport.DiscoverAsync(null, cancellationToken, excludedInstanceId);
 
     public MapLanTransfer(Func<MapLanOffer, CancellationToken, Task<CivilizationLanDecision>> onOffer,
         string? displayName = null, int port = DefaultPort, int discoveryPort = DefaultDiscoveryPort, IPAddress? bindAddress = null)

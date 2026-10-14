@@ -8,6 +8,9 @@
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <AssemblyName>EDMWCivilizationInstaller</AssemblyName>
     <Product>EDMW Mod Studio</Product>
+    <Version>1.1.0</Version>
+    <AssemblyVersion>1.1.0.0</AssemblyVersion>
+    <FileVersion>1.1.0.0</FileVersion>
     <Title>EDMW Mod Studio Civilization Installer</Title>
     <Description>Standalone civilization mod installer exported by EDMW Mod Studio.</Description>
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>

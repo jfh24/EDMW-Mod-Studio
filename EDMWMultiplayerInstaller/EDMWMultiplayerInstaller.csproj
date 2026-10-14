@@ -8,6 +8,9 @@
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <AssemblyName>EDMWMultiplayerInstaller</AssemblyName>
     <Product>EDMW Mod Studio</Product>
+    <Version>1.1.0</Version>
+    <AssemblyVersion>1.1.0.0</AssemblyVersion>
+    <FileVersion>1.1.0.0</FileVersion>
     <Title>EDMW Mod Studio Multiplayer Map Installer</Title>
     <Description>Standalone multiplayer map installer exported by EDMW Mod Studio.</Description>
   </PropertyGroup>

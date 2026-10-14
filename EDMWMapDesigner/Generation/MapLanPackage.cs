@@ -74,6 +74,62 @@ public sealed partial class MapLanPackage
             [new(generatorPath, generator), new(payloadPath, payload), new(scriptPath, entries[scriptPath])]);
     }
 
+    /// <summary>Copies a verified installed map without loading a project or writing game data.</summary>
+    internal static MapLanPackage FromInstalledFiles(string gamePath, string scriptFileName, uint mapId,
+        bool hidePreview = false)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(gamePath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(scriptFileName);
+        if (scriptFileName != Path.GetFileName(scriptFileName) ||
+            !string.Equals(Path.GetExtension(scriptFileName), ".rmv", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException("The installed map script name is invalid.");
+
+        var root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(gamePath));
+        if (!GameInstallationLocator.IsValid(root) ||
+            !Directory.Exists(Path.Combine(root, "Data", "Random Map Scripts")))
+            throw new InvalidOperationException("The installed map's game folder was not found.");
+        CheckPlainPath(root);
+        CheckPlainPath(Path.Combine(root, GameInstallationLocator.GameExecutableName));
+        var generatorPath = AnchorPackage.GeneratorFileNameFor(mapId);
+        var installedScriptPath = ScriptsFolder + scriptFileName;
+        ValidateArchivePath(installedScriptPath);
+        var scriptPath = ScriptsFolder + Path.ChangeExtension(scriptFileName, ".rmv");
+        var payloadPath = $"{ScriptsFolder}{AnchorPackage.DataFolderName}/{mapId:X6}.edmwa";
+        var generator = ReadBounded(ResolveTarget(root, generatorPath), MaximumEntryBytes);
+        var script = ReadBounded(ResolveTarget(root, installedScriptPath), MaximumScriptBytes);
+        var payload = ReadBounded(ResolveTarget(root, payloadPath), MaximumPayloadBytes);
+        var map = ValidatePayload(payload, mapId);
+        EmbeddedGenerator.ValidateX86Dll(generator);
+        var verifiedGenerator = EmbeddedGenerator.Read();
+        EmbeddedGenerator.ValidateX86Dll(verifiedGenerator);
+        // Earlier editor builds can install another x86 generator under the same
+        // content-addressed map identity. Use the supported current generator for the
+        // verified terrain format instead of distributing unknown installed native code.
+        // This upgrades only the outgoing package; the sender's installation is untouched.
+        if (!generator.AsSpan().SequenceEqual(verifiedGenerator)) generator = verifiedGenerator;
+
+        // Previews are review metadata and are never installed. Reconstruct that image
+        // from the validated terrain while retaining installed RMV and terrain bytes exactly.
+        var preview = hidePreview ? MultiplayerPackageExporter.RenderRedactedPreview() :
+            MultiplayerPackageExporter.RenderPreview(map);
+        using var memory = new MemoryStream();
+        using (var archive = new ZipArchive(memory, ZipArchiveMode.Create, leaveOpen: true))
+        {
+            WritePackageEntry(archive, generatorPath, generator);
+            WritePackageEntry(archive, scriptPath, script);
+            WritePackageEntry(archive, payloadPath, payload);
+            WritePackageEntry(archive, PreviewPath, preview);
+        }
+        return FromArchive(memory.ToArray());
+    }
+
+    private static void WritePackageEntry(ZipArchive archive, string path, byte[] bytes)
+    {
+        var entry = archive.CreateEntry(path, CompressionLevel.Optimal);
+        using var stream = entry.Open();
+        stream.Write(bytes);
+    }
+
     /// <summary>Checks a recipient folder and all existing targets without creating or modifying anything.</summary>
     public string ValidateDestination(string gamePath)
     {
@@ -226,7 +282,7 @@ public sealed partial class MapLanPackage
             throw new InvalidDataException("The map preview is invalid.");
     }
 
-    private static void ValidatePayload(byte[] bytes, uint mapId)
+    private static MapProject ValidatePayload(byte[] bytes, uint mapId)
     {
         if (bytes.Length is < AnchorPackage.HeaderSize or > MaximumPayloadBytes || !bytes.AsSpan(0, 8).SequenceEqual("EDMWA07\0"u8) ||
             BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(8, 4)) != mapId)
@@ -274,6 +330,7 @@ public sealed partial class MapLanPackage
         if (!map.CliffMask.AsSpan().SequenceEqual(cliffs.Length == 0 ? new byte[count] : cliffs) ||
             AnchorPackage.MapId(map) != mapId || AnchorPackage.PlacementFlagsFor(map) != flags)
             throw new InvalidDataException("The map terrain contents do not match the exported map identity.");
+        return map;
     }
 
     private void ValidateExisting(string root, string path, byte[] bytes)

@@ -57,17 +57,49 @@ internal static class OnlineDialogVerification
             _ => Task.CompletedTask, _ => Task.CompletedTask, () => Task.CompletedTask))
         {
             Prepare(friends);
-            foreach (var size in new[] { friends.ClientSize, new Size(602, 604) })
+            var relaySettings = Descendants(friends).OfType<Button>().Single(button => button.AccessibleName == "Relay settings");
+            var endpoint = Descendants(friends).OfType<TextBox>().Single(input => input.AccessibleName == "Relay HTTPS URL");
+            Require(!endpoint.Visible, "Relay settings do not compete with the initial connection step.");
+            foreach (var size in new[] { friends.ClientSize, friends.MinimumSize })
             {
                 friends.ClientSize = size;
                 VerifyBounds(friends);
+                VerifyFriendsEmptyStates(friends);
                 Snapshot(friends, Path.Combine(outputDirectory, "online-friends-" + friends.ClientSize.Width + ".png"));
             }
             var connect = Descendants(friends).OfType<Button>().Single(button => button.Text == "Connect");
-            Require(connect.Enabled && !Descendants(friends).OfType<Button>().Single(button => button.Text == "Send request").Enabled,
+            var request = Descendants(friends).OfType<Button>().Single(button => button.Text == "Send request");
+            var requestCode = Descendants(friends).OfType<TextBox>().Single(input => input.AccessibleName == "Friend code to request");
+            Require(connect.Enabled && !request.Enabled && !requestCode.Enabled,
                 "Disconnected state enables Connect and requires a connection before requesting friends.");
+            Require(!Descendants(friends).OfType<Button>().Any(button => button.Text == "Leave session" && button.Visible),
+                "An inactive map session does not expose a Leave session action.");
+            relaySettings.PerformClick();
+            VerifyBounds(friends);
+            Require(endpoint.Visible && endpoint.Enabled, "Relay settings can be opened and edited before connecting.");
+            VerifyFriendsEmptyStates(friends);
+            Snapshot(friends, Path.Combine(outputDirectory, "online-friends-relay-settings-minimum.png"));
+            relaySettings.PerformClick();
+            VerifyBounds(friends);
+            Require(!endpoint.Visible && requestCode.Text.Length == 0 && !request.Enabled,
+                "Relay settings close cleanly while an empty friend code remains unavailable offline.");
             friends.Hide();
-            checks.Add("Themed Friends dialog keeps connection, requests, friend actions, invitations and status inside its standard and minimum bounds while disconnected.");
+            checks.Add("Friends has readable empty states, hides relay settings until requested, and keeps disconnected controls reachable inside standard and minimum bounds with settings expanded or collapsed.");
+        }
+        using (var scaledFriends = new FriendsDialog(client, preferences, () => [], () => true, () => false,
+            _ => Task.CompletedTask, _ => Task.CompletedTask, () => Task.CompletedTask))
+        {
+            Prepare(scaledFriends);
+            var scaledMinimum = new Size((int)Math.Ceiling(scaledFriends.MinimumSize.Width * 1.5),
+                (int)Math.Ceiling(scaledFriends.MinimumSize.Height * 1.5));
+            scaledFriends.Scale(new SizeF(1.5f, 1.5f));
+            scaledFriends.ClientSize = scaledMinimum;
+            Descendants(scaledFriends).OfType<Button>().Single(button => button.AccessibleName == "Relay settings").PerformClick();
+            VerifyBounds(scaledFriends);
+            Snapshot(scaledFriends, Path.Combine(outputDirectory, "online-friends-layout-scale-150.png"));
+            VerifyFriendsEmptyStates(scaledFriends);
+            scaledFriends.Hide();
+            checks.Add("Friends keeps expanded relay settings, lists, and empty-state text reachable in its minimum layout after 150 percent control scaling.");
         }
         var profiles = new[] { new OnlineProfile(Guid.NewGuid(), "Accepted online friend", "ABCD-EFGH", true), new OnlineProfile(Guid.NewGuid(), "Another friend", "JKLM-NPQR", true) };
         using (var picker = new OnlineFriendPickerDialog("Verification export", profiles))
@@ -108,21 +140,81 @@ internal static class OnlineDialogVerification
         Application.DoEvents();
         LayoutAll(form);
         var controls = Descendants(form).Where(control => control.Visible && control is Button or TextBox or ListView).ToArray();
-        foreach (var control in controls)
+        try
         {
-            var bounds = new Rectangle(form.PointToClient(control.Parent!.PointToScreen(control.Location)), control.Size);
-            Require(control.Width > 0 && control.Height > 0 && form.ClientRectangle.Contains(bounds) && control.Parent.ClientRectangle.Contains(control.Bounds),
-                (control.AccessibleName ?? control.Text) + " stays inside its parent and dialog at " + form.ClientSize + ".");
+            foreach (var control in controls)
+                Require(control.Width > 0 && control.Height > 0 && control.Parent!.ClientRectangle.Contains(control.Bounds) &&
+                    ReachableInViewport(form, control),
+                    (control.AccessibleName ?? control.Text) + " stays inside its parent and can be fully shown inside the dialog at " + form.ClientSize + ".");
         }
+        finally { ResetScrollPositions(form); }
         var inputs = controls.Where(control => control.Name != MedievalDialogFrame.CloseButtonName).ToArray();
         for (var index = 0; index < inputs.Length; index++)
             for (var next = index + 1; next < inputs.Length; next++)
             {
-                var a = new Rectangle(form.PointToClient(inputs[index].Parent!.PointToScreen(inputs[index].Location)), inputs[index].Size);
-                var b = new Rectangle(form.PointToClient(inputs[next].Parent!.PointToScreen(inputs[next].Location)), inputs[next].Size);
+                var sameViewport = ReferenceEquals(ScrollAncestors(inputs[index]).FirstOrDefault(), ScrollAncestors(inputs[next]).FirstOrDefault());
+                var a = sameViewport ? BoundsIn(form, inputs[index]) : VisibleBoundsIn(form, inputs[index]);
+                var b = sameViewport ? BoundsIn(form, inputs[next]) : VisibleBoundsIn(form, inputs[next]);
                 Require(!a.IntersectsWith(b), "Dialog buttons, inputs, and lists do not overlap.");
             }
         Require(form.FormBorderStyle == FormBorderStyle.None && Descendants(form).OfType<ListView>().All(list => list.OwnerDraw), "Online dialogs use shared themed chrome and list headings.");
+    }
+
+    private static void VerifyFriendsEmptyStates(Form form)
+    {
+        try
+        {
+            foreach (var text in new[] { "Your friends will appear here", "No map invitations yet" })
+            {
+                var label = Descendants(form).OfType<Label>().Single(label => label.Text == text);
+                var measured = TextRenderer.MeasureText(label.Text, label.Font,
+                    new Size(Math.Max(1, label.ClientSize.Width), int.MaxValue),
+                    TextFormatFlags.WordBreak | TextFormatFlags.NoPrefix);
+                Require(label.Visible && label.Width > 0 && label.Height >= measured.Height &&
+                    label.Width >= measured.Width && label.Parent!.ClientRectangle.Contains(label.Bounds) && ReachableInViewport(form, label),
+                    text + " is readable, inside its empty state, and can be fully shown at " + form.ClientSize + ".");
+            }
+            foreach (var list in Descendants(form).OfType<ListView>().Where(list => list.Visible))
+                Require(list.Width > 0 && list.Height >= list.Font.Height * 2 && ReachableInViewport(form, list),
+                    list.AccessibleName + " reserves enough height for its heading and a row and can be fully shown at " + form.ClientSize + ".");
+        }
+        finally { ResetScrollPositions(form); }
+    }
+
+    private static bool ReachableInViewport(Form form, Control control)
+    {
+        var viewports = ScrollAncestors(control).ToArray();
+        foreach (var viewport in viewports)
+        {
+            viewport.ScrollControlIntoView(control);
+            LayoutAll(form);
+        }
+        return form.ClientRectangle.Contains(BoundsIn(form, control)) &&
+            viewports.All(viewport => viewport.ClientRectangle.Contains(BoundsIn(viewport, control)));
+    }
+
+    private static Rectangle BoundsIn(Control container, Control control) =>
+        new(container.PointToClient(control.PointToScreen(Point.Empty)), control.Size);
+
+    private static Rectangle VisibleBoundsIn(Form form, Control control)
+    {
+        var bounds = Rectangle.Intersect(form.ClientRectangle, BoundsIn(form, control));
+        foreach (var viewport in ScrollAncestors(control))
+            bounds = Rectangle.Intersect(bounds, new Rectangle(form.PointToClient(viewport.PointToScreen(Point.Empty)), viewport.ClientSize));
+        return bounds;
+    }
+
+    private static IEnumerable<ScrollableControl> ScrollAncestors(Control control)
+    {
+        for (Control? parent = control.Parent; parent is not null; parent = parent.Parent)
+            if (parent is ScrollableControl { AutoScroll: true } viewport) yield return viewport;
+    }
+
+    private static void ResetScrollPositions(Form form)
+    {
+        foreach (var viewport in Descendants(form).OfType<ScrollableControl>().Where(control => control.AutoScroll))
+            viewport.AutoScrollPosition = Point.Empty;
+        LayoutAll(form);
     }
 
     private static IEnumerable<Control> Descendants(Control parent)

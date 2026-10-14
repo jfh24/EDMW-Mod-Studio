@@ -561,7 +561,7 @@ public sealed partial class MainForm : Form
 
     private Control BuildHomeView()
     {
-        var dashboard = new Panel
+        var dashboard = new DashboardPanel
         {
             Dock = DockStyle.Fill,
             AutoScroll = false,
@@ -596,7 +596,7 @@ public sealed partial class MainForm : Form
         {
             _civilizationEditorView?.LoadGameCatalog();
             _status.Text = "Civilization edits uninstalled.";
-        });
+        }, ShareInstalledCivilizationAsync);
         _civilizationInstalledEditsPanel = civilizationEdits;
         dashboard.Controls.Add(generator);
         dashboard.Controls.Add(civilizations);
@@ -717,11 +717,17 @@ public sealed partial class MainForm : Form
                 }
                 foreach (var map in maps)
                 {
-                    var row = new DashboardMapRow { Size = new Size(Math.Max(1, list.ClientSize.Width), 54) };
+                    var row = new DashboardMapRow { Size = new Size(Math.Max(1, list.ClientSize.Width), 94), RowCount = 2 };
+                    row.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+                    row.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
                     row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
                     row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 102));
                     var label = new Label { Text = map.IsComplete ? map.Name : $"{map.Name} (incomplete)", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft, AutoEllipsis = true, ForeColor = MedievalTheme.Text, Font = MedievalTheme.UiFont(9.5f), Padding = new Padding(10, 0, 0, 0) };
-                    var uninstall = new DashboardPlaqueButton { Text = "Uninstall", Dock = DockStyle.Fill, TabStop = false, Margin = new Padding(3) };
+                    var uninstall = new DashboardPlaqueButton
+                    {
+                        Text = "Uninstall", Anchor = AnchorStyles.Top | AnchorStyles.Right,
+                        Size = new Size(98, 30), TabStop = false, Margin = new Padding(2)
+                    };
                     uninstall.Click += (_, _) =>
                     {
                         if (IsEdmwRunning())
@@ -742,6 +748,10 @@ public sealed partial class MainForm : Form
                     };
                     row.Controls.Add(label, 0, 0);
                     row.Controls.Add(uninstall, 1, 0);
+                    var sharing = new DashboardShareControls(map.Name, map.IsComplete,
+                        (lan, friends) => ShareInstalledMapAsync(map, gamePath, lan, friends));
+                    row.Controls.Add(sharing, 0, 1);
+                    row.SetColumnSpan(sharing, 2);
                     list.Controls.Add(row);
                 }
             }

@@ -77,6 +77,27 @@ public static class CivilizationPackageManager
     public static CivilizationInstallResult Install(CivilizationInstallerPackage package, string gamePath)
         => InstallCore(package, gamePath, allowAlreadyInstalled: false);
 
+    /// <summary>
+    /// Reads the selected installation's portable package without opening a
+    /// project or rebuilding from the game's cumulative installed edits.
+    /// </summary>
+    public static CivilizationInstallerPackage CreateSharePackage(string gamePath, string packageId)
+    {
+        if (packageId == "legacy")
+            throw new InvalidDataException("This earlier civilization installation has no saved share package. Restore it, then install it once through the Civ Editor to enable sharing from Home.");
+        RequireId(packageId);
+        var root = Root(gamePath);
+        var installed = LoadInstalled(root);
+        var selected = installed.SingleOrDefault(item => item.Package.PackageId == packageId)
+            ?? throw new InvalidDataException("This civilization edit is no longer installed. Refresh the Home inventory before sharing.");
+        // The persisted package retains the original expected values, source
+        // project, model payloads and progression data for this installation.
+        // This read-only check also rejects interrupted or externally changed
+        // installations; no sender installation or project load is necessary.
+        CheckInstalledState(selected.Package, root, installed);
+        return selected.Package;
+    }
+
     internal static CivilizationInstallResult InstallOrVerifyInstalled(CivilizationInstallerPackage package, string gamePath)
         => InstallCore(package, gamePath, allowAlreadyInstalled: true);
 
@@ -147,7 +168,7 @@ public static class CivilizationPackageManager
     private static void CheckInstalledState(CivilizationInstallerPackage package, string root, IReadOnlyList<PackageInstallation> installed)
     {
         if (LoadTransactions(root).Any(transaction => transaction.State != "Complete"))
-            throw new InvalidDataException("An interrupted package transaction needs recovery before this project can be exported again.");
+            throw new InvalidDataException("An interrupted package transaction needs recovery before this civilization package can be shared.");
         CheckCompatibility(package, root, installed, uninstall: false, alreadyInstalled: true);
         foreach (var file in package.Files.Where(file => file.WholeFile || file.Patches.Count > 0))
         {
@@ -155,13 +176,13 @@ public static class CivilizationPackageManager
             if (file.WholeFile)
             {
                 if (!current.AsSpan().SequenceEqual(file.Replacement))
-                    throw new InvalidDataException("An installed export file changed externally. This project cannot be exported as installed: " + file.RelativePath);
+                    throw new InvalidDataException("An installed export file changed externally. This civilization package cannot be shared as installed: " + file.RelativePath);
             }
             else
             {
                 foreach (var patch in file.Patches)
                     if (!current.AsSpan(patch.Offset, patch.Length).SequenceEqual(patch.Replacement))
-                        throw new InvalidDataException("An installed field changed externally. This project cannot be exported as installed: " + patch.SemanticTarget);
+                        throw new InvalidDataException("An installed field changed externally. This civilization package cannot be shared as installed: " + patch.SemanticTarget);
                 ValidateMergedTables(file, current, current, allowUniversalRestoration: true);
             }
         }
@@ -174,10 +195,19 @@ public static class CivilizationPackageManager
             throw new InvalidDataException("The installed package's protected backup index is incomplete.");
         foreach (var file in backup.Files)
         {
+            var exported = changed.Single(entry => entry.RelativePath.Equals(file.RelativePath, StringComparison.OrdinalIgnoreCase));
+            if (exported.WholeFile && !SameHash(exported.ExpectedHash, file.BeforeHash))
+                throw new InvalidDataException("The installed package's original file baseline differs from its protected backup.");
+            if (!exported.WholeFile && file.BeforeHash is null)
+                throw new InvalidDataException("The installed package's original field backup is missing.");
             if (file.BeforeHash is null) continue;
             var original = ReadBounded(Path.Combine(backup.Directory, file.BackupName));
             if (!SameHash(CivilizationInstallerPackage.Hash(original), file.BeforeHash))
                 throw new InvalidDataException("An installed package's protected original backup changed.");
+            if (!exported.WholeFile && (original.Length != exported.ExpectedLength ||
+                exported.Patches.Any(patch => !original.AsSpan(patch.Offset, patch.Length).SequenceEqual(patch.Expected) ||
+                    !original.AsSpan(patch.IdentityOffset, patch.IdentityBytes.Length).SequenceEqual(patch.IdentityBytes))))
+                throw new InvalidDataException("The installed package's original field baselines differ from its protected backup.");
         }
     }
 

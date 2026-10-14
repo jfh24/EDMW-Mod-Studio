@@ -67,6 +67,33 @@ internal static class CustomMapInstallationCatalog
         return result;
     }
 
+    internal static MapLanPackage CreateSharePackage(CustomMapInstallation map, bool hidePreview = false)
+    {
+        ArgumentNullException.ThrowIfNull(map);
+        if (!TryNormalizeMapId(map.MapId, out var id))
+            throw new InvalidDataException("The installed map identity is invalid.");
+        if (map.ScriptPath is null)
+            throw new InvalidOperationException("This map is incomplete. Reinstall it before sharing.");
+
+        var generatorPath = Path.GetFullPath(map.GeneratorPath);
+        var gameRoot = Path.GetDirectoryName(generatorPath)
+            ?? throw new InvalidDataException("The installed map generator path is invalid.");
+        var scriptsRoot = Path.GetFullPath(Path.Combine(gameRoot, "Data", "Random Map Scripts"));
+        var scriptPath = Path.GetFullPath(map.ScriptPath);
+        var expectedGenerator = Path.GetFullPath(Path.Combine(gameRoot, $"EDMW_{id}.dll"));
+        var expectedPayload = Path.GetFullPath(Path.Combine(scriptsRoot, AnchorPackage.DataFolderName, $"{id}.edmwa"));
+        if (!string.Equals(generatorPath, expectedGenerator, StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(Path.GetFullPath(map.PayloadPath), expectedPayload, StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(Path.GetDirectoryName(scriptPath), scriptsRoot, StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(Path.GetExtension(scriptPath), ".rmv", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException("The installed map files are outside their expected locations.");
+        if (!map.IsComplete)
+            throw new InvalidOperationException("This map is incomplete. Reinstall it before sharing.");
+
+        AnchorPackage.TryParseGeneratorName($"EDMW_{id}", out var mapId);
+        return MapLanPackage.FromInstalledFiles(gameRoot, Path.GetFileName(scriptPath), mapId, hidePreview);
+    }
+
     internal static void Uninstall(CustomMapInstallation map)
     {
         ArgumentNullException.ThrowIfNull(map);

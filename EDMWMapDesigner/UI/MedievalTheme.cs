@@ -284,7 +284,7 @@ internal sealed class DashboardPlaqueButton : Button
         }
         using (var innerPath = CreatePlaquePath(inner, 4))
         using (var innerBrush = DashboardTextures.CreateButtonBrush())
-        using (var innerBorder = new Pen(_hovered ? MedievalTheme.GoldBright : MedievalTheme.BorderStrong, 1f))
+        using (var innerBorder = new Pen(Enabled && _hovered ? MedievalTheme.GoldBright : MedievalTheme.BorderStrong, 1f))
         {
             e.Graphics.FillPath(innerBrush, innerPath);
             e.Graphics.DrawPath(innerBorder, innerPath);
@@ -294,7 +294,7 @@ internal sealed class DashboardPlaqueButton : Button
         var textShadowBounds = new Rectangle(textBounds.X + 1, textBounds.Y + 1, textBounds.Width, textBounds.Height);
         TextRenderer.DrawText(e.Graphics, Text, Font, textShadowBounds, Color.FromArgb(220, 0, 0, 0),
             TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding | TextFormatFlags.EndEllipsis);
-        TextRenderer.DrawText(e.Graphics, Text, Font, textBounds, ForeColor,
+        TextRenderer.DrawText(e.Graphics, Text, Font, textBounds, Enabled ? ForeColor : MedievalTheme.TextSecondary,
             TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding | TextFormatFlags.EndEllipsis);
         if (Focused) ControlPaint.DrawFocusRectangle(e.Graphics, Rectangle.Inflate(ClientRectangle, -4, -4));
     }

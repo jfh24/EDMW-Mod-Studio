@@ -97,7 +97,7 @@ internal static class MultiplayerPackageExporter
         }
     }
 
-    private static byte[] RenderPreview(MapProject map)
+    internal static byte[] RenderPreview(MapProject map)
     {
         using var source = new Bitmap(map.GridSize, map.GridSize, PixelFormat.Format32bppArgb);
         var pixels = map.Cells.Select(cell => ((TerrainKind)cell).Color().ToArgb()).ToArray();
@@ -123,7 +123,7 @@ internal static class MultiplayerPackageExporter
         return output.ToArray();
     }
 
-    private static byte[] RenderRedactedPreview()
+    internal static byte[] RenderRedactedPreview()
     {
         using var preview = new Bitmap(512, 512, PixelFormat.Format32bppArgb);
         using (var graphics = Graphics.FromImage(preview))

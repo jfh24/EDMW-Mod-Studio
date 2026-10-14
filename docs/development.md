@@ -1,6 +1,6 @@
 # Development and verification
 
-EDMW Mod Studio version 1.0.0 consists of a Windows Forms editor, two installer templates, and a native map generator. This document describes the source as shipped; it does not claim that every verification has been run on every game installation.
+EDMW Mod Studio version 1.1.0 consists of a Windows Forms editor, two installer templates, a native map generator, and a separate online relay. This document describes the source as shipped; it does not claim that every verification has been run on every game installation. See the [release notes](releases/v1.1.0.md) and [changelog](../CHANGELOG.md) for the changes since v1.0.0.
 
 ## Build pipeline
 
@@ -60,13 +60,25 @@ Export reviews supported targets and creates a verified package. Installation tr
 
 The LAN recipient rebuilds its review using local game data. Received packages are installed through the package system rather than by executing a received installer.
 
+### Home inventory sharing and repainting
+
+Each installed-map and civilization-package row exposes **LAN**, **Friends**, and **Share**. Destination selection belongs to that row. The main form checks the listed game folder against the current selection, snapshots the selected installed item, and obtains Friends recipients before starting any transfer. Sharing has no local installation delegate; it leaves the open map and civilization documents untouched.
+
+`CustomMapInstallationCatalog.CreateSharePackage` and `MapLanPackage.FromInstalledFiles` assemble a bounded archive from the installed RMV, native generator, and sidecar. Expected file locations, map identity, supported sidecar format/integrity, script generator reference, plain paths, and the installed generator's x86 structure are validated. The RMV and sidecar bytes remain exact. If the installed generator differs from `EmbeddedGenerator.Read()`, the archive substitutes the current verified embedded copy; it never writes the sender's files or forwards an unverified generator. The review preview comes from the validated terrain sidecar. The usual archive decoder still requires the recipient's matching verified generator. No terrain regeneration or project load is required.
+
+`CivilizationPackageManager.CreateSharePackage` selects the full persisted package by its installation ID and checks its owned fields/files and protected original backups against the current installed state. The saved package retains original baselines, portable project, replacement model bytes, and progression changes; it is not rebuilt from cumulative game modifications. Legacy installations without a portable package, externally changed owned data, damaged backups, and unfinished transactions are rejected. The ordinary recipient review, compatibility checks, and tracked installation remain in use.
+
+Mixed LAN/Friends delivery uses the same per-recipient status workflow with distinct destination identities. A separate outbound transport avoids receiver lifetime changes and excludes this app's receiver instance from discovery, preventing an offer back to the sender. LAN receiving preferences do not disable outbound sharing. Canceling Friends selection aborts the complete action before LAN delivery; closing the status dialog withdraws unfinished offers through the existing transports.
+
+`DashboardPanel` buffers Home and composes its transparent descendants. It caches the full-screen background at the current client size, invalidates that cache when the image/size/color changes, and disposes it with the control. This targets Home's repaint glitch without changing the other workspaces' native painting lifecycle.
+
 ### Online friends and sharing
 
 The desktop authenticates a signed device identity over HTTPS/WSS and stores its credential and accepted friendship receipts using Windows DPAPI. Friends require a request and acceptance. The free relay's stable `IDENTITY_SECRET` verifies recovery credentials after its ephemeral filesystem is replaced. A recovered friendship authorizes sharing only after both authenticated devices declare the same signed acceptance. A peer's current omission removes the stale counterpart receipt, preventing unilateral restoration of a removed friendship. The relay controls presence, invitation and export access, room membership, and ordered map revisions. Online map editing uses the existing `MapDelta` and `MapProject` formats. Public connections require TLS; unencrypted loopback endpoints are available for local verification.
 
 Online exports reuse map archives and `CivilizationInstallerPackageCodec` payloads. The relay checks upload length and SHA-256, permits downloads only by the intended accepted friend, and forwards recipient decisions. The desktop then applies the existing package validation, review, and tracked installation flow. Received installer executables are never run. Identity and accepted-contact recovery uses desktop credentials and the stable environment secret; pending requests, rooms and package offers remain transient. Connect polls the relay's health endpoint with a bounded, cancellable timeout to accommodate free-service cold starts.
 
-See [online setup and operations](online-sharing.md) and [the wire protocol](online-protocol.md). The relay is a separate service and is not embedded in the Windows executable. Source builds include the online feature; the existing v1.0.0 release does not.
+See [online setup and operations](online-sharing.md) and [the wire protocol](online-protocol.md). The relay is a separate service and is not embedded in the Windows executable. The v1.1.0 desktop release includes the online feature; v1.0.0 predates it.
 
 ## Game compatibility
 
@@ -110,9 +122,11 @@ The self-test exercises project persistence and identity, generated scripts and 
 | Switch and arguments | Coverage / output |
 | --- | --- |
 | `--self-test` | Core map and collaboration checks; does not require an installed game. |
+| `--verify-installed-sharing <output-folder>` | Installed-map RMV/sidecar bytes and identity, verified generator reuse/upgrade, previews/redaction, isolated recipient installation, invalid/incomplete/changed/oversized inputs, and read-only sender preservation; also exercises discovery with temporary loopback receivers to check sender exclusion. No UI, online connection, or package offers. |
+| `--verify-civilization-installed-share <game-folder> <output-folder>` | Domain-only installed civilization package selection/reuse, retained baselines and payloads, and rejection of changed/legacy/interrupted state using disposable game fixtures; no UI or network. |
 | `--verify-online <loopback-relay-url> [control-directory]` | Actual C# clients against Node: authentication, friendship permissions, map invitations, map masks, simultaneous edits, cursors, export decisions, reconnect, and revocation. The isolated runner supplies a control directory to verify identity/contact recovery across complete filesystem replacements. Does not install game data. |
 | `--verify-online-live <https-relay-url> <output-folder>` | Explicit public-relay check using three temporary profiles: friends, 512 by 512 map synchronization, valid map/civilization archive transfer and decoding, integrity failures, cancellation, disconnect, reconnect and revocation. Reports cleanup and PASS/FAIL; does not install game data or restart the relay. |
-| `--verify-online-ui <output-folder>` | Offscreen Friends and recipient picker layout, toolbar availability, and pending local stroke preservation across acknowledgements; no network connection or account changes. |
+| `--verify-online-ui <output-folder>` | Offscreen Friends/picker default, minimum, expanded relay, and scaled layout; invitation gating, toolbar availability, and pending local stroke preservation across acknowledgements; no network connection or account changes. |
 | `--verify-civilization-navigation` | Catalog selection shortcuts, paging, and resizing; does not require an installed game. |
 | `--verify-stock-profiles <stock-scripts-folder>` | Original map-template/resource policy import across 13 profiles, five sizes, and 2–8-player branches. |
 | `--verify-map-lan <game-folder> <output-folder>` | Map export integration, preview redaction, approval and sender dialogs, and map transfer checks. |

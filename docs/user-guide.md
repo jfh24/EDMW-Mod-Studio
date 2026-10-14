@@ -2,7 +2,7 @@
 
 EDMW Mod Studio is a Windows design tool for **Empires: Dawn of the Modern World**. Its Map Designer provides a visual canvas for painting terrain, shaping elevation, defining map structure, and exporting maps over LAN. Its separate Civilization Editor provides an editable project workspace for civilization rules, units, buildings, technologies, abilities, economy, ages, assets, and AI. LAN export installs the export on the sender and offers it to other running designers for approval.
 
-This guide covers version 1.0.0 and the online friends features added in source builds after that release. For source builds, architecture, and verification, see [development](development.md).
+This guide covers version 1.1.0, including online friends and sharing installed content from Home. For source builds, architecture, and verification, see [development](development.md).
 
 ## What the app does
 
@@ -21,10 +21,11 @@ This guide covers version 1.0.0 and the online friends features added in source 
 - Lets any number of editors paint the same project over a trusted LAN connection. One person hosts and shares their displayed local address; others join it from **Collaborate**. Completed paint strokes synchronize immediately, with the most recently completed change taking precedence if multiple people change the same cells. Each collaborator's map-author name appears beside their live cursor.
 - Exports maps and civilization edits over LAN, installing them locally and offering them to other players for approval.
 - Sends map and civilization exports to every running designer discovered on the LAN with one click and per-recipient approval status.
+- Shares installed maps and civilization edits directly from Home over LAN, to selected online friends, or both, without opening their editable project files.
 
 ## Getting started
 
-1. Download and open [EDMW.Mod.Studio.exe from the v1.0.0 release](https://github.com/jfh24/EDMW-Mod-Studio/releases/download/v1.0.0/EDMW.Mod.Studio.exe), or open `dist/EDMW Mod Studio.exe` after a local source build.
+1. Download and open [EDMW.Mod.Studio.exe from the v1.1.0 release](https://github.com/jfh24/EDMW-Mod-Studio/releases/download/v1.1.0/EDMW.Mod.Studio.exe), or open `dist/EDMW Mod Studio.exe` after a local source build.
 2. Use the small settings button in the top-right toolbar to confirm or change the EDMW installation folder.
 3. Choose a terrain type and paint directly on the map canvas.
 4. Use the left rail to adjust the brush or generate random land. Terrain, resources, and player starts are arranged as full-width sections in the right inspector, with Elevation and Ramps side by side at the bottom.
@@ -40,18 +41,32 @@ Map delivery works while the designer is open on any workspace, independently of
 
 ## Friends and online sharing
 
-Online sharing requires a running relay and matching application builds. The v1.0.0 release linked above predates this feature. The relay operator can follow [online sharing and Render setup](online-sharing.md).
+Online sharing requires a running relay and matching application builds. The relay operator can follow [online sharing and Render setup](online-sharing.md).
 
 1. Open **Friends** from Home, the Map Designer, or the Civilization Editor.
-2. Enter **Display name**, then choose **Connect**. **Relay URL** is already filled with `https://edmw-mod-studio.onrender.com`, or your saved custom relay URL. Edit it while disconnected to use another service. Both players must use the same relay.
+2. Enter **Display name**, then choose **Connect**. Expand **Relay settings** to see **Relay URL**, already filled with `https://edmw-mod-studio.onrender.com` or your saved custom relay URL. Edit it while disconnected to use another service. Both players must use the same relay.
 3. Copy **Your friend code** and exchange it with the other player. Enter their code under **Friend code** and choose **Send request**.
 4. The other player selects the incoming request and chooses **Accept**. Accepted friends show **Online** or **Offline**. **Remove/cancel** revokes a friendship or pending request.
 
-In the Map Designer, select an accepted online friend in **Friends** and choose **Invite to map**. This starts a shared session for the displayed map if needed. The recipient selects an incoming invitation and chooses **Join selected**; joining replaces their current map after the usual unsaved-changes prompt. Strokes, resources, player starts, elevation, and named cursors synchronize in relay order. Choose **Leave map session** to leave. Host departure ends the room. LAN and online map sessions cannot be active together.
+In the Map Designer, select an accepted online friend in **Friends** and choose **Invite to map**. This starts a shared session for the displayed map if needed. The recipient selects an incoming invitation and chooses **Join map**; joining replaces their current map after the usual unsaved-changes prompt. Strokes, resources, player starts, elevation, and named cursors synchronize in relay order. Choose **Leave session** to leave. Host departure ends the room. LAN and online map sessions cannot be active together; only the online host can invite more friends.
+
+The Friends dialog groups connection, friend codes, friends/requests, and map invitations. Request actions change to **Decline request** or **Cancel request** when appropriate. Empty lists show a short placeholder, and the **Leave session** action appears only during a session. Close the dialog with its title-bar **×** or **Esc**. Tooltips describe unavailable actions; failed actions show a warning dialog.
 
 Choose **Export to friends** from the Map Designer toolbar or the Civilization Editor's **Game** menu. Select accepted online friends, then **Send**. The status dialog reports local installation and each recipient's installed, denied, or failed result. Export does not require a shared editing session. The receiver validates the package with their local game installation and chooses **Accept** or **Deny** before any game files change. **Hide map preview** applies to online map exports too.
 
 Keep the application open and connected to receive invitations and exports in any workspace. The free Render relay can sleep when idle; **Connect** waits for it to wake and can be cancelled by closing Friends. Pending exports expire after ten minutes. A restart or lost connection ends active rooms and transfers; reconnect through **Friends** and invite again. Save editable projects normally. The desktop retains signed identity and friendship approvals so both friends can recover their accepted contact when reconnecting to the same relay. A saved contact stays offline until its peer confirms the approval; removing a friend clears the saved approval. The relay must keep its signing secret unchanged. Credentials are protected for the current Windows user and stored separately for each relay endpoint; another Windows account has a separate identity. Saved custom relay URLs remain selected when you reopen Friends. Profiles from the earlier relay build update once to a new friend code and must exchange codes again.
+
+## Share installed content from Home
+
+Home's **Custom maps** and **Civilization edits** panels let you share the item already installed in the selected game folder. Your currently open map and civilization documents are not used or replaced.
+
+1. Beside the item, check **LAN**, **Friends**, or both. Select at least one destination to enable **Share**.
+2. Choose **Share**. If **Friends** is selected, connect if needed and choose one or more accepted online friends. Canceling that selection stops the entire share, including LAN delivery.
+3. Follow the shared status dialog. LAN offers go to receiving designers discovered on the network; Friends offers go to the friends you selected. Each recipient returns accepted/installed, denied, or failed status. Closing an active status dialog cancels unfinished offers.
+
+Sharing reads and validates the installed item without reinstalling it on this computer. A map retains its installed `.rmv`, `.edmwa` sidecar, name, and identity. If its installed x86 generator differs from this editor's verified copy, the shared package uses the current verified generator; the sender's installed DLL stays unchanged. Its review preview is reconstructed from the sidecar, and the Map Designer's **Hide map preview** selection also applies to Home map sharing. A civilization edit uses the selected package's saved installation manifest, retaining the original source project, expected values, model payloads, and progression data. It does not combine other installed civilization edits into the offer.
+
+Incomplete/orphaned maps cannot be shared. Maps with a damaged or unsupported sidecar, changed script identity, or invalid/non-x86 generator are rejected; install a compatible export first. A valid older x86 generator does not require opening the project again: the shared package contains the current verified copy. Civilization packages must still be installed with their owned data and protected original backups intact and no interrupted transaction pending. Earlier direct civilization installations have no saved share package; restore them and install through the Civ Editor before using Home sharing. Recipients still apply the normal validation and approval flow; a verified identical civilization package already installed is acknowledged without another install.
 
 ## Civilization Editor
 
@@ -71,7 +86,7 @@ Use **Game > Export over LAN** to install the authored edits on this computer an
 
 The designer receives LAN offers automatically while open, including on Home and in the Map Designer. No Host/Join session or pairing is required. **Settings > Receive civ edits over LAN** controls receiving and shows the local address. The default TCP port is **42819**, configurable in Settings; discovery uses UDP **42820**. Accepted edits appear in Home's **Civilization edits** panel for Details and Uninstall. Recipients need the designer open with receiving enabled, and LAN discovery and transfer must be allowed by their firewall.
 
-The Home screen's **Civilization edits** panel lists installed projects with their recorded changes, installation time, Details, and Uninstall. Returning Home or activating the app refreshes the list; Refresh also detects changes made by a separately run installer. Different fields can be installed as independent packages and uninstalled in either order. Overlapping fields and model replacements are rejected until their owning package is uninstalled. The installer validates the supported executable and source records, retains transaction backups, recovers interrupted operations, and refuses to overwrite externally changed owned fields. Earlier installations made directly by the designer also appear for uninstall.
+The Home screen's **Civilization edits** panel lists installed projects with their recorded changes, installation time, Details, Share, and Uninstall. Returning Home or activating the app refreshes the list; Refresh also detects changes made by a separately run installer. Different fields can be installed as independent packages and uninstalled in either order. Overlapping fields and model replacements are rejected until their owning package is uninstalled. The installer validates the supported executable and source records, retains transaction backups, recovers interrupted operations, and refuses to overwrite externally changed owned fields. Earlier installations made directly by the designer also appear for uninstall.
 
 Installation supports verified existing object fields, unit/building/research/command costs, civilization age/name-reference fields, verified scalar modifier effects, and native `.cem` replacement models. Civilization powers expose their actual assignments and activation chains; only verified linked effect operands are writable. `.obj` files can be uploaded and previewed, but native conversion is required before installation. New civilization/definition insertion, unmapped rules and native power parameters, and in-game/multiplayer validation remain incomplete; an unsupported change blocks export rather than being silently skipped. Every multiplayer participant needs matching installed gameplay data.
 
@@ -106,7 +121,7 @@ Forest areas are selected, generalized dense tree-cover cores from [ESA WorldCov
 - `.edmwmap` is the editable project format used by the Map Designer.
 - `.rmv`, terrain data, and the native generator are internal contents of the map LAN export.
 - `.edmwciv` is an editable civilization project; LAN exports carry its verified installation package.
-- The designer reads the selected EDMW installation for source data. Choosing LAN export installs on the sender, while remote installation requires recipient acceptance. The Home screen tracks installed maps and civilization edit packages for uninstall.
+- The designer reads the selected EDMW installation for source data. Workspace export installs on the sender, while remote installation requires recipient acceptance. Home tracks installed maps and civilization packages for sharing and uninstall; Home sharing does not reinstall them on the sender.
 
 Map installation adds generated map files without replacing the game's original maps or DLLs. Civilization packages modify supported game data and model targets with tracked backups and uninstall.
 

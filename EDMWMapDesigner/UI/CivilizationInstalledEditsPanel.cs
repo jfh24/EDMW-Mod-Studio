@@ -9,6 +9,7 @@ internal sealed class CivilizationInstalledEditsPanel : UserControl
 {
     private readonly Func<string?> _locateGame;
     private readonly Action _installedPackagesChanged;
+    private readonly Func<string, CivilizationInstalledPackage, bool, bool, Task>? _share;
     private readonly BufferedEntriesPanel _entries = new()
     {
         Dock = DockStyle.Fill, AutoScroll = true, FlowDirection = FlowDirection.TopDown,
@@ -18,10 +19,12 @@ internal sealed class CivilizationInstalledEditsPanel : UserControl
     private string? _listedGamePath;
     private string[] _installedNames = [];
 
-    public CivilizationInstalledEditsPanel(Func<string?> locateGame, Action installedPackagesChanged)
+    public CivilizationInstalledEditsPanel(Func<string?> locateGame, Action installedPackagesChanged,
+        Func<string, CivilizationInstalledPackage, bool, bool, Task>? share = null)
     {
         _locateGame = locateGame ?? throw new ArgumentNullException(nameof(locateGame));
         _installedPackagesChanged = installedPackagesChanged ?? throw new ArgumentNullException(nameof(installedPackagesChanged));
+        _share = share;
         DoubleBuffered = true;
         SetStyle(ControlStyles.SupportsTransparentBackColor, true);
         BackColor = Color.Transparent;
@@ -105,10 +108,11 @@ internal sealed class CivilizationInstalledEditsPanel : UserControl
 
     private Control CreatePackageRow(CivilizationInstalledPackage package)
     {
-        var row = new DashboardMapRow { Height = 92, RowCount = 1, AccessibleName = package.ProjectName };
+        var row = new DashboardMapRow { Height = 128, RowCount = 2, AccessibleName = package.ProjectName };
         row.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        row.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
         row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 92));
+        row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 102));
         var summary = new TableLayoutPanel
         {
             Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3,
@@ -137,8 +141,8 @@ internal sealed class CivilizationInstalledEditsPanel : UserControl
             Margin = new Padding(0, 4, 0, 4), BackColor = Color.Transparent
         };
         actions.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        actions.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
-        actions.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
+        actions.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
+        actions.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
         var details = new DashboardPlaqueButton { Text = "Details", Dock = DockStyle.Fill, Margin = new Padding(2), AccessibleName = "View changes in " + package.ProjectName };
         var uninstall = new DashboardPlaqueButton { Text = "Uninstall", Dock = DockStyle.Fill, Margin = new Padding(2), AccessibleName = "Uninstall " + package.ProjectName };
         details.Click += (_, _) => ShowDetails(package);
@@ -147,6 +151,14 @@ internal sealed class CivilizationInstalledEditsPanel : UserControl
         actions.Controls.Add(uninstall, 0, 1);
         row.Controls.Add(summary, 0, 0);
         row.Controls.Add(actions, 1, 0);
+        var listedGamePath = _listedGamePath;
+        var canShare = complete && package.PackageId != "legacy" && listedGamePath is not null && _share is not null;
+        var sharing = new DashboardShareControls(package.ProjectName, canShare,
+            (lan, friends) => _share!(listedGamePath!, package, lan, friends));
+        if (package.PackageId == "legacy")
+            _tips.SetToolTip(sharing, "Reinstall this edit as a managed package to enable sharing.");
+        row.Controls.Add(sharing, 0, 1);
+        row.SetColumnSpan(sharing, 2);
         return row;
     }
 

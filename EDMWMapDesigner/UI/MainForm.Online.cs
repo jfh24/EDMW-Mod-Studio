@@ -201,7 +201,9 @@ public sealed partial class MainForm
             () => _onlineInvitations.Values.ToArray(),
             () => _activeView == AppView.MapGenerator,
             () => _onlineCollaboration.IsConnected,
-            InviteFriendToMapAsync, JoinOnlineMapAsync, LeaveOnlineMapAsync);
+            InviteFriendToMapAsync, JoinOnlineMapAsync, LeaveOnlineMapAsync,
+            () => _collaboration.IsConnected ? "Leave the LAN session before inviting friends."
+                : _onlineCollaboration.IsConnected && !_onlineCollaboration.IsHosting ? "Only the map host can invite friends." : null);
         dialog.ShowDialog(this);
     }
 

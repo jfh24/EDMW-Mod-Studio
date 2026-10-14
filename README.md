@@ -2,9 +2,9 @@
 
 **EDMW Mod Studio** is a Windows modding workspace for **Empires: Dawn of the Modern World**. It combines a visual Map Designer, a Civilization Editor, and tracked installation and sharing over LAN or online with friends.
 
-The application is version **1.0.0**. It is built with C#/.NET Windows Forms and includes a native, 32-bit map generator for the game.
+The application is version **1.1.0**. It is built with C#/.NET Windows Forms and includes a native, 32-bit map generator for the game.
 
-**[Download v1.0.0 for Windows](https://github.com/jfh24/EDMW-Mod-Studio/releases/download/v1.0.0/EDMW.Mod.Studio.exe)** · [Release notes and assets](https://github.com/jfh24/EDMW-Mod-Studio/releases/tag/v1.0.0)
+**[Download v1.1.0 for Windows](https://github.com/jfh24/EDMW-Mod-Studio/releases/download/v1.1.0/EDMW.Mod.Studio.exe)** · [Release notes and assets](https://github.com/jfh24/EDMW-Mod-Studio/releases/tag/v1.1.0) · [Changelog](CHANGELOG.md)
 
 The source repository does not include the compiled executable. Download it from the release or build it locally using the instructions below.
 
@@ -20,7 +20,7 @@ The source repository does not include the compiled executable. Download it from
 - **LAN export:** install an export on the sender and offer it to other running instances for recipient approval.
 - **Online friends:** exchange friend codes, accept requests, and see online presence through the prefilled EDMW Mod Studio relay or a relay you choose.
 - **Online collaboration and export:** invite accepted friends to edit maps, or send map and civilization exports for recipient approval. Includes a Render deployment blueprint.
-- **Installed content:** review and uninstall tracked maps and civilization packages from Home.
+- **Installed content:** review, uninstall, or share installed maps and civilization packages directly from Home. Each item has themed **LAN** and **Friends** checkboxes and a **Share** button aligned with its existing actions; the editable project does not need to be loaded.
 
 See the [user guide](docs/user-guide.md) for controls and detailed workflows.
 
@@ -40,7 +40,7 @@ See the [user guide](docs/user-guide.md) for controls and detailed workflows.
 
 ## Run the application
 
-On 64-bit Windows 10 or later, download and run [EDMW.Mod.Studio.exe](https://github.com/jfh24/EDMW-Mod-Studio/releases/download/v1.0.0/EDMW.Mod.Studio.exe). You can keep that filename or rename it to `EDMW Mod Studio.exe`.
+On 64-bit Windows 10 or later, download and run [EDMW.Mod.Studio.exe](https://github.com/jfh24/EDMW-Mod-Studio/releases/download/v1.1.0/EDMW.Mod.Studio.exe). You can keep that filename or rename it to `EDMW Mod Studio.exe`.
 
 If you build from source, open:
 
@@ -54,7 +54,7 @@ The published executable is self-contained; the .NET SDK is needed only to build
 2. Choose **Map Designer** or **Civ Editor** from Home.
 3. Create your changes and save the editable project.
 4. Choose **Export over LAN** in the active workspace to install locally and offer the same export to discovered recipients.
-5. Use Home to inspect or uninstall installed content.
+5. Use Home to inspect or uninstall installed content. To share an installed item, check **LAN**, **Friends**, or both beside it, then choose **Share**. Friends delivery asks you to select online friends; recipients review the package before installing it.
 
 A valid, separately installed copy of the game is required for game data, model assets, and exports. Game executables, original game DLLs, databases, and asset archives are not provided by this repository.
 
@@ -86,9 +86,9 @@ The native DLL is x86 because it is loaded by the 32-bit game; the editor and in
 
 See [development and verification](docs/development.md) for build details, existing checks, and optional tooling.
 
-## Online sharing in source builds
+## Online sharing
 
-The online features are available in source builds after the v1.0.0 release linked above. Open **Friends**, enter your display name, and choose **Connect**. **Relay URL** is prefilled with [the EDMW Mod Studio relay](https://edmw-mod-studio.onrender.com), so its address needs no manual entry. You can edit **Relay URL** to use another service; saved custom URLs are retained. Exchange friend codes and accept a request before inviting a friend into a shared map or choosing **Export to friends**. Both users must connect to the same relay and run matching application builds. LAN features remain available independently.
+Version 1.1.0 includes online friends, shared map editing, and map/civilization delivery. Open **Friends**, enter your display name, and choose **Connect**. **Relay settings** contains **Relay URL**, prefilled with [the EDMW Mod Studio relay](https://edmw-mod-studio.onrender.com), so its address needs no manual entry. You can edit it while disconnected to use another service; saved custom URLs are retained. Exchange friend codes and accept a request before inviting a friend into a shared map, choosing **Export to friends**, or sharing an installed Home item. Both users must connect to the same relay and run matching application builds. LAN features remain available independently.
 
 The relay uses HTTPS/WSS, authenticates device identities, and checks accepted friendships for invitations and exports. The app protects its local credential with Windows DPAPI and keeps a separate identity for each relay endpoint. Export recipients review and approve installation through the existing package validation and installation system.
 
@@ -106,7 +106,7 @@ Each recipient must run the same version of EDMW Mod Studio with receiving enabl
 
 Map and civilization transfer TCP ports are configurable in Settings. Allow the relevant application and ports through the firewall on the LAN.
 
-The protocols use IPv4 TCP/UDP and are intended for trusted local networks. They do not encrypt traffic or authenticate peer identities. Package hashes and local validation check integrity and supported content; they do not establish who sent an offer. Recipients must choose **Accept** before installation. Denying an offer leaves game files unchanged. The sender installs its own export even when no peers are found.
+The protocols use IPv4 TCP/UDP and are intended for trusted local networks. They do not encrypt traffic or authenticate peer identities. Package hashes and local validation check integrity and supported content; they do not establish who sent an offer. Recipients must choose **Accept** before installation. Denying an offer leaves game files unchanged. Workspace exports install on the sender even when no peers are found. **Share** on Home reads existing installed content and does not reinstall it on the sender.
 
 Shared editing applies completed strokes in host order; the latest completed change takes precedence on overlapping cells. **Hide map preview** redacts the exported preview while preserving map identity.
 
@@ -132,6 +132,7 @@ Map installation adds a generated script, sidecar, and map-specific generator DL
 - Civilizations expose source data as well as editable fields. Read-only source values are not all installation targets.
 - `.obj` replacements can be saved and previewed but need conversion to the native model format for installation.
 - Civilization installation currently checks a specific supported game executable and source identities. See [compatibility details](docs/development.md#game-compatibility).
+- Home sharing requires a complete map with a supported terrain payload and valid x86 generator, or a verified saved civilization package. An older map generator is upgraded to this editor's verified copy in the shared package without changing the sender's files. Incomplete maps, changed owned civilization data, interrupted transactions, and earlier civilization installations without a saved package cannot be shared directly.
 - Multiplayer participants need matching installed gameplay data.
 - Automated and offline checks do not establish complete in-game or multiplayer validation. The wildlife implementation report records the available evidence and its remaining visual confirmation.
 
@@ -166,6 +167,7 @@ The public product name is **EDMW Mod Studio**. Existing source paths, namespace
 ## Documentation and credits
 
 - [User guide](docs/user-guide.md)
+- [v1.1.0 release notes](docs/releases/v1.1.0.md) and [changelog](CHANGELOG.md)
 - [Development, architecture, and verification](docs/development.md)
 - [Online sharing and Render setup](docs/online-sharing.md)
 - [Online relay protocol](docs/online-protocol.md)
