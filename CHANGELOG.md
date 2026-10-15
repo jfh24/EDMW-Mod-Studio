@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.2.0 — 2026-10-14
 
 - Added prototype research, proximity, and activated effects, editable unit/building attachments, per-mod controls, and game icons in the Civ Editor.
 

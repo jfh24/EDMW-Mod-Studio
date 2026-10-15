@@ -1,6 +1,6 @@
 # Development and verification
 
-EDMW Mod Studio version 1.1.1 consists of a Windows Forms editor, two installer templates, a native map generator, and a separate online relay. This document describes the source as shipped; it does not claim that every verification has been run on every game installation. See the [changelog](../CHANGELOG.md) for release changes.
+EDMW Mod Studio version 1.2.0 consists of a Windows Forms editor, two installer templates, a native map generator, a prototype effect runtime, and a separate online relay. This document describes the source as shipped; it does not claim that every verification has been run on every game installation. See the [changelog](../CHANGELOG.md) for release changes.
 
 ## Build pipeline
 

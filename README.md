@@ -2,9 +2,9 @@
 
 **EDMW Mod Studio** is a Windows modding workspace for **Empires: Dawn of the Modern World**. It combines a visual Map Designer, a Civilization Editor, and tracked installation and sharing over LAN or online with friends.
 
-The application is version **1.1.1**. It is built with C#/.NET Windows Forms and includes a native, 32-bit map generator for the game.
+The application is version **1.2.0**. It is built with C#/.NET Windows Forms and includes a native, 32-bit map generator for the game.
 
-**[Download v1.1.1 for Windows](https://github.com/jfh24/EDMW-Mod-Studio/releases/download/v1.1.1/EDMW.Mod.Studio.exe)** · [Release notes and assets](https://github.com/jfh24/EDMW-Mod-Studio/releases/tag/v1.1.1) · [Changelog](CHANGELOG.md)
+**[Download v1.2.0 for Windows](https://github.com/jfh24/EDMW-Mod-Studio/releases/download/v1.2.0/EDMW.Mod.Studio.exe)** · [Release notes and assets](https://github.com/jfh24/EDMW-Mod-Studio/releases/tag/v1.2.0) · [Changelog](CHANGELOG.md)
 
 The source repository does not include the compiled executable. Download it from the release or build it locally using the instructions below.
 
@@ -40,7 +40,7 @@ See the [user guide](docs/user-guide.md) for controls and detailed workflows.
 
 ## Run the application
 
-On 64-bit Windows 10 or later, download and run [EDMW.Mod.Studio.exe](https://github.com/jfh24/EDMW-Mod-Studio/releases/download/v1.1.1/EDMW.Mod.Studio.exe). You can keep that filename or rename it to `EDMW Mod Studio.exe`.
+On 64-bit Windows 10 or later, download and run [EDMW.Mod.Studio.exe](https://github.com/jfh24/EDMW-Mod-Studio/releases/download/v1.2.0/EDMW.Mod.Studio.exe). You can keep that filename or rename it to `EDMW Mod Studio.exe`.
 
 If you build from source, open:
 
@@ -167,7 +167,7 @@ The public product name is **EDMW Mod Studio**. Existing source paths, namespace
 ## Documentation and credits
 
 - [User guide](docs/user-guide.md)
-- [v1.1.1 release](https://github.com/jfh24/EDMW-Mod-Studio/releases/tag/v1.1.1) and [changelog](CHANGELOG.md)
+- [v1.2.0 release](https://github.com/jfh24/EDMW-Mod-Studio/releases/tag/v1.2.0) and [changelog](CHANGELOG.md)
 - [Development, architecture, and verification](docs/development.md)
 - [Online sharing and Render setup](docs/online-sharing.md)
 - [Online relay protocol](docs/online-protocol.md)

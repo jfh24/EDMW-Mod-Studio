@@ -2,7 +2,7 @@
 
 EDMW Mod Studio is a Windows design tool for **Empires: Dawn of the Modern World**. Its Map Designer provides a visual canvas for painting terrain, shaping elevation, defining map structure, and exporting maps over LAN. Its separate Civilization Editor provides an editable project workspace for civilization rules, units, buildings, technologies, abilities, economy, ages, assets, and AI. LAN export installs the export on the sender and offers it to other running designers for approval.
 
-This guide covers version 1.1.0, including online friends and sharing installed content from Home. For source builds, architecture, and verification, see [development](development.md).
+This guide covers version 1.2.0, including online friends and sharing installed content from Home. For source builds, architecture, and verification, see [development](development.md).
 
 ## What the app does
 
@@ -25,7 +25,7 @@ This guide covers version 1.1.0, including online friends and sharing installed 
 
 ## Getting started
 
-1. Download and open [EDMW.Mod.Studio.exe from the v1.1.0 release](https://github.com/jfh24/EDMW-Mod-Studio/releases/download/v1.1.0/EDMW.Mod.Studio.exe), or open `dist/EDMW Mod Studio.exe` after a local source build.
+1. Download and open [EDMW.Mod.Studio.exe from the v1.2.0 release](https://github.com/jfh24/EDMW-Mod-Studio/releases/download/v1.2.0/EDMW.Mod.Studio.exe), or open `dist/EDMW Mod Studio.exe` after a local source build.
 2. Use the small settings button in the top-right toolbar to confirm or change the EDMW installation folder.
 3. Choose a terrain type and paint directly on the map canvas.
 4. Use the left rail to adjust the brush or generate random land. Terrain, resources, and player starts are arranged as full-width sections in the right inspector, with Elevation and Ramps side by side at the bottom.
