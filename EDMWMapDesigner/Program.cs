@@ -13,6 +13,36 @@ internal static class Program
     [STAThread]
     private static int Main(string[] args)
     {
+        if (args.Length == 3 && args[0].Equals("--verify-civilization-icons", StringComparison.OrdinalIgnoreCase))
+        {
+            try
+            {
+                Application.SetUnhandledExceptionMode(UnhandledExceptionMode.ThrowException);
+                ApplicationConfiguration.Initialize();
+                Civilizations.CivilizationGameIconsVerification.Run(args[1], args[2]);
+                return 0;
+            }
+            catch (Exception error)
+            {
+                Console.Error.WriteLine("CIVILIZATION GAME ICONS FAIL: " + error);
+                return 1;
+            }
+        }
+        if (args.Length == 3 && args[0].Equals("--verify-unit-effects", StringComparison.OrdinalIgnoreCase))
+        {
+            try
+            {
+                Application.SetUnhandledExceptionMode(UnhandledExceptionMode.ThrowException);
+                ApplicationConfiguration.Initialize();
+                CivilizationUnitEffectsVerification.Run(args[1], args[2]);
+                return 0;
+            }
+            catch (Exception error)
+            {
+                Console.Error.WriteLine("UNIT EFFECT AUTHORING FAIL: " + error);
+                return 1;
+            }
+        }
         if (args.Length == 2 && args[0].Equals("--verify-installed-content-ui", StringComparison.OrdinalIgnoreCase))
         {
             try
@@ -208,6 +238,11 @@ internal static class Program
                 Console.Error.WriteLine("CIVILIZATION PACKAGES FAIL: " + exception);
                 return 1;
             }
+        }
+        if (args.Length == 3 && args[0].Equals("--verify-runtime-effects", StringComparison.OrdinalIgnoreCase))
+        {
+            try { Civilizations.CivilizationRuntimeEffectsVerification.Run(args[1], args[2]); return 0; }
+            catch (Exception exception) { Console.Error.WriteLine("RUNTIME EFFECTS FAIL: " + exception); return 1; }
         }
         if (args.Length == 3 && args[0].Equals("--verify-civilization-repaint", StringComparison.OrdinalIgnoreCase))
         {

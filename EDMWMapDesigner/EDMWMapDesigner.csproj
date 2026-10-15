@@ -17,6 +17,8 @@
     <FileVersion>1.1.1.0</FileVersion>
   </PropertyGroup>
   <ItemGroup>
+    <EmbeddedResource Include="..\native\EDMWEffects\build\EDMWEffects.dll" LogicalName="EDMWMapDesigner.Native.EDMWEffects.dll" />
+    <EmbeddedResource Include="..\native\EDMWEffects\build\EDMWEffectsLauncher.exe" LogicalName="EDMWMapDesigner.Native.EDMWEffectsLauncher.exe" />
     <EmbeddedResource Include="..\native\EDMWAnchored\build\EDMWAnchored.dll" LogicalName="EDMWMapDesigner.Native.EDMWAnchored.dll" />
     <EmbeddedResource Include="Assets\medieval-command-banner.png" LogicalName="EDMWMapDesigner.Assets.medieval-command-banner.png" />
     <EmbeddedResource Include="Assets\ornate-panel-frame.png" LogicalName="EDMWMapDesigner.Assets.ornate-panel-frame.png" />

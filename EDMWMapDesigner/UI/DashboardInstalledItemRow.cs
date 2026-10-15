@@ -8,7 +8,7 @@ internal sealed class DashboardInstalledItemRow : DashboardMapRow
 
     internal DashboardInstalledItemRow(string itemName, string metadata, string? warning,
         bool canShare, Action details, Action uninstall, Func<InstalledShareDestination, Task> share,
-        string? shareUnavailableReason = null)
+        string? shareUnavailableReason = null, string? toggleLabel = null, Action? toggle = null)
     {
         Height = warning is null ? 64 : 84;
         ColumnCount = 1;
@@ -34,6 +34,7 @@ internal sealed class DashboardInstalledItemRow : DashboardMapRow
             Font = MedievalTheme.UiFont()
         };
         _menu.Items.Add("Details", null, (_, _) => details());
+        if (toggle is not null) _menu.Items.Add(toggleLabel, null, (_, _) => toggle());
         var shareItem = _menu.Items.Add("Share…");
         shareItem.Enabled = canShare;
         shareItem.ToolTipText = canShare ? "Choose LAN or Friends" : shareUnavailableReason ?? "Reinstall this item to enable sharing.";

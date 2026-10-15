@@ -28,13 +28,15 @@ public sealed class CivilizationInstallPlan
     internal IReadOnlyList<CivilizationPlannedFile> Files { get; }
     internal IReadOnlyDictionary<string, string?> Dependencies { get; }
     internal IReadOnlyList<CivilizationModelDependency> Models { get; }
+    internal CivilizationEditProject PreparedProject { get; }
 
     internal CivilizationInstallPlan(string gamePath, string projectName,
         List<CivilizationInstallChange> changes, List<string> issues,
         List<CivilizationPlannedFile> files, Dictionary<string, string?> dependencies,
-        List<CivilizationModelDependency> models)
+        List<CivilizationModelDependency> models, CivilizationEditProject preparedProject)
     {
         GamePath = gamePath; ProjectName = projectName;
+        PreparedProject = preparedProject;
         Changes = changes.AsReadOnly(); Issues = issues.AsReadOnly(); Files = files.AsReadOnly(); Models = models.AsReadOnly();
         Dependencies = new ReadOnlyDictionary<string, string?>(new Dictionary<string, string?>(dependencies, StringComparer.OrdinalIgnoreCase));
         var hashes = new Dictionary<string, string?>(dependencies, StringComparer.OrdinalIgnoreCase);
@@ -71,6 +73,7 @@ public static class CivilizationGameInstaller
     {
         ArgumentNullException.ThrowIfNull(project);
         ArgumentException.ThrowIfNullOrWhiteSpace(gamePath);
+        project = project.Clone();
         var root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(gamePath));
         var changes = new List<CivilizationInstallChange>();
         var issues = new List<string>();
@@ -105,6 +108,7 @@ public static class CivilizationGameInstaller
             var producerAdditions = new Dictionary<int, IReadOnlyList<int>>();
             var progressionMenus = new Dictionary<(int TechnologyId, int CivilizationRow), HashSet<int>>();
             var replacements = new List<(CivilizationDraft Civilization, CivilizationEntityDraft Entity, CivilizationModelAsset Asset)>();
+            var unitAttachments = new List<(CivilizationDraft Civilization, CivilizationEntityDraft Entity)>();
 
             void EnsureTechnologyData()
             {
@@ -275,9 +279,27 @@ public static class CivilizationGameInstaller
                                     throw new InvalidDataException("The source power and activation technology are not assigned to this civilization.");
                             }
                             else node = RequireOwnedTechnology(technologyId, row, entity.Category, HasProgressionMembership(entity));
+                            var runtimeRules = CivilizationRuntimeEffects.RulesFor(civilization, entity);
+                            if (runtimeRules.Count > 0)
+                            {
+                                if (!CivilizationTechnologyBindings.IsResearchRecord(node))
+                                    throw new InvalidDataException("Runtime bonuses support nonrepeatable research technologies only.");
+                                var target = CivilizationRuntimeEffects.PathFor(entity);
+                                if (File.Exists(ResolveTarget(root, target)))
+                                    throw new InvalidDataException("These runtime effects are already installed. Uninstall their mod before replacing it.");
+                                files.Add(new(target, null, CivilizationRuntimeEffects.Encode(runtimeRules)));
+                                foreach (var rule in runtimeRules)
+                                {
+                                    var field = CivilizationRuntimeEffects.Fields.Single(field => field.Resource == rule.Resource);
+                                    changes.Add(new(civilization.Name, entity.Name, field.Key, field.Name + " on research completion", "0",
+                                        rule.Amount.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                                        "Runtime prototype; this civilization only. Launch through Mod Studio. Uninstall removes future bonuses, not resources already awarded in saves.", target));
+                                }
+                            }
                             var originalTechnologyValues = CivilizationTechnologyBindings.ReadObjectValues(originalTechnologies!, technologyId, entity.Category);
                             foreach (var property in authoredProperties)
                             {
+                                if (CivilizationRuntimeEffects.IsKey(property.Key)) continue;
                                 if (CivilizationTechnologyBindings.IsProgressionMembershipKey(entity.Category, property.Key))
                                 {
                                     if (entity.SourcePowerId is not null)
@@ -350,6 +372,30 @@ public static class CivilizationGameInstaller
                     }
                     foreach (var property in entity.Properties.Where(pair => !string.IsNullOrWhiteSpace(pair.Value) && !IsDraftNote(pair.Key)))
                     {
+                        if (property.Key == CivilizationUnitEffects.PropertyKey)
+                        {
+                            try
+                            {
+                                var unitEffects = CivilizationUnitEffects.Read(entity).Where(effect => effect.Enabled).ToArray();
+                                if (unitEffects.Length == 0) continue;
+                                var count = System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(originalObjects);
+                                foreach (var effect in unitEffects)
+                                    if (effect.TargetObjectId >= count || originalObjects[4 + effect.TargetObjectId * 1936 + 232] == 0)
+                                        throw new InvalidDataException("An effect target is absent from the game catalog.");
+                                var target = CivilizationRuntimeEffects.PathFor(entity);
+                                if (File.Exists(ResolveTarget(root, target)))
+                                    throw new InvalidDataException("These runtime effects are already installed. Uninstall their mod before replacing it.");
+                                unitAttachments.Add((civilization, entity));
+                                foreach (var effect in unitEffects)
+                                    changes.Add(new(civilization.Name, entity.Name, property.Key, effect.Name, "None",
+                                        CivilizationUnitEffects.Describe(effect),
+                                        effect.Trigger == CivilizationUnitEffectTrigger.Proximity
+                                            ? "Runtime prototype; same-player units, once per effect regardless of nearby source count. Launch through Mod Studio. Live gameplay, save/load and multiplayer unverified."
+                                            : "Session-only runtime ability with an in-game button. Active bonuses reset on load. Launch through Mod Studio. Live gameplay and multiplayer unverified.", target));
+                            }
+                            catch (Exception exception) when (Expected(exception)) { issues.Add($"{civilization.Name} / {entity.Name}: {exception.Message}"); }
+                            continue;
+                        }
                         if (CivilizationTechnologyBindings.IsProgressionMembershipKey(entity.Category, property.Key))
                         {
                             try
@@ -539,6 +585,31 @@ public static class CivilizationGameInstaller
                 catch (Exception exception) when (Expected(exception))
                 { issues.Add("The resulting progression values cannot be installed. " + exception.Message); }
             }
+            if (unitAttachments.Count > 0)
+            {
+                var requests = unitAttachments.SelectMany(item => CivilizationUnitEffects.Read(item.Entity)
+                    .Where(effect => effect.Enabled && effect.Trigger == CivilizationUnitEffectTrigger.Activated)
+                    .Select(effect => new CivilizationActivatedAbilityRequest(item.Civilization.SourceRowIndex!.Value, item.Entity, effect))).ToArray();
+                if (requests.Length > 0)
+                {
+                    EnsureTechnologyData();
+                    var buttons = ReadBounded(ResolveTarget(root, ButtonsPath, true));
+                    var events = ReadBounded(ResolveTarget(root, EventsPath, true));
+                    dependencies[ButtonsPath] = Hash(buttons);
+                    dependencies[EventsPath] = Hash(events);
+                    var built = CivilizationUnitEffectBindings.BuildAbilityButtons(objects, technologies!, buttons, events, requests);
+                    objects = built.Objects;
+                    technologies = built.Technologies;
+                    var registrations = built.Registrations.ToDictionary(registration => Guid.Parse(registration.EffectId));
+                    foreach (var item in unitAttachments)
+                        CivilizationUnitEffects.Write(item.Entity, CivilizationUnitEffects.Read(item.Entity).Select(effect =>
+                            registrations.TryGetValue(Guid.Parse(effect.Id), out var registration)
+                                ? effect with { NativeTechnologyId = registration.TechnologyId } : effect));
+                }
+                foreach (var item in unitAttachments)
+                    files.Add(new(CivilizationRuntimeEffects.PathFor(item.Entity), null,
+                        CivilizationRuntimeConfiguration.DataFor(item.Civilization, item.Entity)!));
+            }
             if (!objects.AsSpan().SequenceEqual(originalObjects)) files.Add(new(ObjectPath, originalObjects, objects));
             if (!civilizations.AsSpan().SequenceEqual(originalCivilizations)) files.Add(new(CivilizationPath, originalCivilizations, civilizations));
             if (originalTechnologies is not null && technologies is not null && !technologies.AsSpan().SequenceEqual(originalTechnologies)) files.Add(new(TechnologyPath, originalTechnologies, technologies));
@@ -579,7 +650,7 @@ public static class CivilizationGameInstaller
             if (files.Count == 0 && issues.Count == 0) issues.Add("This project has no changed, mapped game values or model replacements to install.");
         }
         catch (Exception exception) when (Expected(exception)) { issues.Add(exception.Message); }
-        return new(root, project.Name, changes, issues.Distinct().ToList(), files, dependencies, modelDependencies);
+        return new(root, project.Name, changes, issues.Distinct().ToList(), files, dependencies, modelDependencies, project);
     }
 
     public static CivilizationInstallResult Install(CivilizationInstallPlan plan)
@@ -769,7 +840,7 @@ public static class CivilizationGameInstaller
     private static string ResolveTarget(string root, string relative, bool dependency = false)
     {
         var normalized = relative.Replace('/', '\\');
-        var allowed = normalized.Equals(ObjectPath, StringComparison.OrdinalIgnoreCase) || normalized.Equals(CivilizationPath, StringComparison.OrdinalIgnoreCase) || normalized.Equals(TechnologyPath, StringComparison.OrdinalIgnoreCase) || normalized.Equals(EffectsPath, StringComparison.OrdinalIgnoreCase) ||
+        var allowed = CivilizationRuntimeEffects.IsPath(normalized) || normalized.Equals(ObjectPath, StringComparison.OrdinalIgnoreCase) || normalized.Equals(CivilizationPath, StringComparison.OrdinalIgnoreCase) || normalized.Equals(TechnologyPath, StringComparison.OrdinalIgnoreCase) || normalized.Equals(EffectsPath, StringComparison.OrdinalIgnoreCase) ||
             (dependency && (normalized.Equals(GraphicsPath, StringComparison.OrdinalIgnoreCase) || normalized.Equals(ButtonsPath, StringComparison.OrdinalIgnoreCase) || normalized.Equals(EventsPath, StringComparison.OrdinalIgnoreCase) || normalized.Equals(ExecutablePath, StringComparison.OrdinalIgnoreCase))) ||
             (normalized.StartsWith("Data\\models\\", StringComparison.OrdinalIgnoreCase) && normalized.EndsWith(".cem", StringComparison.OrdinalIgnoreCase));
         if (!allowed || Path.IsPathRooted(normalized) || normalized.Contains(':') || normalized.Split('\\').Any(segment => segment.Length == 0 || segment is "." or ".." || segment.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0))

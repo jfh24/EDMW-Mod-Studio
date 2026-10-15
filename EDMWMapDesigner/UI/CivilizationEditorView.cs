@@ -40,6 +40,7 @@ public sealed class CivilizationEditorView : UserControl
     private CivilizationGameData? _gameData;
     private readonly Dictionary<(string Civilization, CivilizationCategory Category), IReadOnlyList<CivilizationEntityDraft>> _sourceRosters = [];
     private CivilizationGameAssets? _gameAssets;
+    private CivilizationGameIcons? _gameIcons;
     private string? _projectPath;
     private string? _selectedCivilizationId;
     private string? _selectedEntityId;
@@ -78,7 +79,7 @@ public sealed class CivilizationEditorView : UserControl
         _editorEmblem = MedievalIconFactory.Create(MedievalIcon.Civilizations, 32);
         _civilizations.IconProvider = _ => _editorEmblem;
         _categories.IconProvider = item => ProgressionIcons.ForKind(item.ToString() ?? "");
-        _entities.IconProvider = _ => ProgressionIcons.ForKind(_category.ToString());
+        _entities.IconProvider = EntityIcon;
 
         var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3, Margin = Padding.Empty, Padding = Padding.Empty, BackColor = MedievalTheme.Shell };
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 51));
@@ -117,6 +118,9 @@ public sealed class CivilizationEditorView : UserControl
         ]));
         toolbar.Controls.Add(MakeActionMenu("Game", [
             MakeAction("Reload current values", LoadGameCatalog), new ToolStripSeparator(),
+            MakeAction("Install locally…", InstallLocally),
+            MakeAction("Manage installed mods…", ManageInstalledMods),
+            new ToolStripSeparator(),
             MakeAction("Export over LAN", ExportOverLan),
             MakeAction("Export to friends", ExportToFriends)
         ]));
@@ -227,6 +231,7 @@ public sealed class CivilizationEditorView : UserControl
         {
             _catalog = CivilizationGameCatalog.Load(path);
             _gameData = new CivilizationGameData(path, _catalog);
+            _gameIcons = new CivilizationGameIcons(path);
             _sourceRosters.Clear();
             _gameAssets = null;
             var identities = CivilizationGameCatalog.ImportCivilizations(path);
@@ -259,6 +264,8 @@ public sealed class CivilizationEditorView : UserControl
         _catalog = null;
         _gameData = null;
         _gameAssets = null;
+        _gameIcons?.Dispose();
+        _gameIcons = null;
         _sourceRosters.Clear();
     }
 
@@ -273,6 +280,7 @@ public sealed class CivilizationEditorView : UserControl
             var data = new CivilizationGameData(path, catalog);
             _catalog = catalog;
             _gameData = data;
+            _gameIcons = new CivilizationGameIcons(path);
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidDataException or ArgumentException)
         {
@@ -473,6 +481,63 @@ public sealed class CivilizationEditorView : UserControl
         var source = _sourceRosters.Values.SelectMany(roster => roster).Single(entity => entity.Id == entityId).Clone();
         civilization.Entities.Add(source);
         return source;
+    }
+
+    private CivilizationUnitEffectsDialog CreateUnitEffectsDialog(CivilizationEntityDraft entity)
+    {
+        if (_catalog is null) throw new InvalidOperationException("Load the game catalog before attaching custom effects.");
+        var buttonPath = Path.Combine(_catalog.GamePath, "Data", "db", "dbbuttons.dat");
+        var buttonData = File.Exists(buttonPath) ? File.ReadAllBytes(buttonPath) : null;
+        var buttons = buttonData is not null
+            ? CivilizationUnitEffectBindings.ReadButtonChoices(buttonData).Select(button => (button.Id, button.Name)).ToArray()
+            : [];
+        var availableSlots = buttonData is not null && CurrentCivilization?.SourceRowIndex is int row
+            ? CivilizationUnitEffectBindings.AvailableButtonSlots(
+                File.ReadAllBytes(Path.Combine(_catalog.GamePath, "Data", "db", "dbobjects.dat")),
+                File.ReadAllBytes(Path.Combine(_catalog.GamePath, "Data", "db", "dbtechtree.dat")), buttonData, entity, row)
+            : null;
+        return new CivilizationUnitEffectsDialog(entity, _catalog.Items, buttons, _gameIcons, availableSlots);
+    }
+
+    private void EditUnitEffects()
+    {
+        if (!CommitPending() || CurrentCivilization is not { } civilization || CurrentEntity is not { } entity) return;
+        try
+        {
+            using var dialog = CreateUnitEffectsDialog(entity);
+            if (dialog.ShowDialog(FindForm()) != DialogResult.OK || dialog.EditedEffects is null) return;
+            ApplyUnitEffects(civilization.Id, entity.Id, dialog.EditedEffects);
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or InvalidOperationException)
+        {
+            MedievalDialog.Show((IWin32Window?)FindForm() ?? this, error.Message, "Custom effects", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+    }
+
+    private void ApplyUnitEffects(string civilizationId, string entityId, IReadOnlyList<CivilizationUnitEffect> effects)
+    {
+        _history.Change(project =>
+        {
+            CivilizationUnitEffects.Write(MaterializeEntity(project, civilizationId, entityId), effects);
+            RemoveEmptySourceEntries(project);
+        });
+        UpdateListNames();
+        RenderDetail();
+        SetStatus(effects.Any(effect => effect.Trigger == CivilizationUnitEffectTrigger.Activated)
+            ? "Custom effects saved. Activated abilities are session-only; their state resets when loading a save. Live testing is unverified."
+            : "Custom effects saved. Proximity runtime is experimental; live gameplay, save/load and multiplayer are unverified.");
+    }
+
+    internal CivilizationUnitEffectsDialog CreateUnitEffectsForVerification() =>
+        CreateUnitEffectsDialog(CurrentEntity ?? throw new InvalidOperationException("Select a unit or building first."));
+
+    internal void ApplyUnitEffectsForVerification(CivilizationUnitEffectsDialog dialog)
+    {
+        if (CurrentCivilization is not { } civilization || CurrentEntity is not { } entity)
+            throw new InvalidOperationException("Select a unit or building first.");
+        if (dialog.EditedEffects is null && !dialog.ApplyForVerification())
+            throw new InvalidDataException("The custom effect contains invalid fields.");
+        ApplyUnitEffects(civilization.Id, entity.Id, dialog.EditedEffects!);
     }
 
     private void RemoveEmptySourceEntries(CivilizationEditProject project)
@@ -694,6 +759,30 @@ public sealed class CivilizationEditorView : UserControl
                 : $"{civilization.Name} · {_category} · Current game values"));
             if (_category == CivilizationCategory.Overview || entity is not null)
                 Add(BuildNameRow(civilization, entity));
+            if (entity is not null && CivilizationUnitEffects.Supports(entity))
+            {
+                var effects = CivilizationUnitEffects.Read(entity);
+                var customEffects = new TableLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, ColumnCount = 1, Margin = new Padding(0, 8, 0, 10), Padding = new Padding(10), BackColor = MedievalTheme.Sidebar, AccessibleName = "Custom effect attachments" };
+                customEffects.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+                customEffects.Controls.Add(MakeLabel("CUSTOM EFFECTS", 10, true));
+                var effectSummary = Hint(effects.Count == 0 ? "No custom effects attached." : string.Join("\n", effects.Select(effect => CivilizationUnitEffects.Describe(effect,
+                    objectId => _catalog?.Items.FirstOrDefault(item => item.SourceId == objectId)?.Name ?? $"object {objectId}"))));
+                customEffects.Controls.Add(effectSummary);
+                var editEffects = MakeButton("Add / edit effects…", EditUnitEffects, "Add or edit custom effects attached to this unit or building", 190);
+                editEffects.Enabled = entity.SourceObjectId is not null && _catalog is not null;
+                customEffects.Controls.Add(editEffects);
+                var effectHelp = Hint(editEffects.Enabled
+                    ? "Experimental proximity and activated effects · Toggle/timed state resets on save load. Live gameplay, save/load and multiplayer are unverified."
+                    : "Choose a unit or building from the game catalog to attach custom effects.");
+                customEffects.Controls.Add(effectHelp);
+                customEffects.SizeChanged += (_, _) =>
+                {
+                    var availableWidth = Math.Max(120, customEffects.ClientSize.Width - customEffects.Padding.Horizontal);
+                    effectSummary.MaximumSize = new Size(availableWidth, 0);
+                    effectHelp.MaximumSize = new Size(availableWidth, 0);
+                };
+                Add(customEffects);
+            }
             var currentValues = entity is null ? _gameData?.GetValues(civilization) : _gameData?.GetValues(entity);
             var availabilityItems = _gameData is not null && entity is not null && HasSource(entity) &&
                 entity.Category is CivilizationCategory.Units or CivilizationCategory.Buildings or CivilizationCategory.Technologies
@@ -748,7 +837,7 @@ public sealed class CivilizationEditorView : UserControl
                 {
                     if (_gameData is not null && civilization.SourceRowIndex is not null)
                     {
-                        _progressionPanel = new AgeProgressionPanel(_gameData, civilization)
+                        _progressionPanel = new AgeProgressionPanel(_gameData, civilization, _gameIcons)
                         {
                             Dock = DockStyle.Fill,
                             Height = Math.Max(500, _detail.ClientSize.Height - 245)
@@ -1147,7 +1236,7 @@ public sealed class CivilizationEditorView : UserControl
         if (_category != CivilizationCategory.Ages || _gameData is null || CurrentCivilization is not { } civilization ||
             _progressionPanel is not { } previous || previous.Parent is not TableLayoutPanel grid) return;
         var state = previous.CaptureViewState();
-        var replacement = new AgeProgressionPanel(_gameData, civilization) { Dock = DockStyle.Fill, Height = previous.Height };
+        var replacement = new AgeProgressionPanel(_gameData, civilization, _gameIcons) { Dock = DockStyle.Fill, Height = previous.Height };
         replacement.RestoreViewState(state);
         replacement.CivilizationChanged += ApplyInlineAgeProgression;
         replacement.PendingChanged += (_, _) => Notify();
@@ -1225,7 +1314,8 @@ public sealed class CivilizationEditorView : UserControl
         var civilization = CurrentCivilization;
         if (civilization is null) return;
         var entityId = CurrentEntity?.Id;
-        var keys = _bindings.Where(binding => binding.Definition is not null).Select(binding => binding.Definition!.Key).ToArray();
+        var keys = _bindings.Where(binding => binding.Definition is not null).Select(binding => binding.Definition!.Key)
+            .Concat(CurrentEntity is { } selected && CivilizationUnitEffects.Supports(selected) ? [CivilizationUnitEffects.PropertyKey] : []).ToArray();
         var progressionItems = _category == CivilizationCategory.Ages ? _gameData?.GetAgeProgressionCandidates(civilization) : null;
         _history.Change(project =>
         {
@@ -1306,6 +1396,11 @@ public sealed class CivilizationEditorView : UserControl
         var entity = source.Clone();
         entity.Id = Guid.NewGuid().ToString("N");
         entity.Name = source.Name + " copy";
+        // A deliberate duplicate is a new set of attachments; history/project
+        // snapshots still preserve their original identities through Clone().
+        var effects = CivilizationUnitEffects.Read(entity);
+        if (effects.Count > 0)
+            CivilizationUnitEffects.Write(entity, effects.Select(effect => effect with { Id = Guid.NewGuid().ToString("D"), NativeTechnologyId = null }));
         _history.Change(project => project.Civilizations.Single(c => c.Id == civilization.Id).Entities.Add(entity));
         _selectedEntityId = entity.Id;
         BindEntities();
@@ -1348,7 +1443,7 @@ public sealed class CivilizationEditorView : UserControl
         MedievalTheme.StyleTextInput(search);
         layout.Controls.Add(MedievalTheme.FrameInput(search), 0, 1);
         var list = new EditorSelectionCards("Game catalog entries", "Select catalog item: ", 64)
-        { MultiSelect = true, IconProvider = _ => ProgressionIcons.ForKind(_category.ToString()) };
+        { MultiSelect = true, IconProvider = item => (item is CatalogChoice choice ? _gameIcons?.ForObject(choice.Item.SourceId) : null) ?? ProgressionIcons.ForKind(_category.ToString()) };
         layout.Controls.Add(list, 0, 2);
         var choices = _catalog.Items.Where(i => i.Category == _category).OrderBy(i => i.Name, StringComparer.OrdinalIgnoreCase).ToArray();
         void Filter()
@@ -1407,7 +1502,11 @@ public sealed class CivilizationEditorView : UserControl
             foreach (var entity in civilization.Entities)
             {
                 text.AppendLine($"  {entity.Category}: {entity.Name} ({(entity.SourceObjectId is int source ? $"catalog row {source}" : "draft")})");
-                foreach (var property in entity.Properties.OrderBy(p => p.Key)) text.AppendLine($"    {FieldLabel(property.Key)}: {property.Value.Replace("\r", "").Replace("\n", " | ")}");
+                foreach (var property in entity.Properties.Where(pair => pair.Key != CivilizationUnitEffects.PropertyKey).OrderBy(p => p.Key))
+                    text.AppendLine($"    {FieldLabel(property.Key)}: {property.Value.Replace("\r", "").Replace("\n", " | ")}");
+                foreach (var effect in CivilizationUnitEffects.Read(entity))
+                    text.AppendLine("    Custom effect (prototype): " + CivilizationUnitEffects.Describe(effect,
+                        objectId => _catalog?.Items.FirstOrDefault(item => item.SourceId == objectId)?.Name ?? $"object {objectId}"));
             }
             if (civilization.Properties.Count == 0 && civilization.Entities.Count == 0) text.AppendLine("  No field overrides or roster entries.");
             text.AppendLine();
@@ -1455,9 +1554,57 @@ public sealed class CivilizationEditorView : UserControl
 
     private string DisplayName(CivilizationDraft civilization) => _gameData?.GetDisplayName(civilization) ?? civilization.Name;
     private string DisplayName(CivilizationEntityDraft entity) => _gameData?.GetDisplayName(entity) ?? entity.Name;
+
+    private Image? EntityIcon(object item)
+    {
+        var entity = item is Item selected && CurrentCivilization is { } civilization
+            ? DisplayEntities(civilization).FirstOrDefault(candidate => candidate.Id == selected.Id) : null;
+        return (entity is not null ? _gameIcons?.ForEntity(entity) : null) ?? ProgressionIcons.ForKind(_category.ToString());
+    }
     private static bool HasSource(CivilizationEntityDraft entity) => entity.SourceObjectId is not null || entity.SourceTechnologyId is not null || entity.SourcePowerId is not null;
 
     private void ExportOverLan() => ExportPackage(_sendOverLan, "LAN export");
+
+    private void InstallLocally()
+    {
+        if (!CommitPending()) return;
+        var path = ResolveGamePath();
+        if (string.IsNullOrWhiteSpace(path)) { SetStatus("Choose the EDMW game folder in Settings first."); return; }
+        try
+        {
+            var package = CivilizationLanLocalExport.Prepare(_history.Current, path);
+            var review = string.Join(Environment.NewLine, package.Changes.Select(change => change.Description));
+            if (MedievalDialog.Show((IWin32Window?)FindForm() ?? this, "Install " + package.ProjectName + "?" +
+                Environment.NewLine + Environment.NewLine + review, "Install civilization mod", MessageBoxButtons.OKCancel,
+                MessageBoxIcon.Question) != DialogResult.OK) return;
+            var result = CivilizationLanLocalExport.Install(package, path);
+            SetStatus(result.Message);
+            if (result.Status != CivilizationLanStatus.Installed)
+                MedievalDialog.Show((IWin32Window?)FindForm() ?? this, result.Message, "Could not install mod", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+        catch (Exception exception) when (exception is IOException or InvalidDataException or UnauthorizedAccessException or ArgumentException or InvalidOperationException)
+        { ShowError("Could not install the civilization mod.", exception); }
+    }
+
+    private void ManageInstalledMods()
+    {
+        using var dialog = new Form
+        {
+            Text = "Installed civilization mods", StartPosition = FormStartPosition.CenterParent,
+            Size = new Size(820, 560), MinimumSize = new Size(600, 350), ShowInTaskbar = false,
+            BackColor = MedievalTheme.Sidebar, ForeColor = MedievalTheme.Text
+        };
+        dialog.Controls.Add(new CivilizationInstalledEditsPanel(ResolveGamePath, () => SetStatus("Installed mods updated."),
+            (path, installed, lan, friends) =>
+            {
+                var package = CivilizationPackageManager.CreateSharePackage(path, installed.PackageId);
+                if (lan) _sendOverLan?.Invoke(package);
+                if (friends) _sendToFriends?.Invoke(package);
+                return Task.CompletedTask;
+            }) { Dock = DockStyle.Fill });
+        MedievalWindowChrome.Apply(dialog);
+        dialog.ShowDialog((IWin32Window?)FindForm() ?? this);
+    }
 
     private void ExportToFriends() => ExportPackage(_sendToFriends, "Export to friends");
 
@@ -2049,7 +2196,7 @@ public sealed class CivilizationEditorView : UserControl
 
     protected override void Dispose(bool disposing)
     {
-        if (disposing) { _errors.Dispose(); _tips.Dispose(); _editorEmblem.Dispose(); }
+        if (disposing) { _errors.Dispose(); _tips.Dispose(); _editorEmblem.Dispose(); _gameIcons?.Dispose(); }
         base.Dispose(disposing);
     }
 

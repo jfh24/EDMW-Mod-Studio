@@ -112,10 +112,31 @@ internal sealed class CivilizationInstalledEditsPanel : UserControl
         var canShare = complete && package.PackageId != "legacy" && listedGamePath is not null && _share is not null;
         return new DashboardInstalledItemRow(package.ProjectName,
             (complete ? "Installed " : "Recorded ") + package.InstalledAt.ToLocalTime().ToString("g", CultureInfo.CurrentCulture),
-            complete ? null : package.Status, canShare, () => ShowDetails(package), () => Uninstall(package),
+            complete ? (package.HasRuntimeEffects ? "Runtime effects " + (package.RuntimeEffectsEnabled ? "enabled" : "disabled") : null) : package.Status,
+            canShare, () => ShowDetails(package), () => Uninstall(package),
             destination => _share!(listedGamePath!, package, destination == InstalledShareDestination.Lan,
                 destination == InstalledShareDestination.Friends),
-            package.PackageId == "legacy" ? "Reinstall this edit as a managed package to enable sharing." : null);
+            package.PackageId == "legacy" ? "Reinstall this edit as a managed package to enable sharing." : null,
+            package.RuntimeEffectsEnabled ? "Disable runtime effects" : "Enable runtime effects",
+            complete && package.HasRuntimeEffects ? () => ToggleEffects(package) : null);
+    }
+
+    private void ToggleEffects(CivilizationInstalledPackage package)
+    {
+        try
+        {
+            var path = _locateGame();
+            if (path is null || !string.Equals(Path.GetFullPath(path), Path.GetFullPath(_listedGamePath!), StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("The selected game folder changed. Refresh the mod list.");
+            CivilizationPackageManager.SetRuntimeEffectsEnabled(path, package.PackageId, !package.RuntimeEffectsEnabled);
+            RefreshInstalledPackages();
+            _installedPackagesChanged();
+        }
+        catch (Exception exception) when (Expected(exception))
+        {
+            MedievalDialog.Show((IWin32Window?)FindForm() ?? this, exception.Message,
+                "Could not change runtime effects", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
     }
 
     private void ShowDetails(CivilizationInstalledPackage package)
@@ -207,6 +228,13 @@ internal sealed class CivilizationInstalledEditsPanel : UserControl
     {
         var details = new StringBuilder();
         details.AppendLine("Status: " + package.Status);
+        if (package.HasRuntimeEffects)
+        {
+            details.AppendLine("Runtime effects: " + (package.RuntimeEffectsEnabled ? "Enabled" : "Disabled"));
+            details.AppendLine("Launch through Mod Studio. Every multiplayer participant needs the same enabled effects. Multiplayer validation is pending.");
+            details.AppendLine("Changes take effect next launch. Proximity bonuses are recalculated; research resources already awarded remain in saved games.");
+            details.AppendLine("Activated bonuses are session-only and reset on load. Disabling the runtime leaves their installed buttons inactive; uninstall removes them.");
+        }
         details.AppendLine();
         foreach (var change in package.Changes)
         {

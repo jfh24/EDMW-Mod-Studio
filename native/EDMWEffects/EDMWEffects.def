@@ -1,0 +1,3 @@
+LIBRARY EDMWEffects
+EXPORTS
+    InitializeEffects=_InitializeEffects@4

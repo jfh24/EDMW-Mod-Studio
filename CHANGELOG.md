@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Added prototype research, proximity, and activated effects, editable unit/building attachments, per-mod controls, and game icons in the Civ Editor.
+
 ## 1.1.1 — 2026-10-14
 
 - Added enable/disable controls for Technologies, Units, and Buildings in the Civ Editor.

@@ -16,6 +16,10 @@
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="..\EDMWMapDesigner\Civilizations\CivilizationUnitEffects.cs" Link="Domain\CivilizationUnitEffects.cs" />
+    <Compile Include="..\EDMWMapDesigner\Civilizations\CivilizationUnitEffectBindings.cs" Link="Domain\CivilizationUnitEffectBindings.cs" />
+    <Compile Include="..\EDMWMapDesigner\Civilizations\CivilizationRuntimeConfiguration.cs" Link="Domain\CivilizationRuntimeConfiguration.cs" />
+    <Compile Include="..\EDMWMapDesigner\Civilizations\CivilizationRuntimeEffects.cs" Link="Domain\CivilizationRuntimeEffects.cs" />
     <Compile Include="..\EDMWMapDesigner\Civilizations\CivilizationInstallerPackage.cs" Link="Domain\CivilizationInstallerPackage.cs" />
     <Compile Include="..\EDMWMapDesigner\Civilizations\CivilizationPackageManager.cs" Link="Domain\CivilizationPackageManager.cs" />
     <Compile Include="..\EDMWMapDesigner\Civilizations\CivilizationPackageContentComparer.cs" Link="Domain\CivilizationPackageContentComparer.cs" />

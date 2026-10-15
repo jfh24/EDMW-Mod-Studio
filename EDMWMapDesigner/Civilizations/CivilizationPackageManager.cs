@@ -7,7 +7,8 @@ using System.Text.Json;
 namespace EDMWMapDesigner.Civilizations;
 
 public sealed record CivilizationInstalledPackage(string PackageId, string ProjectName,
-    DateTimeOffset InstalledAt, IReadOnlyList<CivilizationInstallChange> Changes, string Status = "Installed");
+    DateTimeOffset InstalledAt, IReadOnlyList<CivilizationInstallChange> Changes, string Status = "Installed",
+    bool HasRuntimeEffects = false, bool RuntimeEffectsEnabled = true);
 
 /// <summary>
 /// Owns semantic fields, never whole database snapshots. Independent packages
@@ -23,7 +24,8 @@ public static class CivilizationPackageManager
         var root = Root(gamePath);
         var installed = LoadInstalled(root).Select(manifest => new CivilizationInstalledPackage(
             manifest.Package.PackageId, manifest.Package.ProjectName, manifest.InstalledAt,
-            manifest.Package.Changes.AsReadOnly())).ToList();
+            manifest.Package.Changes.AsReadOnly(), HasRuntimeEffects: manifest.Package.Files.Any(file => CivilizationRuntimeEffects.IsPath(file.RelativePath)),
+            RuntimeEffectsEnabled: manifest.RuntimeEffectsEnabled)).ToList();
         var legacy = Path.Combine(root, ".edmw-civilization-editor", "current.json");
         if (File.Exists(legacy))
         {
@@ -76,6 +78,63 @@ public static class CivilizationPackageManager
 
     public static CivilizationInstallResult Install(CivilizationInstallerPackage package, string gamePath)
         => InstallCore(package, gamePath, allowAlreadyInstalled: false);
+
+    public static void SetRuntimeEffectsEnabled(string gamePath, string packageId, bool enabled)
+    {
+        var root = Root(gamePath);
+        RequireId(packageId);
+        EnsureGameClosed(root);
+        using var packageLock = AcquireLock(root);
+        if (LoadTransactions(root).Any(transaction => transaction.State != "Complete"))
+            throw new InvalidDataException("Recover interrupted civilization package changes before changing runtime effects.");
+        var installed = LoadInstalled(root);
+        var selected = installed.SingleOrDefault(item => item.Package.PackageId == packageId)
+            ?? throw new InvalidDataException("This mod is no longer installed.");
+        CheckInstalledState(selected.Package, root, installed);
+        if (!selected.Package.Files.Any(file => CivilizationRuntimeEffects.IsPath(file.RelativePath)))
+            throw new InvalidDataException("This mod has no runtime effects.");
+        if (enabled) ValidateRuntimeCapacity(installed.Where(item => item.RuntimeEffectsEnabled && item != selected)
+            .Select(item => item.Package).Append(selected.Package));
+        selected.RuntimeEffectsEnabled = enabled;
+        WriteJson(ManifestPath(root, packageId), selected);
+    }
+
+    // Hold the package lock through launch so installation/toggles cannot race the snapshot.
+    public static void WithRuntimeEffectsForLaunch(string gamePath, Action<byte[]> launch)
+    {
+        var root = Root(gamePath);
+        EnsureGameClosed(root);
+        using var packageLock = AcquireLock(root);
+        if (LoadTransactions(root).Any(transaction => transaction.State != "Complete"))
+            throw new InvalidDataException("Recover interrupted civilization package changes before launching.");
+        var installed = LoadInstalled(root);
+        var rules = new List<CivilizationRuntimeRule>();
+        var unitRules = new List<CivilizationRuntimeUnitRule>();
+        foreach (var item in installed.Where(item => item.Package.Files.Any(file => CivilizationRuntimeEffects.IsPath(file.RelativePath))))
+        {
+            var configurations = item.Package.Files.Where(file => CivilizationRuntimeEffects.IsPath(file.RelativePath))
+                .Select(file => CivilizationRuntimeConfiguration.Decode(file.Replacement!)).ToArray();
+            if (!item.RuntimeEffectsEnabled && !configurations.Any(configuration => configuration.Units.Any(rule => rule.Trigger == CivilizationUnitEffectTrigger.Activated)))
+                continue;
+            CheckInstalledState(item.Package, root, installed);
+            foreach (var configuration in configurations)
+            {
+                if (item.RuntimeEffectsEnabled)
+                {
+                    rules.AddRange(configuration.Research);
+                    unitRules.AddRange(configuration.Units);
+                }
+                else
+                {
+                    // Installed native buttons still need their custom labels and a
+                    // no-op command binding while this mod's effects are disabled.
+                    unitRules.AddRange(configuration.Units.Where(rule => rule.Trigger == CivilizationUnitEffectTrigger.Activated)
+                        .Select(rule => rule with { Enabled = false }));
+                }
+            }
+        }
+        launch(CivilizationRuntimeConfiguration.Encode(rules, unitRules));
+    }
 
     /// <summary>
     /// Reads the selected installation's portable package without opening a
@@ -158,12 +217,35 @@ public static class CivilizationPackageManager
 
     private static string PortableProjectJson(CivilizationEditProject project)
     {
-        var portable = project.Clone(); portable.GamePath = ""; return portable.Serialize();
+        var portable = project.Clone();
+        portable.GamePath = "";
+        foreach (var entity in portable.Civilizations.SelectMany(civ => civ.Entities))
+            if (entity.Properties.ContainsKey(CivilizationUnitEffects.PropertyKey))
+                CivilizationUnitEffects.Write(entity, CivilizationUnitEffects.Read(entity).Select(effect => effect with { NativeTechnologyId = null }));
+        return portable.Serialize();
     }
 
     private static bool SamePackage(CivilizationInstallerPackage first, CivilizationInstallerPackage second) =>
         JsonSerializer.SerializeToUtf8Bytes(first, CivilizationInstallerPackageCodec.JsonOptions).AsSpan().SequenceEqual(
             JsonSerializer.SerializeToUtf8Bytes(second, CivilizationInstallerPackageCodec.JsonOptions));
+
+    private static void ValidateRuntimeCapacity(IEnumerable<CivilizationInstallerPackage> packages)
+    {
+        var configurations = packages.SelectMany(package => package.Files)
+            .Where(file => CivilizationRuntimeEffects.IsPath(file.RelativePath))
+            .Select(file => CivilizationRuntimeConfiguration.Decode(file.Replacement!)).ToArray();
+        if (configurations.Sum(configuration => configuration.Count) > CivilizationRuntimeEffects.MaximumRules)
+            throw new InvalidDataException($"Enabled mods exceed the limit of {CivilizationRuntimeEffects.MaximumRules} runtime rules. Disable a runtime mod first.");
+        var unitIds = configurations.SelectMany(configuration => configuration.Units).Select(rule => rule.Id).ToArray();
+        if (unitIds.Distinct().Count() != unitIds.Length)
+            throw new InvalidDataException("Enabled mods contain duplicate unit effect identities. Disable or uninstall the earlier copy first.");
+        var commandIds = configurations.SelectMany(configuration => configuration.Units)
+            .Where(rule => rule.Trigger == CivilizationUnitEffectTrigger.Activated).Select(rule => rule.TechnologyId).ToArray();
+        if (commandIds.Distinct().Count() != commandIds.Length)
+            throw new InvalidDataException("Enabled ability mods contain duplicate in-game command identities. Uninstall the earlier copy first.");
+        if (configurations.SelectMany(configuration => configuration.Research).Any(rule => commandIds.Contains(rule.TechnologyId)))
+            throw new InvalidDataException("An ability command conflicts with a research bonus trigger.");
+    }
 
     private static void CheckInstalledState(CivilizationInstallerPackage package, string root, IReadOnlyList<PackageInstallation> installed)
     {
@@ -235,6 +317,8 @@ public static class CivilizationPackageManager
     private static void CheckCompatibility(CivilizationInstallerPackage package, string root,
         IReadOnlyList<PackageInstallation> installed, bool uninstall, bool alreadyInstalled = false)
     {
+        if (!uninstall && !alreadyInstalled)
+            ValidateRuntimeCapacity(installed.Where(item => item.RuntimeEffectsEnabled).Select(item => item.Package).Append(package));
         var executable = ResolveTarget(root, "Empires_DMW.exe", true);
         if (!SameHash(FileHash(executable), package.ExecutableHash))
             throw new InvalidDataException("Choose the supported Empires: Dawn of the Modern World installation. This game executable has not been verified.");
@@ -248,7 +332,7 @@ public static class CivilizationPackageManager
             {
                 var owned = other.Package.Files.FirstOrDefault(file => file.RelativePath.Equals(table.RelativePath, StringComparison.OrdinalIgnoreCase));
                 if (owned is not null && (table.WholeFile || owned.WholeFile))
-                    throw new InvalidDataException($"'{other.Package.ProjectName}' already depends on {table.RelativePath}. A progression producer addition owns that complete table; uninstall the other package first.");
+                    throw new InvalidDataException($"'{other.Package.ProjectName}' already depends on {table.RelativePath}. Custom ability buttons and progression producer additions own the complete table; uninstall the other package first.");
             }
             if (package.OwnerTargets.Intersect(other.Package.OwnerTargets, StringComparer.Ordinal).Any())
                 throw new InvalidDataException($"'{other.Package.ProjectName}' already owns a logical model override changed by this package. Uninstall it first.");
@@ -276,6 +360,27 @@ public static class CivilizationPackageManager
             }
         }
         if (uninstall) return; // Restoration checks only owned current ranges; unrelated immutable assets may evolve.
+        var runtimeConfigurations = package.Files.Where(file => CivilizationRuntimeEffects.IsPath(file.RelativePath))
+            .Select(file => CivilizationRuntimeConfiguration.Decode(file.Replacement!)).ToArray();
+        var unitRules = runtimeConfigurations.SelectMany(configuration => configuration.Units).ToArray();
+        if (unitRules.Length != 0)
+        {
+            var objects = ReadBounded(ResolveTarget(root, "Data\\db\\dbobjects.dat"));
+            var count = objects.Length >= 4 ? BinaryPrimitives.ReadInt32LittleEndian(objects) : 0;
+            if (count <= 0 || objects.LongLength != 4L + count * 1936L ||
+                unitRules.Any(rule => rule.SourceObjectId >= count || rule.TargetObjectId >= count ||
+                    objects[4 + rule.SourceObjectId * 1936 + 232] == 0 || objects[4 + rule.TargetObjectId * 1936 + 232] == 0))
+                throw new InvalidDataException("A runtime effect refers to a source or target absent from the installed game catalog.");
+        }
+        var researchRules = runtimeConfigurations.SelectMany(configuration => configuration.Research).ToArray();
+        if (researchRules.Length != 0)
+        {
+            var technologies = CivilizationTechnologyBindings.ReadRecords(ReadBounded(ResolveTarget(root, "Data\\db\\dbtechtree.dat")))
+                .ToDictionary(record => record.TechId);
+            if (researchRules.Any(rule => !technologies.TryGetValue(rule.TechnologyId, out var record) ||
+                !CivilizationTechnologyBindings.IsResearchRecord(record) || !record.AllowsCivilizationRow(rule.CivilizationId - 1)))
+                throw new InvalidDataException("A runtime research bonus must refer to a nonrepeatable technology for its civilization.");
+        }
         foreach (var dependency in package.Dependencies)
             if (!SameHash(FileHash(ResolveTarget(root, dependency.Key, true)), dependency.Value))
                 throw new InvalidDataException("A required game asset differs from the package source: " + dependency.Key);
@@ -731,7 +836,7 @@ public static class CivilizationPackageManager
         if (string.IsNullOrWhiteSpace(relative) || Path.IsPathRooted(relative) || relative.Contains('/') ||
             relative.Split('\\').Any(part => part.Length == 0 || part is "." or ".." || part.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0))
             throw new InvalidDataException("A package file path is invalid.");
-        var allowed = CivilizationInstallerPackage.IsDatabasePath(relative) || CivilizationInstallerPackage.IsModelPath(relative);
+        var allowed = CivilizationRuntimeEffects.IsPath(relative) || CivilizationInstallerPackage.IsDatabasePath(relative) || CivilizationInstallerPackage.IsModelPath(relative);
         if (dependency) allowed |= relative.Equals("Empires_DMW.exe", StringComparison.OrdinalIgnoreCase) ||
             (relative.StartsWith("Data\\db\\", StringComparison.OrdinalIgnoreCase) && relative.EndsWith(".dat", StringComparison.OrdinalIgnoreCase));
         if (!allowed) throw new InvalidDataException("A package file is outside supported game data.");
@@ -825,6 +930,7 @@ public static class CivilizationPackageManager
         public PackageInstallation() { }
         public CivilizationInstallerPackage Package { get; set; } = new();
         public DateTimeOffset InstalledAt { get; set; }
+        public bool RuntimeEffectsEnabled { get; set; } = true;
     }
     private sealed class PackageTransaction
     {

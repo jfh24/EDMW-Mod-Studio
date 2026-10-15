@@ -8,6 +8,8 @@ namespace EDMWMapDesigner.UI;
 internal sealed class AgeProgressionPanel : UserControl
 {
     private readonly CivilizationGameData _gameData;
+    private readonly CivilizationGameIcons _gameIcons;
+    private readonly bool _ownsGameIcons;
     private CivilizationDraft _original;
     private readonly CivilizationDraft _candidate;
     private readonly IReadOnlyList<CivilizationAgeProgressionItem> _items;
@@ -70,11 +72,13 @@ internal sealed class AgeProgressionPanel : UserControl
         BindItems();
     }
 
-    public AgeProgressionPanel(CivilizationGameData gameData, CivilizationDraft civilization)
+    public AgeProgressionPanel(CivilizationGameData gameData, CivilizationDraft civilization, CivilizationGameIcons? gameIcons = null)
     {
         ArgumentNullException.ThrowIfNull(gameData);
         ArgumentNullException.ThrowIfNull(civilization);
         _gameData = gameData;
+        _ownsGameIcons = gameIcons is null;
+        _gameIcons = gameIcons ?? new CivilizationGameIcons(gameData.GamePath);
         _original = civilization.Clone();
         _candidate = civilization.Clone();
         _items = gameData.GetAgeProgressionCandidates(civilization);
@@ -145,6 +149,7 @@ internal sealed class AgeProgressionPanel : UserControl
         _membership.SelectedIndex = 0;
         _ageFilter.Items.Add("All ages");
         _ageFilter.DisplayTextProvider = value => value.ToString() == "All ages" ? "All" : value.ToString() ?? "";
+        _ageFilter.IconProvider = value => value is CivilizationAgeName age ? _gameIcons.ForAge(age.Id) : null;
         foreach (var age in _gameData.GetAgeNames().Where(age => age.Id is >= 5 and <= 9)) _ageFilter.Items.Add(age);
         _ageFilter.SelectedIndex = 0;
         filters.Controls.Add(Label("AGE", 8, true), 0, 2);
@@ -281,7 +286,7 @@ internal sealed class AgeProgressionPanel : UserControl
         foreach (var item in _filteredItems.Skip(_pageIndex * PageSize).Take(PageSize))
         {
             var edited = HasMembershipOverride(item) || FindEntity(_candidate, item.Entity)?.Properties.Keys.Intersect(EditableFields(_gameData, item.Entity).Select(field => field.Key)).Any() == true;
-            var card = new ProgressionCard(item, AgeRange(item), edited)
+            var card = new ProgressionCard(item, AgeRange(item), edited, _gameIcons.ForEntity(item.Entity))
             {
                 Height = (int)Math.Round(68 * displayScale),
                 Margin = new Padding(0, 0, 0, (int)Math.Round(6 * displayScale))
@@ -532,7 +537,8 @@ internal sealed class AgeProgressionPanel : UserControl
                 producerRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
                 var producerLabel = Label(item.Kind == "Technology" || item.Kind == "Age advance" ? "RESEARCHED AT" : "PRODUCED AT", 9, true);
                 producerRow.Controls.Add(producerLabel, 0, 0);
-                var producer = new MedievalChoiceSelector { Dock = DockStyle.Top, AccessibleName = "Progression item's producer", MinimumButtonWidth = 100, MaximumButtonWidth = 250 };
+                var producer = new MedievalChoiceSelector { Dock = DockStyle.Top, AccessibleName = "Progression item's producer", MinimumButtonWidth = 100, MaximumButtonWidth = 250,
+                    IconProvider = value => value is ProducerChoice choice ? _gameIcons.ForObject(choice.Id) : null };
                 foreach (var choice in item.ProducerChoices) producer.Items.Add(new ProducerChoice(choice.ObjectId, choice.DisplayName));
                 var selectedProducer = SelectedProducerId(item);
                 producer.SelectedIndex = producer.Items.Cast<ProducerChoice>().ToList().FindIndex(choice => choice.Id == selectedProducer);
@@ -610,7 +616,8 @@ internal sealed class AgeProgressionPanel : UserControl
                     var age = definition.Key.EndsWith(".initialAge", StringComparison.Ordinal) || definition.Key.EndsWith(".finalAge", StringComparison.Ordinal);
                     if (age)
                     {
-                        var choices = new MedievalChoiceSelector { Dock = DockStyle.Top, AccessibleName = definition.Label, MinimumButtonWidth = 54, MaximumButtonWidth = 160 };
+                        var choices = new MedievalChoiceSelector { Dock = DockStyle.Top, AccessibleName = definition.Label, MinimumButtonWidth = 54, MaximumButtonWidth = 160,
+                            IconProvider = value => value is CivilizationAgeName name ? _gameIcons.ForAge(name.Id) : null };
                         foreach (var name in _gameData.GetAgeNames().Where(name => name.Id is >= 5 and <= 9 || name.Id == 14 && definition.Key.EndsWith(".finalAge", StringComparison.Ordinal))) choices.Items.Add(name);
                         var ageId = int.Parse(value, CultureInfo.InvariantCulture);
                         if (!choices.Items.Cast<CivilizationAgeName>().Any(name => name.Id == ageId)) choices.Items.Add(new CivilizationAgeName(ageId, _gameData.GetAgeName(ageId)));
@@ -965,7 +972,7 @@ internal sealed class AgeProgressionPanel : UserControl
     }
     protected override void Dispose(bool disposing)
     {
-        if (disposing) { _tips.Dispose(); _errors.Dispose(); }
+        if (disposing) { _tips.Dispose(); _errors.Dispose(); if (_ownsGameIcons) _gameIcons.Dispose(); }
         base.Dispose(disposing);
     }
     private sealed class ProgressionField(CivilizationFieldDefinition definition, Control input, string initialValue)
@@ -981,6 +988,7 @@ internal sealed class AgeProgressionPanel : UserControl
     {
         private bool _selected;
         private bool _hovered;
+        private readonly Image? _sourceIcon;
         [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
         public CivilizationAgeProgressionItem Item { get; }
         [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
@@ -990,8 +998,9 @@ internal sealed class AgeProgressionPanel : UserControl
         [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
         public bool Selected { get => _selected; set { TabStop = value; if (_selected != value) { _selected = value; Invalidate(); } } }
 
-        public ProgressionCard(CivilizationAgeProgressionItem item, string ages, bool edited)
+        public ProgressionCard(CivilizationAgeProgressionItem item, string ages, bool edited, Image? sourceIcon)
         {
+            _sourceIcon = sourceIcon;
             Item = item;
             AgeLabel = ages;
             Edited = edited;
@@ -1023,7 +1032,7 @@ internal sealed class AgeProgressionPanel : UserControl
             var scale = Height / 68f;
             var inset = (int)(10 * scale);
             var iconSize = (int)(32 * scale);
-            var icon = ProgressionIcons.ForKind(Item.Kind);
+            var icon = _sourceIcon ?? ProgressionIcons.ForKind(Item.Kind);
             if (icon is not null) e.Graphics.DrawImage(icon, new Rectangle(inset, (Height - iconSize) / 2, iconSize, iconSize));
             var textLeft = inset + iconSize + (int)(10 * scale);
             var titleBounds = new Rectangle(textLeft, (int)(8 * scale), Math.Max(1, Width - textLeft - inset), (int)(25 * scale));

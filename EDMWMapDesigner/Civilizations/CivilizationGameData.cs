@@ -206,6 +206,8 @@ public sealed class CivilizationGameData
         : CivilizationCivilizationBindings.CanWrite(key);
 
     public bool CanWrite(CivilizationEntityDraft entity, string key) =>
+        (CivilizationRuntimeEffects.IsKey(key) && entity.Category == CivilizationCategory.Technologies &&
+            entity.SourcePowerId is null && _technologyRecords.Any(record => record.TechId == entity.SourceTechnologyId && CivilizationTechnologyBindings.IsResearchRecord(record))) ||
         (entity.SourcePowerId is null && CanWrite(entity.Category, key, true)) ||
         entity.SourceTechnologyId is int id && _abilityData.CanWriteEffect(id, entity.Category, key);
 

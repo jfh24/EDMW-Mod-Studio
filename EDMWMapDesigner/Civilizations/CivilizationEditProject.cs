@@ -265,6 +265,8 @@ public sealed class CivilizationEditProject
                     (entity.SourceTechnologyId is not null && entity.Category is not (CivilizationCategory.Technologies or CivilizationCategory.Abilities)))
                     throw new InvalidDataException($"{entity.Name} has an invalid source object ID.");
                 ValidateProperties(entity.Properties, CivilizationSchema.GetFields(entity.Category), entity.Name);
+                _ = CivilizationRuntimeEffects.RulesFor(civilization, entity);
+                CivilizationUnitEffects.Validate(entity);
                 ValidateRangePair(entity.Properties, "unit.minimumRange", "unit.attackRange", entity.Name);
                 ValidateRangePair(entity.Properties, "building.minimumRange", "building.attackRange", entity.Name);
                 ValidateModelReference(entity.Properties, "unit.modelAsset", modelIds, entity.Name);
@@ -296,6 +298,9 @@ public sealed class CivilizationEditProject
                     changes.Add(new(civilization.Name, entity.Name, entity.Category,
                         "entity.create", "New definition", entity.Name));
                 AddChanges(changes, civilization.Name, entity.Name, entity.Category, entity.Properties);
+                foreach (var effect in CivilizationUnitEffects.Read(entity))
+                    changes.Add(new(civilization.Name, entity.Name, entity.Category,
+                        CivilizationUnitEffects.PropertyKey, "Custom effect (prototype)", CivilizationUnitEffects.Describe(effect)));
             }
         }
         return changes;

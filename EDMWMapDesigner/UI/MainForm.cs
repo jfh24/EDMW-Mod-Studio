@@ -3259,15 +3259,18 @@ public sealed partial class MainForm : Form
             if (!File.Exists(executable))
                 throw new FileNotFoundException("The EDMW executable was not found.", executable);
 
-            if (!IsEdmwRunning())
-                _ = Process.Start(new ProcessStartInfo(executable)
-                {
-                    WorkingDirectory = gamePath,
-                    UseShellExecute = true
-                }) ?? throw new InvalidOperationException("Windows did not start EDMW.");
+            if (IsEdmwRunning())
+            {
+                _status.Text = "EDMW is already running. Restart it through Mod Studio to load changed runtime effects.";
+                return;
+            }
+            CivilizationEffectsLauncher.Launch(gamePath);
             _status.Text = "EDMW launched.";
         }
-        catch (Exception) { ShowError("Could not launch EDMW"); }
+        catch (Exception exception)
+        {
+            MedievalDialog.Show(this, exception.Message, "Could not launch EDMW", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
     }
 
     private static bool IsEdmwRunning()

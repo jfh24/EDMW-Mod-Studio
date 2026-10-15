@@ -25,7 +25,7 @@ public sealed class CivilizationInstallerPackage
         var plan = CivilizationGameInstaller.BuildPlan(project, gamePath, forExport: true);
         if (!plan.CanInstall)
             throw new InvalidDataException(plan.Issues.Count > 0 ? string.Join(Environment.NewLine, plan.Issues) : "There are no changes to export.");
-        var portableProject = project.Clone();
+        var portableProject = plan.PreparedProject.Clone();
         portableProject.GamePath = "";
         var package = new CivilizationInstallerPackage
         {
@@ -35,7 +35,7 @@ public sealed class CivilizationInstallerPackage
         };
         foreach (var file in plan.Files)
         {
-            if (IsModelPath(file.RelativePath))
+            if (IsModelPath(file.RelativePath) || CivilizationRuntimeEffects.IsPath(file.RelativePath))
             {
                 package.Files.Add(new() { RelativePath = file.RelativePath, WholeFile = true,
                     ExpectedHash = file.OriginalHash, Replacement = file.Patched.ToArray() });
@@ -321,12 +321,13 @@ public sealed class CivilizationInstallerPackage
             if (file.WholeFile)
             {
                 var databaseTable = IsTechnologyPath(file.RelativePath) || IsObjectPath(file.RelativePath);
-                if ((!IsModelPath(file.RelativePath) && !databaseTable) || file.Replacement is null ||
+                if ((!IsModelPath(file.RelativePath) && !databaseTable && !CivilizationRuntimeEffects.IsPath(file.RelativePath)) || file.Replacement is null ||
                     file.Replacement.Length < 1 || file.Replacement.Length > (databaseTable ? 32 : 16) * 1024 * 1024 ||
                     file.Patches.Count != 0 || (file.ExpectedHash is not null && !ValidHash(file.ExpectedHash)) ||
                     (databaseTable && file.ExpectedHash is null))
                     throw new InvalidDataException("A whole-file replacement entry is invalid.");
-                if (databaseTable) ValidateWholeDatabase(file.RelativePath, file.Replacement);
+                if (CivilizationRuntimeEffects.IsPath(file.RelativePath)) CivilizationRuntimeEffects.ValidatePackageFile(project, file);
+                else if (databaseTable) ValidateWholeDatabase(file.RelativePath, file.Replacement);
                 else _ = CivilizationModelReader.Read(file.Replacement, file.RelativePath);
                 bytes += file.Replacement.Length;
                 changed = true;
@@ -348,6 +349,47 @@ public sealed class CivilizationInstallerPackage
                     bytes += patch.Length * 2;
                     changed = true;
                 }
+            }
+        }
+        var expectedRuntimeFiles = project.Civilizations.SelectMany(civ => civ.Entities
+            .Where(entity => CivilizationRuntimeConfiguration.DataFor(civ, entity) is not null)
+            .Select(CivilizationRuntimeEffects.PathFor)).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (!expectedRuntimeFiles.SetEquals(package.Files.Where(file => CivilizationRuntimeEffects.IsPath(file.RelativePath)).Select(file => file.RelativePath)))
+            throw new InvalidDataException("The package is missing a runtime effect attachment from its source project.");
+        var configurations = package.Files.Where(file => CivilizationRuntimeEffects.IsPath(file.RelativePath))
+            .Select(file => CivilizationRuntimeConfiguration.Decode(file.Replacement!)).ToArray();
+        if (configurations.Sum(configuration => configuration.Count) > CivilizationRuntimeEffects.MaximumRules)
+            throw new InvalidDataException("The package contains too many runtime effect rules.");
+        var unitRules = configurations.SelectMany(configuration => configuration.Units).ToArray();
+        if (unitRules.Select(rule => rule.Id).Distinct().Count() != unitRules.Length)
+            throw new InvalidDataException("The package contains duplicate unit effect identities.");
+        var activated = unitRules.Where(rule => rule.Trigger == CivilizationUnitEffectTrigger.Activated).ToArray();
+        if (activated.Length > 0)
+        {
+            if (activated.Select(rule => rule.TechnologyId).Distinct().Count() != activated.Length)
+                throw new InvalidDataException("The package contains duplicate ability command identities.");
+            var technologyFile = package.Files.SingleOrDefault(file => IsTechnologyPath(file.RelativePath));
+            var objectsFile = package.Files.SingleOrDefault(file => IsObjectPath(file.RelativePath));
+            if (technologyFile is not { WholeFile: true, Replacement: not null } || objectsFile is not { WholeFile: true, Replacement: not null })
+                throw new InvalidDataException("An activated ability package is missing its in-game button tables.");
+            var records = CivilizationTechnologyBindings.ReadRecords(technologyFile.Replacement).ToDictionary(record => record.TechId);
+            foreach (var rule in activated)
+            {
+                var entity = project.Civilizations.Where(civ => civ.SourceCivilizationId == rule.CivilizationId).SelectMany(civ => civ.Entities)
+                    .Single(entity => CivilizationUnitEffects.Read(entity).Any(effect => Guid.Parse(effect.Id) == rule.Id));
+                var attachment = CivilizationUnitEffects.Read(entity).Single(effect => Guid.Parse(effect.Id) == rule.Id);
+                if (!records.TryGetValue(rule.TechnologyId, out var record) || record.NodeKind != 3 || record.CreatesObject || record.EditorOnly ||
+                    record.CommandId != 51 || record.EventId != 0 || record.WoodCost != 0 || record.StoneCost != 0 || record.GoldCost != 0 || record.FoodCost != 0 ||
+                    BinaryPrimitives.ReadInt32LittleEndian(technologyFile.Replacement.AsSpan(record.Offset + 136)) != 0 ||
+                    record.CreatedObjectId != 0 || record.PrerequisiteTechnologyIds.Count != 0 || record.AdditionalTechnologyIds.Count != 0 ||
+                    !record.ProducerObjectIds.SequenceEqual([rule.SourceObjectId]) || !record.AllowedCivilizationRows.SequenceEqual([rule.CivilizationId - 1]) ||
+                    !CivilizationObjectDetails.ReadActionTechnologyIds(objectsFile.Replacement, rule.SourceObjectId, entity.Category).Contains((uint)rule.TechnologyId) ||
+                    BinaryPrimitives.ReadInt32LittleEndian(technologyFile.Replacement.AsSpan(record.Offset + 168)) != attachment.ButtonIconId ||
+                    BinaryPrimitives.ReadInt32LittleEndian(technologyFile.Replacement.AsSpan(record.Offset + 176)) != 1_000_000 + rule.TechnologyId ||
+                    record.CommonButtonSlot != attachment.ButtonSlot || record.CivilizationButtonSlots[rule.CivilizationId - 2] != attachment.ButtonSlot ||
+                    record.ToolTipStringId != 2_000_000 + rule.TechnologyId || record.PrerequisiteStringId1 != 2_000_000 + rule.TechnologyId ||
+                    record.PrerequisiteStringId2 != 2_000_000 + rule.TechnologyId)
+                    throw new InvalidDataException("An activated ability does not match its in-game button registration.");
             }
         }
         if (!changed || bytes > 128 * 1024 * 1024) throw new InvalidDataException("The package has no changes or exceeds its payload limit.");

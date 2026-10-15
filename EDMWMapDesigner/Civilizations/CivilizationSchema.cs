@@ -180,6 +180,10 @@ public static class CivilizationSchema
             [CivilizationCategory.Technologies] = Array.AsReadOnly(new[]
             {
                 B("available", "Available to civilization", "Identity"),
+                N("technology.bonusFood", "Food on completion", "Runtime effects (prototype)", "Whole amount, 0–100,000. Awarded once to the researching player. Launch through Mod Studio."),
+                N("technology.bonusWood", "Wood on completion", "Runtime effects (prototype)"),
+                N("technology.bonusGold", "Gold on completion", "Runtime effects (prototype)"),
+                N("technology.bonusStone", "Stone on completion", "Runtime effects (prototype)"),
                 T("technology.internalName", "Internal name", "Identity"),
                 T("technology.displayName", "Game display name", "Identity"),
                 M("technology.description", "Description", "Identity"),
@@ -407,6 +411,9 @@ public static class CivilizationSchema
         if (field.Kind == CivilizationFieldKind.Choice &&
             !(field.Options?.Contains(value, StringComparer.Ordinal) ?? false))
             return $"Choose a listed value for {field.Label}, or leave it blank to inherit.";
+        if (CivilizationRuntimeEffects.IsKey(field.Key))
+            return int.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out var bonus) && bonus is >= 0 and <= 100000
+                ? null : "Enter a whole amount from 0 to 100,000.";
         if (field.Kind != CivilizationFieldKind.Number) return null;
         if (!double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out var number) ||
             !double.IsFinite(number)) return $"{field.Label} requires a finite number (use a decimal point).";
