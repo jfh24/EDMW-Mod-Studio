@@ -81,6 +81,16 @@ int wmain(int argc, wchar_t** argv) {
         WaitForSingleObject(process.hProcess, 5000);
         fwprintf(stderr, L"Runtime initialization failed; the new game process was stopped before play.\n");
     }
+    // Successful injection alone does not mean the game finished starting. In
+    // particular, an invalid installed command can fail as the menu's native
+    // technology data is loaded, after InitializeEffects has already returned.
+    bool exitedDuringStartup = false;
+    if (started && WaitForSingleObject(process.hProcess, 5000) == WAIT_OBJECT_0) {
+        DWORD exitCode = 0;
+        GetExitCodeProcess(process.hProcess, &exitCode);
+        fwprintf(stderr, L"EDMW exited during startup (code 0x%08lX). Runtime configuration: %s\n", exitCode, argv[2]);
+        exitedDuringStartup = true;
+    }
     CloseHandle(process.hThread); CloseHandle(process.hProcess);
-    return started ? 0 : 5;
+    return !started ? 5 : exitedDuringStartup ? 6 : 0;
 }

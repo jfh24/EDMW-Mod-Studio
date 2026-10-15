@@ -496,7 +496,8 @@ public sealed class CivilizationEditorView : UserControl
                 File.ReadAllBytes(Path.Combine(_catalog.GamePath, "Data", "db", "dbobjects.dat")),
                 File.ReadAllBytes(Path.Combine(_catalog.GamePath, "Data", "db", "dbtechtree.dat")), buttonData, entity, row)
             : null;
-        return new CivilizationUnitEffectsDialog(entity, _catalog.Items, buttons, _gameIcons, availableSlots);
+        return new CivilizationUnitEffectsDialog(entity, _catalog.Items, buttons, _gameIcons, availableSlots, _gameData,
+            sourceId => CurrentCivilization?.Entities.FirstOrDefault(item => item.SourceObjectId == sourceId));
     }
 
     private void EditUnitEffects()

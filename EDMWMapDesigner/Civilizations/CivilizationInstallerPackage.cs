@@ -309,6 +309,10 @@ public sealed class CivilizationInstallerPackage
             throw new InvalidDataException("The civilization package manifest is invalid.");
         var project = CivilizationEditProject.Deserialize(package.ProjectJson);
         if (project.Name != package.ProjectName) throw new InvalidDataException("The embedded project name differs from its package.");
+        var effectIds = new HashSet<Guid>();
+        foreach (var effect in project.Civilizations.SelectMany(civ => civ.Entities).SelectMany(CivilizationUnitEffects.Read))
+            if (!effectIds.Add(Guid.Parse(effect.Id)))
+                throw new InvalidDataException("The package contains duplicate unit effect identities.");
         var paths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         long bytes = 0;
         var changed = false;

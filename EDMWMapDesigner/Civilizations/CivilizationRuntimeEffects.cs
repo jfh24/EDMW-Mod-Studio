@@ -60,7 +60,7 @@ public static class CivilizationRuntimeEffects
 
     public static IReadOnlyList<CivilizationRuntimeRule> Decode(byte[] bytes)
     {
-        if (bytes.Length >= 8 && (bytes.AsSpan(0, 8).SequenceEqual("EDMWEF02"u8) || bytes.AsSpan(0, 8).SequenceEqual("EDMWEF03"u8)))
+        if (bytes.Length >= 8 && (bytes.AsSpan(0, 8).SequenceEqual("EDMWEF02"u8) || bytes.AsSpan(0, 8).SequenceEqual("EDMWEF03"u8) || bytes.AsSpan(0, 8).SequenceEqual("EDMWEF04"u8) || bytes.AsSpan(0, 8).SequenceEqual("EDMWEF05"u8)))
             return CivilizationRuntimeConfiguration.Decode(bytes).Research;
         if (bytes.Length < 12 || !bytes.AsSpan(0, 8).SequenceEqual("EDMWEF01"u8))
             throw new InvalidDataException("The runtime effect header is invalid.");
@@ -88,7 +88,17 @@ public static class CivilizationRuntimeEffects
             .Where(item => PathFor(item.entity).Equals(file.RelativePath, StringComparison.OrdinalIgnoreCase)).ToArray();
         if (matches.Length != 1 || file.Replacement is null || file.ExpectedHash is not null ||
             CivilizationRuntimeConfiguration.DataFor(matches[0].civ, matches[0].entity) is not { } expected ||
-            !expected.AsSpan().SequenceEqual(file.Replacement) || CivilizationRuntimeConfiguration.Decode(file.Replacement).Count == 0)
+            !EquivalentConfiguration(expected, file.Replacement) || CivilizationRuntimeConfiguration.Decode(file.Replacement).Count == 0)
             throw new InvalidDataException("Runtime effects must match the package's source project and own a new sidecar file.");
+    }
+
+    private static bool EquivalentConfiguration(byte[] expected, byte[] actual)
+    {
+        // Legacy packages retain their original hashes and sidecars. Compare their decoded
+        // meaning so the current writer does not invalidate older sight-only exports.
+        var left = CivilizationRuntimeConfiguration.Decode(expected);
+        var right = CivilizationRuntimeConfiguration.Decode(actual);
+        return left.Research.SequenceEqual(right.Research) && left.Units.Count == right.Units.Count &&
+            left.Units.Zip(right.Units).All(pair => CivilizationRuntimeConfiguration.Equivalent(pair.First, pair.Second));
     }
 }

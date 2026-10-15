@@ -1,10 +1,14 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <cstdio>
+#include <cstdarg>
 #include <algorithm>
+#include <atomic>
+#include <mutex>
 #include "EffectRules.h"
 #include "UnitEffectNative.h"
 #include "NativeAbilityBindings.h"
+#include "EffectTrace.h"
 
 namespace {
 std::vector<edmw::EffectRule> rules;
@@ -31,7 +35,7 @@ int __cdecl ResearchEvent(int eventId, int playerIndex, int technology, void* pl
     const auto tree = Read<void*>(node, 0x24);
     if (!definition || !tree || !Read<uint8_t>(node, 4)) return result;
     const auto kind = Read<uint32_t>(definition, 0xA8);
-    const auto civilization = Read<uint32_t>(tree, 0x16D4);
+    const auto civilization = edmw::NativeCivilizationToWireId(Read<uint32_t>(tree, 0x16D4));
     const bool restoring = *reinterpret_cast<const uint8_t*>(0x0099FC7C) != 0;
     if (!player) player = Read<void*>(tree, 0x16D0);
     if (!player || playerIndex < 0 || playerIndex > 15 || Read<int>(player, 0x478) != playerIndex) return result;
@@ -68,6 +72,24 @@ __declspec(naked) void ResearchHook() {
 }
 }
 
+void edmw::TraceEffect(const char* format, ...) {
+    if (trace == INVALID_HANDLE_VALUE) return;
+    static std::atomic<uint32_t> entries{ 0 };
+    if (entries.fetch_add(1, std::memory_order_relaxed) >= 1024) return;
+    char line[512];
+    va_list arguments;
+    va_start(arguments, format);
+    vsnprintf_s(line, sizeof(line), _TRUNCATE, format, arguments);
+    va_end(arguments);
+    const auto length = static_cast<DWORD>(strnlen_s(line, sizeof(line)));
+    static std::mutex logMutex;
+    const std::lock_guard<std::mutex> guard(logMutex);
+    DWORD written;
+    WriteFile(trace, line, length, &written, nullptr);
+    constexpr char newline[] = "\r\n";
+    WriteFile(trace, newline, sizeof(newline) - 1, &written, nullptr);
+}
+
 // Invoked by the owned game's launcher thread, outside DllMain/loader lock.
 extern "C" DWORD WINAPI InitializeEffects(void* configuration) {
     if (initialized || reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr)) != 0x00400000 || !configuration) return 0;
@@ -78,7 +100,7 @@ extern "C" DWORD WINAPI InitializeEffects(void* configuration) {
     HANDLE file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (file == INVALID_HANDLE_VALUE) return 0;
     const DWORD size = GetFileSize(file, nullptr);
-    if (size < 12 || size > 16 + 1024 * 96) { CloseHandle(file); return 0; }
+    if (size < 12 || size > 16 + 1024 * 508) { CloseHandle(file); return 0; }
     std::vector<uint8_t> bytes(size);
     DWORD read = 0;
     const bool loaded = ReadFile(file, bytes.data(), size, &read, nullptr) && read == size;

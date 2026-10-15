@@ -12,9 +12,9 @@
     <Title>EDMW Mod Studio</Title>
     <Description>Map and civilization modding studio for Empires: Dawn of the Modern World.</Description>
     <RootNamespace>EDMWMapDesigner</RootNamespace>
-    <Version>1.2.0</Version>
-    <AssemblyVersion>1.2.0.0</AssemblyVersion>
-    <FileVersion>1.2.0.0</FileVersion>
+    <Version>1.2.1</Version>
+    <AssemblyVersion>1.2.1.0</AssemblyVersion>
+    <FileVersion>1.2.1.0</FileVersion>
   </PropertyGroup>
   <ItemGroup>
     <EmbeddedResource Include="..\native\EDMWEffects\build\EDMWEffects.dll" LogicalName="EDMWMapDesigner.Native.EDMWEffects.dll" />

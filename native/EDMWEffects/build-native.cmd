@@ -16,7 +16,11 @@ cl /nologo /std:c++17 /O2 /W4 /WX /EHsc /MT /GS /Fo:build\UnitEffectRuntimeTests
 if errorlevel 1 exit /b %errorlevel%
 build\UnitEffectRuntimeTests.exe
 if errorlevel 1 exit /b %errorlevel%
-cl /nologo /std:c++17 /O2 /W4 /WX /EHsc /MT /GS /LD /Fo:build\ /Fe:build\EDMWEffects.dll EDMWEffects.cpp UnitEffectNative.cpp NativeAbilityBindings.cpp /link /DEF:EDMWEffects.def /MACHINE:X86 /DYNAMICBASE /NXCOMPAT /Brepro
+cl /nologo /std:c++17 /O2 /W4 /WX /EHsc /MT /GS /Fo:build\UnitEffectProductionTests.obj /Fe:build\UnitEffectProductionTests.exe UnitEffectProductionTests.cpp /link /MACHINE:X86 /DYNAMICBASE /NXCOMPAT /Brepro
+if errorlevel 1 exit /b %errorlevel%
+build\UnitEffectProductionTests.exe
+if errorlevel 1 exit /b %errorlevel%
+cl /nologo /std:c++17 /O2 /W4 /WX /EHsc /MT /GS /LD /Fo:build\ /Fe:build\EDMWEffects.dll EDMWEffects.cpp UnitEffectNative.cpp UnitEffectExtras.cpp UnitEffectProduction.cpp NativeAbilityBindings.cpp /link /DEF:EDMWEffects.def /MACHINE:X86 /DYNAMICBASE /NXCOMPAT /Brepro
 if errorlevel 1 exit /b %errorlevel%
 cl /nologo /std:c++17 /O2 /W4 /WX /EHsc /MT /GS /Fo:build\EffectsLauncher.obj /Fe:build\EDMWEffectsLauncher.exe EffectsLauncher.cpp /link /MACHINE:X86 /DYNAMICBASE /NXCOMPAT /Brepro
 exit /b %errorlevel%

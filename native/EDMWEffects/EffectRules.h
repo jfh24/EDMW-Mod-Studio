@@ -30,14 +30,16 @@ inline bool ReadRuntimeRules(const std::vector<uint8_t>& bytes, std::vector<Effe
     research.clear(); units.clear(); abilities.clear();
     if (bytes.size() >= 8 && !memcmp(bytes.data(), "EDMWEF01", 8)) return ReadEffectRules(bytes, research);
     if (bytes.size() < 16) return false;
-    const bool version3 = !memcmp(bytes.data(), "EDMWEF03", 8);
+    const bool version5 = !memcmp(bytes.data(), "EDMWEF05", 8);
+    const bool version4 = version5 || !memcmp(bytes.data(), "EDMWEF04", 8);
+    const bool version3 = version4 || !memcmp(bytes.data(), "EDMWEF03", 8);
     if (!version3 && memcmp(bytes.data(), "EDMWEF02", 8)) return false;
     uint32_t researchCount = 0, unitCount = 0;
     memcpy(&researchCount, bytes.data() + 8, 4);
     memcpy(&unitCount, bytes.data() + 12, 4);
     if (researchCount > 1024 || unitCount > 1024 || researchCount + unitCount > 1024 ||
-        bytes.size() < 16u + researchCount * 16u + unitCount * (version3 ? 56u : 36u) ||
-        bytes.size() > 16u + researchCount * 16u + unitCount * (version3 ? 96u : 36u)) return false;
+        bytes.size() < 16u + researchCount * 16u + unitCount * (version5 ? 68u : version4 ? 60u : version3 ? 56u : 36u) ||
+        bytes.size() > 16u + researchCount * 16u + unitCount * (version5 ? 508u : version4 ? 100u : version3 ? 96u : 36u)) return false;
     std::vector<uint8_t> legacy(12u + researchCount * 16u);
     memcpy(legacy.data(), "EDMWEF01", 8);
     memcpy(legacy.data() + 8, &researchCount, 4);
@@ -50,7 +52,7 @@ inline bool ReadRuntimeRules(const std::vector<uint8_t>& bytes, std::vector<Effe
     std::set<UnitEffectId> identities;
     size_t offset = 16u + researchCount * 16u;
     for (uint32_t i = 0; i < unitCount; ++i) {
-        const size_t minimum = version3 ? 56u : 36u;
+        size_t minimum = version4 ? 60u : version3 ? 56u : 36u;
         if (offset > bytes.size() || bytes.size() - offset < minimum) return false;
         const auto* record = bytes.data() + offset;
         UnitEffectRule rule;
@@ -58,7 +60,28 @@ inline bool ReadRuntimeRules(const std::vector<uint8_t>& bytes, std::vector<Effe
         memcpy(&rule.civilization, record + 16, 4);
         memcpy(&rule.sourceObject, record + 20, 4);
         memcpy(&rule.targetObject, record + 24, 4);
-        memcpy(&rule.sightAmount, record + 28, 4);
+        if (version5) {
+            uint32_t reserved = 0, outputCount = 0;
+            memcpy(&reserved, record + 28, 4);
+            memcpy(&outputCount, record + 56, 4);
+            if (reserved || !outputCount || outputCount > 51 || bytes.size() - offset - minimum < outputCount * 8u) return false;
+            for (uint32_t outputIndex = 0; outputIndex < outputCount; ++outputIndex) {
+                UnitEffectOutput output{};
+                memcpy(&output.stat, record + minimum + outputIndex * 8u, 4);
+                memcpy(&output.amount, record + minimum + outputIndex * 8u + 4u, 4);
+                rule.outputs.push_back(output);
+            }
+            rule.stat = rule.outputs.front().stat;
+            rule.amount = rule.outputs.front().amount;
+            minimum += outputCount * 8u;
+        } else if (version4) {
+            memcpy(&rule.amount, record + 28, 4);
+            memcpy(&rule.stat, record + 56, 4);
+        } else {
+            int32_t legacyAmount = 0;
+            memcpy(&legacyAmount, record + 28, 4);
+            rule.amount = static_cast<float>(legacyAmount);
+        }
         memcpy(&rule.radiusTiles, record + 32, 4);
         rule.activation = UnitEffectActivation::Toggle;
         rule.durationMilliseconds = 0;
@@ -79,7 +102,7 @@ inline bool ReadRuntimeRules(const std::vector<uint8_t>& bytes, std::vector<Effe
         }
         if (std::all_of(rule.id.begin(), rule.id.end(), [](uint8_t value) { return value == 0; }) ||
             rule.civilization < 4 || rule.civilization > 12 || rule.sourceObject >= 100000 || rule.targetObject >= 100000 ||
-            rule.sightAmount < -32 || rule.sightAmount > 32 || !rule.sightAmount ||
+            !ValidUnitEffectOutputs(rule) ||
             !identities.insert(rule.id).second) return false;
         if (rule.trigger == UnitEffectTrigger::Proximity) {
             if (!rule.radiusTiles || rule.radiusTiles > 64 || rule.activation != UnitEffectActivation::Toggle ||
@@ -96,11 +119,22 @@ inline bool ReadRuntimeRules(const std::vector<uint8_t>& bytes, std::vector<Effe
             const std::string caption(reinterpret_cast<const char*>(record + minimum), captionLength);
             if (std::any_of(caption.begin(), caption.end(), [](unsigned char character) { return character < 32 || character > 126; }) ||
                 std::all_of(caption.begin(), caption.end(), [](char character) { return character == ' '; })) return false;
-            const std::string amount = (rule.sightAmount > 0 ? "+" : "") + std::to_string(rule.sightAmount);
-            const std::string mode = rule.activation == UnitEffectActivation::Toggle ? "Toggle on/off." :
-                "Duration: " + std::to_string(rule.durationMilliseconds) + " ms.";
+            std::string outputText;
+            for (const auto& output : UnitEffectOutputs(rule)) {
+                if (!outputText.empty()) outputText += "; ";
+                outputText += (UnitEffectIsLimit(output.stat) ? "maximum " + std::to_string(static_cast<uint32_t>(output.amount)) :
+                    UnitEffectAmountText(output.amount)) + " " + UnitEffectStatName(output.stat);
+            }
+            std::string seconds = std::to_string(rule.durationMilliseconds / 1000);
+            if (rule.durationMilliseconds % 1000) {
+                auto fraction = std::to_string(1000 + rule.durationMilliseconds % 1000).substr(1);
+                while (fraction.back() == '0') fraction.pop_back();
+                seconds += "." + fraction;
+            }
+            const std::string mode = rule.activation == UnitEffectActivation::Toggle ? "Click again to turn off." :
+                "Lasts " + seconds + (rule.durationMilliseconds == 1000 ? " second." : " seconds.");
             parsedAbilities.push_back({ rule.id, technology, rule.civilization, rule.sourceObject, caption,
-                (enabled ? "" : "Disabled: ") + caption + ": " + amount + " line of sight. " + mode + " Session only.", enabled });
+                (enabled ? "" : "Disabled: ") + caption + ": " + outputText + ". " + mode, enabled });
         } else return false;
         if (enabled) parsedUnits.push_back(rule);
         offset += minimum + captionLength;

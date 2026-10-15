@@ -10,7 +10,8 @@ internal static class CivilizationEffectsLauncher
         CivilizationPackageManager.WithRuntimeEffectsForLaunch(gamePath, rules =>
         {
             var executable = Path.Combine(gamePath, "Empires_DMW.exe");
-            if (CivilizationRuntimeConfiguration.Decode(rules).Count == 0)
+            var configuration = CivilizationRuntimeConfiguration.Decode(rules);
+            if (configuration.Count == 0)
             {
                 using var game = Process.Start(new ProcessStartInfo(executable) { WorkingDirectory = gamePath, UseShellExecute = true })
                     ?? throw new InvalidOperationException("Windows did not start EDMW.");
@@ -19,6 +20,9 @@ internal static class CivilizationEffectsLauncher
             using (var gameFile = File.OpenRead(executable))
                 if (Convert.ToHexString(SHA256.HashData(gameFile)) != CivilizationGameInstaller.SupportedExecutableSha256)
                     throw new InvalidDataException("Runtime effects require the supported EDMW executable.");
+            if (configuration.Units.Any(rule => rule.Trigger == CivilizationUnitEffectTrigger.Activated))
+                CivilizationUnitEffectBindings.ValidateNativeTechnologyGroups(
+                    File.ReadAllBytes(Path.Combine(gamePath, "Data", "db", "dbtechtree.dat")));
             // A unique immutable snapshot per launch also keeps the exact rules and
             // grant log available when diagnosing a save or multiplayer session.
             var session = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),

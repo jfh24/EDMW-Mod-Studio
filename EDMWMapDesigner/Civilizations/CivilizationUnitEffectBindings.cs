@@ -18,6 +18,13 @@ public sealed record CivilizationAbilityButtonBuild(byte[] Objects, byte[] Techn
 /// <summary>Checked native button sources and in-memory registration of custom immediate abilities.</summary>
 public static class CivilizationUnitEffectBindings
 {
+    // The dynamic 3x14 grid overlaps the fixed nine command controls and the
+    // twenty middle action controls. Reserve those entire regions, including
+    // contextual actions not represented by a technology's button metadata.
+    // HUD form 110 + slot aliases forms 78..86 and 404..423 at these cells.
+    internal static IReadOnlyList<int> CustomAbilityButtonSlots { get; } =
+        Array.AsReadOnly(new[] { 13, 27, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41 });
+
     public static CivilizationAbilityButtonBuild BuildAbilityButtons(byte[] objects, byte[] technologies,
         byte[] buttons, byte[] events, IReadOnlyList<CivilizationActivatedAbilityRequest> requests)
     {
@@ -33,6 +40,7 @@ public static class CivilizationUnitEffectBindings
         if (CivilizationAbilityData.ReadEvents(events)[0].EffectIds.Count != 0)
             throw new InvalidDataException("Custom ability buttons require the game's empty event zero to remain unchanged.");
         var records = CivilizationTechnologyBindings.ReadRecords(technologies);
+        ValidateNativeTechnologyGroups(records);
         var byId = records.ToDictionary(record => record.TechId);
         var template = records.SingleOrDefault(record => record.TechId == 1700 && record.NodeKind == 3 &&
             record.CommandId == 3 && !record.CreatesObject && !record.EditorOnly)
@@ -41,7 +49,7 @@ public static class CivilizationUnitEffectBindings
         var usedTechnologyIds = records.Select(record => record.TechId).ToHashSet();
         var claimedSlots = new HashSet<(int Object, int Civilization, int Slot)>();
         var resultObjects = (byte[])objects.Clone();
-        var additions = new List<byte[]>();
+        var additions = new List<(int TechnologyId, byte[] Bytes)>();
         var registrations = new List<CivilizationActivatedAbilityRegistration>();
         var nextStoredId = checked(records.Max(record => BinaryPrimitives.ReadInt32LittleEndian(
             technologies.AsSpan(record.Offset + 100, 4))) + 1);
@@ -60,10 +68,11 @@ public static class CivilizationUnitEffectBindings
                 throw new InvalidDataException($"{effect.Name}: the selected button appearance is not an existing named game button.");
             if (effect.ButtonCaption.Any(character => character is < ' ' or > '~'))
                 throw new InvalidDataException($"{effect.Name}: this runtime prototype supports printable English button captions.");
+            if (!CustomAbilityButtonSlots.Contains(effect.ButtonSlot))
+                throw new InvalidDataException($"{effect.Name}: button slot {effect.ButtonSlot} overlaps the game's standard action controls. Open Custom effects and choose a free button position.");
             if (!claimedSlots.Add((sourceId, request.CivilizationRow, effect.ButtonSlot)))
                 throw new InvalidDataException($"{effect.Name}: another custom ability already occupies button slot {effect.ButtonSlot}.");
-            var existing = CivilizationObjectDetails.ReadCommandTechnologyIds(objects, sourceId, request.Source.Category)
-                .Concat(CivilizationObjectDetails.ReadActionTechnologyIds(objects, sourceId, request.Source.Category).Select(id => checked((int)id)))
+            var existing = CivilizationObjectDetails.ReadActionTechnologyIds(objects, sourceId, request.Source.Category).Select(id => checked((int)id))
                 .Concat(records.Where(record => record.ProducerObjectIds.Contains(sourceId)).Select(record => record.TechId)).Distinct();
             foreach (var id in existing)
                 if (byId.TryGetValue(id, out var other) && other.AllowsCivilizationRow(request.CivilizationRow) && !other.EditorOnly &&
@@ -78,6 +87,9 @@ public static class CivilizationUnitEffectBindings
             Encoding.ASCII.GetBytes("EDMW ability " + Guid.Parse(effect.Id).ToString("N")).CopyTo(recordBytes, 0);
             Put(recordBytes, 100, nextStoredId++);
             Put(recordBytes, 104, technologyId);
+            // Authored availability spans every age. Native loader 0x00672772
+            // nevertheless derives node +0x2C from the reserved technology ID;
+            // NativeAbilityBindings neutralizes that age only for registered abilities.
             Put(recordBytes, 108, 0); Put(recordBytes, 112, 14);
             Put(recordBytes, 116, 0);
             recordBytes.AsSpan(124, 20).Clear();
@@ -100,21 +112,36 @@ public static class CivilizationUnitEffectBindings
             }
             Put(recordBytes, 436, 1); Put(recordBytes, 440, sourceId); Put(recordBytes, 444, 0);
             CivilizationTechnologyBindings.WriteProgressionProducerAction(resultObjects, sourceId, technologyId);
-            additions.Add(recordBytes);
-            var adjustment = effect.Amount > 0 ? "+" + effect.Amount : effect.Amount.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            additions.Add((technologyId, recordBytes));
+            var adjustments = string.Join(", ", CivilizationUnitEffects.GetOutputs(effect).Select(output =>
+                CivilizationUnitEffects.DescribeOutput(output) + " (" +
+                CivilizationUnitEffects.GetStatDefinition(output.Stat).Unit + ")"));
             var ending = effect.ActivationMode == CivilizationUnitEffectActivationMode.Toggle
-                ? "Click again to turn off." : $"Lasts {effect.DurationSeconds} seconds; click again to restart.";
+                ? "Click again to turn off." : $"Lasts {effect.DurationSeconds} {(effect.DurationSeconds == 1 ? "second" : "seconds")}.";
             registrations.Add(new(effect.Id, request.CivilizationRow + 1, sourceId, technologyId, effect.ButtonCaption,
-                $"{effect.ButtonCaption}: {adjustment} line of sight. {ending} Active bonuses reset when a save is loaded."));
+                $"{effect.ButtonCaption}: {adjustments}. {ending}"));
         }
-        var firstGroupEnd = records.Skip(1).FirstOrDefault(record => record.IsEpochDefinition)?.Offset - 4 ?? technologies.Length;
+        // Native lookup 0x00401D64 computes the epoch from the technology ID:
+        // IDs 10000..14999 belong to existing groups 9..13. Each group's map
+        // is searched independently by 0x0067081E, so appending to group zero
+        // creates an unreachable node even though a flattened parser finds it.
+        var epochs = records.Where(record => record.IsEpochDefinition).ToArray();
         using var output = new MemoryStream();
-        output.Write(technologies.AsSpan(0, firstGroupEnd));
-        foreach (var addition in additions) output.Write(addition);
-        output.Write(technologies.AsSpan(firstGroupEnd));
+        Span<byte> header = stackalloc byte[4];
+        for (var epoch = 0; epoch < epochs.Length; epoch++)
+        {
+            var start = epochs[epoch].Offset - 4;
+            var end = epoch + 1 < epochs.Length ? epochs[epoch + 1].Offset - 4 : technologies.Length;
+            var groupAdditions = additions.Where(addition => addition.TechnologyId / 1000 - 1 == epoch).ToArray();
+            var childCount = checked(BinaryPrimitives.ReadInt32LittleEndian(technologies.AsSpan(start)) + groupAdditions.Length);
+            BinaryPrimitives.WriteInt32LittleEndian(header, childCount);
+            output.Write(header);
+            output.Write(technologies.AsSpan(start + 4, end - start - 4));
+            foreach (var addition in groupAdditions) output.Write(addition.Bytes);
+        }
         var resultTechnologies = output.ToArray();
-        Put(resultTechnologies, 0, checked(BinaryPrimitives.ReadInt32LittleEndian(technologies) + additions.Count));
         var parsed = CivilizationTechnologyBindings.ReadRecords(resultTechnologies);
+        ValidateNativeTechnologyGroups(parsed);
         foreach (var registration in registrations)
         {
             var created = parsed.Single(record => record.TechId == registration.TechnologyId);
@@ -123,6 +150,65 @@ public static class CivilizationUnitEffectBindings
                 throw new InvalidDataException("A custom ability did not retain its native identity and civilization ownership.");
         }
         return new(resultObjects, resultTechnologies, registrations.AsReadOnly());
+    }
+
+    internal static void ValidateNativeTechnologyGroups(IReadOnlyList<CivilizationTechnologyRecord> records)
+    {
+        var epoch = -1;
+        foreach (var record in records)
+        {
+            if (record.IsEpochDefinition)
+            {
+                epoch++;
+                if (record.TechId != epoch)
+                    throw new InvalidDataException("Native ability tables require the game's ordered epoch groups 0 through 13.");
+            }
+            else if (record.TechId / 1000 - 1 != epoch)
+                throw new InvalidDataException($"Technology {record.TechId} is stored in epoch {epoch}, but native lookup requires epoch {record.TechId / 1000 - 1}. Re-export and reinstall the custom ability package with this version of Mod Studio.");
+        }
+        if (epoch != 13)
+            throw new InvalidDataException("Native ability tables require all 14 existing epoch groups.");
+    }
+
+    internal static void ValidateNativeTechnologyGroups(byte[] technologies) =>
+        ValidateNativeTechnologyGroups(CivilizationTechnologyBindings.ReadRecords(technologies));
+
+    // Returns a repaired copy for verified old exports or isolated diagnostics.
+    // Callers retain ownership of installation transactions; this never writes a game file.
+    internal static byte[] RepairAbilityTechnologyGroups(byte[] technologies, IReadOnlyCollection<int> abilityIds)
+    {
+        var records = CivilizationTechnologyBindings.ReadRecords(technologies);
+        var epochs = records.Where(record => record.IsEpochDefinition).ToArray();
+        if (epochs.Length != 14 || epochs.Where((record, epoch) => record.TechId != epoch).Any())
+            throw new InvalidDataException("Native ability tables require the game's ordered 14 epoch groups.");
+        var currentEpoch = -1;
+        var changed = false;
+        foreach (var record in records)
+        {
+            if (record.IsEpochDefinition) { currentEpoch++; continue; }
+            if (record.TechId / 1000 - 1 == currentEpoch) continue;
+            if (!abilityIds.Contains(record.TechId) || record.TechId is < 10000 or > 14999 ||
+                !record.Identifier.StartsWith("EDMW ability ", StringComparison.Ordinal) || record.NodeKind != 3 ||
+                record.CommandId != 51 || record.EventId != 0 || record.CreatesObject)
+                throw new InvalidDataException("Only a verified custom ability record can be moved between native epoch groups.");
+            changed = true;
+        }
+        if (!changed) return technologies;
+        using var output = new MemoryStream();
+        Span<byte> header = stackalloc byte[4];
+        for (var epoch = 0; epoch < epochs.Length; epoch++)
+        {
+            var originalEnd = epoch + 1 < epochs.Length ? epochs[epoch + 1].Offset - 4 : technologies.Length;
+            var children = records.Where(record => !record.IsEpochDefinition && record.TechId / 1000 - 1 == epoch)
+                .OrderBy(record => record.Offset > epochs[epoch].Offset && record.Offset < originalEnd ? 0 : 1).ToArray();
+            BinaryPrimitives.WriteInt32LittleEndian(header, children.Length);
+            output.Write(header);
+            output.Write(technologies.AsSpan(epochs[epoch].Offset, epochs[epoch].Length));
+            foreach (var child in children) output.Write(technologies.AsSpan(child.Offset, child.Length));
+        }
+        var repaired = output.ToArray();
+        ValidateNativeTechnologyGroups(repaired);
+        return repaired;
     }
 
     private static void Put(byte[] bytes, int offset, int value) => BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(offset), value);
@@ -135,13 +221,14 @@ public static class CivilizationUnitEffectBindings
             throw new InvalidDataException("Choose an existing unit or building in a playable civilization.");
         _ = CivilizationObjectBindings.ValidateRecord(objects, sourceId, source.Category);
         var records = CivilizationTechnologyBindings.ReadRecords(technologies);
-        var ids = CivilizationObjectDetails.ReadCommandTechnologyIds(objects, sourceId, source.Category)
-            .Concat(CivilizationObjectDetails.ReadActionTechnologyIds(objects, sourceId, source.Category).Select(id => checked((int)id)))
+        // Explicit commands use fixed controls, not their dbbuttons fallback
+        // slot (usually 41). Their cells are already excluded above.
+        var ids = CivilizationObjectDetails.ReadActionTechnologyIds(objects, sourceId, source.Category).Select(id => checked((int)id))
             .ToHashSet();
         var occupied = records.Where(record => (ids.Contains(record.TechId) || record.ProducerObjectIds.Contains(sourceId)) &&
                 record.AllowsCivilizationRow(civilizationRow) && !record.EditorOnly)
             .Select(record => CivilizationTechnologyBindings.ReadProgressionButtonSlot(record, civilizationRow, buttons)).ToHashSet();
-        return Enumerable.Range(1, 41).Where(slot => !occupied.Contains(slot)).ToArray();
+        return CustomAbilityButtonSlots.Where(slot => !occupied.Contains(slot)).ToArray();
     }
 
     public static IReadOnlyList<CivilizationAbilityButtonChoice> ReadButtonChoices(byte[] database)

@@ -46,7 +46,9 @@ internal static class CivilizationAbilityButtonsVerification
             BinaryPrimitives.ReadInt32LittleEndian(built.Technologies.AsSpan(ability.Offset + 136, 4)) == 0,
             "Fallback action has no resource cost.");
         Require(registration.Caption == "Recon sight" && registration.Tooltip.Contains("Click again to turn off.", StringComparison.Ordinal) &&
-            registration.Tooltip.Contains("reset when a save is loaded", StringComparison.Ordinal), "Caption and session-only toggle help.");
+            registration.Tooltip.Contains("+3 line of sight", StringComparison.Ordinal), "Caption, output and toggle instructions.");
+        Require(new[] { "session", "save", "reset", "prototype", "debug" }.All(term =>
+            !registration.Tooltip.Contains(term, StringComparison.OrdinalIgnoreCase)), "In-game toggle help contains only gameplay details.");
         foreach (var record in originalRecords)
         {
             var resulting = resultingRecords.Single(item => item.TechId == record.TechId);
@@ -64,7 +66,9 @@ internal static class CivilizationAbilityButtonsVerification
         Require(multiple.Objects.SequenceEqual(reversed.Objects) && multiple.Technologies.SequenceEqual(reversed.Technologies) &&
             multiple.Registrations.SequenceEqual(reversed.Registrations) && multiple.Registrations.Select(item => item.TechnologyId).Distinct().Count() == 2,
             "Technology allocation is deterministic and unique across attachment order.");
-        Require(multiple.Registrations[1].Tooltip.Contains("Lasts 45 seconds", StringComparison.Ordinal), "Timed ability duration is disclosed.");
+        Require(multiple.Registrations[1].Tooltip.EndsWith("Lasts 45 seconds.", StringComparison.Ordinal) &&
+            new[] { "session", "save", "reset", "prototype", "debug" }.All(term =>
+                !multiple.Registrations[1].Tooltip.Contains(term, StringComparison.OrdinalIgnoreCase)), "Timed tooltip gives a natural duration without implementation notes.");
         var exported = Build(effect with { NativeTechnologyId = registration.TechnologyId });
         Require(exported.Objects.SequenceEqual(built.Objects) && exported.Technologies.SequenceEqual(built.Technologies),
             "Exported command metadata produces the identical native registration.");

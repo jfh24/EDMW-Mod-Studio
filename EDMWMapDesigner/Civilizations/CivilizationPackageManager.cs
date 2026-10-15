@@ -65,6 +65,7 @@ public static class CivilizationPackageManager
         try
         {
             CivilizationInstallerPackage.Validate(package);
+            ValidateIncomingNativeAbilityGroups(package);
             var root = Root(gamePath);
             EnsureGameClosed(root);
             CheckCompatibility(package, root, LoadInstalled(root), false);
@@ -165,6 +166,7 @@ public static class CivilizationPackageManager
         try
         {
             CivilizationInstallerPackage.Validate(package);
+            ValidateIncomingNativeAbilityGroups(package);
             var root = Root(gamePath);
             EnsureGameClosed(root);
             using var packageLock = AcquireLock(root);
@@ -186,6 +188,18 @@ public static class CivilizationPackageManager
             return Transact(root, package, "Install", edits, () => WriteJson(ManifestPath(root, package.PackageId), manifest));
         }
         catch (Exception error) when (Expected(error)) { return new(false, error.Message); }
+    }
+
+    private static void ValidateIncomingNativeAbilityGroups(CivilizationInstallerPackage package)
+    {
+        // Retained manifests and recovery journals must remain readable so
+        // earlier exports can still be uninstalled. Check native grouping
+        // only when accepting an incoming install, before any mutation.
+        if (package.Files.Where(file => CivilizationRuntimeEffects.IsPath(file.RelativePath))
+            .SelectMany(file => CivilizationRuntimeConfiguration.Decode(file.Replacement!).Units)
+            .Any(rule => rule.Trigger == CivilizationUnitEffectTrigger.Activated))
+            CivilizationUnitEffectBindings.ValidateNativeTechnologyGroups(
+                package.Files.Single(file => CivilizationInstallerPackage.IsTechnologyPath(file.RelativePath)).Replacement!);
     }
 
     /// <summary>Read-only reuse of a persisted sender package, including its original field baselines.</summary>

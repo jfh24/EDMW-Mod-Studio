@@ -5,6 +5,8 @@ using System.Runtime.InteropServices;
 
 namespace EDMWMapDesigner.Civilizations;
 
+internal sealed record CivilizationCatalogAvailability(int FirstAge, int LastAge, IReadOnlyList<int> CivilizationRows);
+
 /// <summary>Current, read-only database values and civilization-owned catalog entries.</summary>
 public sealed class CivilizationGameData
 {
@@ -23,6 +25,23 @@ public sealed class CivilizationGameData
     private readonly Lazy<CivilizationGameAssets> _sourceAssets;
 
     public string GamePath { get; }
+
+    internal IReadOnlyDictionary<int, CivilizationCatalogAvailability> GetTargetAvailability()
+    {
+        var membership = _catalog.Items.ToDictionary(item => item.SourceId, _ => new List<int>());
+        foreach (var row in Enumerable.Range(3, 9))
+        foreach (var category in new[] { CivilizationCategory.Units, CivilizationCategory.Buildings })
+        foreach (var id in CivilizationTechnologyBindings.GetCivilizationObjectIds(_objects, _technologyRecords, row, category))
+            if (membership.TryGetValue(id, out var rows)) rows.Add(row);
+        var result = new Dictionary<int, CivilizationCatalogAvailability>();
+        foreach (var item in _catalog.Items)
+        {
+            var technologyId = CivilizationObjectBindings.ReadTechnologyId(_objects, item.SourceId, item.Category);
+            if (technologyId <= int.MaxValue && _technologyById.TryGetValue((int)technologyId, out var technology))
+                result[item.SourceId] = new(technology.StartAge, technology.EndAge, membership[item.SourceId].AsReadOnly());
+        }
+        return result;
+    }
 
     public CivilizationGameData(string gamePath, CivilizationGameCatalog catalog)
     {

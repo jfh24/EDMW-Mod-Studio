@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.2.1 — 2026-10-15
+
+See the [release notes](docs/releases/v1.2.1.md) for usage, compatibility, and verification scope.
+
+- Replaced the custom effect form with compact cards, all 51 stat output choices, multiple outputs per effect, and portrait stat overviews.
+- Added a searchable target popup with type, civilization, and age filters; several unit/building types can share one proximity effect, and selections persist across filters and pages.
+- Added synchronized group activation alongside individual abilities, with shared timed restarts and consistent group toggle behavior. Proximity affects other nearby units and excludes its own emitter.
+- Corrected custom ability technology groups, native age gates, civilization/player identity matching, and physical HUD button placement while preserving stock commands.
+- Preserved legacy project and runtime formats; canonical target sets expand into stable runtime identities with capacity and duplicate-identity checks. Portable packages retain tracked, reversible install/uninstall behavior.
+- Expanded offline regression coverage for authoring, history, packages, runtime parsing, groups, proximity boundaries, sharing, and restoration. No new GUI or game launch is part of release preparation; live validation of all stat adapters and multiplayer remains incomplete, and native game saves with active effects are unsupported.
+
 ## 1.2.0 — 2026-10-14
 
 - Added prototype research, proximity, and activated effects, editable unit/building attachments, per-mod controls, and game icons in the Civ Editor.
