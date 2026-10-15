@@ -1,0 +1,101 @@
+name: Publish Windows release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing draft release tag (for example, v1.2.0)
+        required: true
+        type: string
+      source_commit:
+        description: Full source commit SHA to build
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ inputs.release_tag }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-2022
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      RELEASE_TAG: ${{ inputs.release_tag }}
+      SOURCE_COMMIT: ${{ inputs.source_commit }}
+    steps:
+      - name: Validate inputs
+        run: |
+          if ($env:RELEASE_TAG -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+$' -or $env:SOURCE_COMMIT -notmatch '^[a-f0-9]{40}$') {
+            throw 'A release tag and full commit SHA are required.'
+          }
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_commit }}
+          persist-credentials: false
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 9.0.x
+      - name: Build exact release source
+        run: |
+          if ((git rev-parse HEAD).Trim() -ne $env:SOURCE_COMMIT) { throw 'Source commit mismatch.' }
+          [xml]$project = Get-Content EDMWMapDesigner/EDMWMapDesigner.csproj
+          if ($project.Project.PropertyGroup.Version -ne $env:RELEASE_TAG.Substring(1)) { throw 'Source version mismatch.' }
+          ./build.ps1
+      - name: Verify executable and bundled installers
+        run: |
+          $version = $env:RELEASE_TAG.Substring(1)
+          foreach ($binary in @('dist/EDMW Mod Studio.exe', 'EDMWMapDesigner/Assets/EDMWCivilizationInstaller.exe', 'EDMWMapDesigner/Assets/EDMWMultiplayerInstaller.exe')) {
+            $info = [Diagnostics.FileVersionInfo]::GetVersionInfo((Join-Path $PWD $binary))
+            if ($info.FileVersion -ne "$version.0" -or $info.ProductVersion -ne ($version + '+' + $env:SOURCE_COMMIT)) {
+              throw "Incorrect release identity: $binary"
+            }
+          }
+          $stdout = Join-Path $env:RUNNER_TEMP 'self-test.log'
+          $stderr = Join-Path $env:RUNNER_TEMP 'self-test-errors.log'
+          $process = Start-Process -FilePath (Join-Path $PWD 'dist/EDMW Mod Studio.exe') -ArgumentList '--self-test' -WindowStyle Hidden -Wait -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+          Get-Content -LiteralPath $stdout
+          if ($process.ExitCode -ne 0) { Get-Content -LiteralPath $stderr; throw 'Release self-test failed.' }
+      - name: Upload verified assets and publish draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $headers = @{ Authorization = 'Bearer ' + $env:GH_TOKEN; Accept = 'application/vnd.github+json'; 'X-GitHub-Api-Version' = '2022-11-28' }
+          $api = 'https://api.github.com/repos/' + $env:GITHUB_REPOSITORY
+          $releases = Invoke-RestMethod -Uri ($api + '/releases?per_page=100') -Headers $headers
+          $matching = @($releases | Where-Object tag_name -EQ $env:RELEASE_TAG)
+          if ($matching.Count -ne 1) { throw 'Exactly one existing release draft must match the tag.' }
+          $release = $matching[0]
+          if (!$release.draft -or $release.target_commitish -ne $env:SOURCE_COMMIT) { throw 'Refusing to change a published release or a different source commit.' }
+          $assets = Join-Path $env:RUNNER_TEMP 'release-assets'
+          New-Item -ItemType Directory -Path $assets -Force | Out-Null
+          $executable = Join-Path $assets 'EDMW.Mod.Studio.exe'
+          Copy-Item -LiteralPath 'dist/EDMW Mod Studio.exe' -Destination $executable
+          $digest = (Get-FileHash -LiteralPath $executable -Algorithm SHA256).Hash.ToLowerInvariant()
+          $checksum = Join-Path $assets 'SHA256SUMS.txt'
+          [IO.File]::WriteAllText($checksum, "$digest  EDMW.Mod.Studio.exe`n", [Text.UTF8Encoding]::new($false))
+          foreach ($path in @($executable, $checksum)) {
+            $file = Get-Item -LiteralPath $path
+            $expectedDigest = 'sha256:' + (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+            $existing = @($release.assets | Where-Object name -EQ $file.Name)
+            if ($existing.Count -eq 0) {
+              gh release upload $env:RELEASE_TAG $path --repo $env:GITHUB_REPOSITORY
+              if ($LASTEXITCODE -ne 0) { throw "Upload failed: $($file.Name)" }
+            }
+            $release = Invoke-RestMethod -Uri ($api + '/releases/' + $release.id) -Headers $headers
+            $uploaded = @($release.assets | Where-Object name -EQ $file.Name)
+            if ($uploaded.Count -ne 1 -or $uploaded[0].state -ne 'uploaded' -or $uploaded[0].size -ne $file.Length -or $uploaded[0].digest -ne $expectedDigest) {
+              throw "Asset verification failed: $($file.Name)"
+            }
+            Write-Output "Verified $($file.Name): $expectedDigest"
+          }
+          $published = Invoke-RestMethod -Uri ($api + '/releases/' + $release.id) -Headers $headers -Method Patch -ContentType 'application/json' -Body '{"draft":false,"make_latest":"true"}'
+          if ($published.draft -or $published.prerelease) { throw 'Release publication did not complete.' }
+          Write-Output $published.html_url
