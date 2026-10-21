@@ -67,6 +67,7 @@ internal static class InstalledContentUiVerification
             Snapshot(scaled, Path.Combine(output, "share-dialog-scaled.png"));
         }
         VerifyCivilizationDetails(owner);
+        CivilizationMergeUiVerification.Verify(output);
         VerifyMapPreview(output);
         using var home = new MainForm(verificationMode: true);
         Prepare(home);

@@ -2,9 +2,9 @@
 
 **EDMW Mod Studio** is a Windows modding workspace for **Empires: Dawn of the Modern World**. It combines a visual Map Designer, a Civilization Editor, and tracked installation and sharing over LAN or online with friends.
 
-The application is version **1.2.1**. It is built with C#/.NET Windows Forms and includes a native, 32-bit map generator for the game.
+The application is version **1.3.0**. It is built with C#/.NET Windows Forms and includes a native, 32-bit map generator for the game.
 
-**[Download v1.2.1 for Windows](https://github.com/jfh24/EDMW-Mod-Studio/releases/download/v1.2.1/EDMW.Mod.Studio.exe)** · [Release notes and assets](https://github.com/jfh24/EDMW-Mod-Studio/releases/tag/v1.2.1) · [Changelog](CHANGELOG.md)
+**[Download v1.3.0 for Windows](https://github.com/jfh24/EDMW-Mod-Studio/releases/download/v1.3.0/EDMW.Mod.Studio.exe)** · [Release notes and assets](https://github.com/jfh24/EDMW-Mod-Studio/releases/tag/v1.3.0) · [Changelog](CHANGELOG.md)
 
 The source repository does not include the compiled executable. Download it from the release or build it locally using the instructions below.
 
@@ -15,13 +15,13 @@ The source repository does not include the compiled executable. Download it from
 - **Generation:** create random land or repeatable terrain layouts from a saved seed.
 - **Editable projects:** save maps as `.edmwmap` and civilization projects as `.edmwciv`, with independent undo/redo histories.
 - **Civilization editing:** browse the nine stock civilizations and their units, buildings, technologies, abilities, economy, ages, assets, and AI source data; author supported native overrides.
-- **Custom effects:** use cards to combine stat outputs and choose several proximity targets through a searchable, filtered catalog. Activated abilities support individual units and selected groups. The runtime remains experimental; see the [v1.2.1 notes](docs/releases/v1.2.1.md) for compatibility and verification limits.
+- **Custom effects:** combine stat modifiers, ownership changes, transformations, and spawning with activation costs, proximity delays, and recipient limits. Abilities support individual units, selected groups, and proximity-granted toggles. The runtime remains experimental; see the [v1.3.0 notes](docs/releases/v1.3.0.md) for compatibility and verification limits.
 - **Model previews:** inspect installed models, textures, player colors, and animation clips; embed replacement `.cem` or `.obj` assets in civilization projects.
 - **LAN collaboration:** host or join a shared map with synchronized paint strokes and named live cursors.
 - **LAN export:** install an export on the sender and offer it to other running instances for recipient approval.
 - **Online friends:** exchange friend codes, accept requests, and see online presence through the prefilled EDMW Mod Studio relay or a relay you choose.
 - **Online collaboration and export:** invite accepted friends to edit maps, or send map and civilization exports for recipient approval. Includes a Render deployment blueprint.
-- **Installed content:** review, uninstall, or share installed maps and civilization packages directly from Home. Each item has themed **LAN** and **Friends** checkboxes and a **Share** button aligned with its existing actions; the editable project does not need to be loaded.
+- **Installed content:** run independent civilization edits together, merge them under a custom name, or unmerge them. Review, uninstall, or share installed maps and edits directly from Home through **LAN** or **Friends**.
 
 See the [user guide](docs/user-guide.md) for controls and detailed workflows.
 
@@ -41,7 +41,7 @@ See the [user guide](docs/user-guide.md) for controls and detailed workflows.
 
 ## Run the application
 
-On 64-bit Windows 10 or later, download and run [EDMW.Mod.Studio.exe](https://github.com/jfh24/EDMW-Mod-Studio/releases/download/v1.2.1/EDMW.Mod.Studio.exe). You can keep that filename or rename it to `EDMW Mod Studio.exe`.
+On 64-bit Windows 10 or later, download and run [EDMW.Mod.Studio.exe](https://github.com/jfh24/EDMW-Mod-Studio/releases/download/v1.3.0/EDMW.Mod.Studio.exe). You can keep that filename or rename it to `EDMW Mod Studio.exe`.
 
 If you build from source, open:
 
@@ -168,7 +168,7 @@ The public product name is **EDMW Mod Studio**. Existing source paths, namespace
 ## Documentation and credits
 
 - [User guide](docs/user-guide.md)
-- [v1.2.1 release](https://github.com/jfh24/EDMW-Mod-Studio/releases/tag/v1.2.1), [release notes](docs/releases/v1.2.1.md), and [changelog](CHANGELOG.md)
+- [v1.3.0 release](https://github.com/jfh24/EDMW-Mod-Studio/releases/tag/v1.3.0), [release notes](docs/releases/v1.3.0.md), and [changelog](CHANGELOG.md)
 - [Development, architecture, and verification](docs/development.md)
 - [Online sharing and Render setup](docs/online-sharing.md)
 - [Online relay protocol](docs/online-protocol.md)

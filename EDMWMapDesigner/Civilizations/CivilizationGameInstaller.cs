@@ -69,7 +69,8 @@ public static class CivilizationGameInstaller
     private const int CivilizationStride = 344;
     private const int MaximumFileBytes = 32 * 1024 * 1024;
 
-    public static CivilizationInstallPlan BuildPlan(CivilizationEditProject project, string gamePath, bool forExport = false)
+    public static CivilizationInstallPlan BuildPlan(CivilizationEditProject project, string gamePath, bool forExport = false,
+        IReadOnlyDictionary<string, byte[]>? sourceFiles = null)
     {
         ArgumentNullException.ThrowIfNull(project);
         ArgumentException.ThrowIfNullOrWhiteSpace(gamePath);
@@ -80,6 +81,9 @@ public static class CivilizationGameInstaller
         var files = new List<CivilizationPlannedFile>();
         var dependencies = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
         var modelDependencies = new List<CivilizationModelDependency>();
+        byte[] ReadSource(string relative, bool immutable = false) =>
+            sourceFiles is not null && sourceFiles.TryGetValue(relative, out var source) ? source.ToArray() :
+                ReadBounded(ResolveTarget(root, relative, immutable));
         try
         {
             project.Validate();
@@ -89,8 +93,8 @@ public static class CivilizationGameInstaller
             dependencies[ExecutablePath] = executableHash;
             if (!EqualHash(executableHash, SupportedExecutableSha256)) issues.Add("This executable version has not been verified for civilization installation. Choose the supported EDMW installation; the game executable will not be modified.");
             if (File.Exists(CurrentManifestPath(root))) issues.Add("A civilization package is already installed. Restore it before installing another project.");
-            var originalObjects = ReadBounded(ResolveTarget(root, ObjectPath));
-            var originalCivilizations = ReadBounded(ResolveTarget(root, CivilizationPath));
+            var originalObjects = ReadSource(ObjectPath);
+            var originalCivilizations = ReadSource(CivilizationPath);
             var objects = (byte[])originalObjects.Clone();
             var civilizations = (byte[])originalCivilizations.Clone();
             byte[]? originalTechnologies = null;
@@ -113,7 +117,7 @@ public static class CivilizationGameInstaller
             void EnsureTechnologyData()
             {
                 if (originalTechnologies is not null) return;
-                originalTechnologies = ReadBounded(ResolveTarget(root, TechnologyPath));
+                originalTechnologies = ReadSource(TechnologyPath);
                 technologies = (byte[])originalTechnologies.Clone();
                 technologyRecords = CivilizationTechnologyBindings.ReadRecords(originalTechnologies).ToDictionary(record => record.TechId);
                 dependencies[TechnologyPath] = Hash(originalTechnologies);
@@ -123,7 +127,7 @@ public static class CivilizationGameInstaller
             {
                 if (effectData is not null) return;
                 EnsureTechnologyData();
-                originalEffects = ReadBounded(ResolveTarget(root, EffectsPath));
+                originalEffects = ReadSource(EffectsPath);
                 effects = (byte[])originalEffects.Clone();
                 var events = ReadBounded(ResolveTarget(root, EventsPath, true));
                 referenceAssets ??= new CivilizationGameAssets(root);
@@ -285,7 +289,7 @@ public static class CivilizationGameInstaller
                                 if (!CivilizationTechnologyBindings.IsResearchRecord(node))
                                     throw new InvalidDataException("Runtime bonuses support nonrepeatable research technologies only.");
                                 var target = CivilizationRuntimeEffects.PathFor(entity);
-                                if (File.Exists(ResolveTarget(root, target)))
+                                if (sourceFiles is null && File.Exists(ResolveTarget(root, target)))
                                     throw new InvalidDataException("These runtime effects are already installed. Uninstall their mod before replacing it.");
                                 files.Add(new(target, null, CivilizationRuntimeEffects.Encode(runtimeRules)));
                                 foreach (var rule in runtimeRules)
@@ -379,11 +383,12 @@ public static class CivilizationGameInstaller
                                 var unitEffects = CivilizationUnitEffects.Read(entity).Where(effect => effect.Enabled).ToArray();
                                 if (unitEffects.Length == 0) continue;
                                 var count = System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(originalObjects);
-                                foreach (var effect in unitEffects)
-                                    if (effect.TargetObjectId >= count || originalObjects[4 + effect.TargetObjectId * 1936 + 232] == 0)
+                                foreach (var targetId in unitEffects.SelectMany(effect => CivilizationUnitEffects.GetTargetObjectIds(effect)
+                                    .Concat(CivilizationUnitEffects.GetOutputs(effect).Where(output => output.ObjectId is not null).Select(output => output.ObjectId!.Value))))
+                                    if (targetId >= count || originalObjects[4 + targetId * 1936 + 232] == 0)
                                         throw new InvalidDataException("An effect target is absent from the game catalog.");
                                 var target = CivilizationRuntimeEffects.PathFor(entity);
-                                if (File.Exists(ResolveTarget(root, target)))
+                                if (sourceFiles is null && File.Exists(ResolveTarget(root, target)))
                                     throw new InvalidDataException("These runtime effects are already installed. Uninstall their mod before replacing it.");
                                 unitAttachments.Add((civilization, entity));
                                 foreach (var effect in unitEffects)
@@ -588,7 +593,7 @@ public static class CivilizationGameInstaller
             if (unitAttachments.Count > 0)
             {
                 var requests = unitAttachments.SelectMany(item => CivilizationUnitEffects.Read(item.Entity)
-                    .Where(effect => effect.Enabled && effect.Trigger == CivilizationUnitEffectTrigger.Activated)
+                    .Where(effect => effect.Enabled && effect.Trigger != CivilizationUnitEffectTrigger.Proximity)
                     .Select(effect => new CivilizationActivatedAbilityRequest(item.Civilization.SourceRowIndex!.Value, item.Entity, effect))).ToArray();
                 if (requests.Length > 0)
                 {
@@ -600,11 +605,15 @@ public static class CivilizationGameInstaller
                     var built = CivilizationUnitEffectBindings.BuildAbilityButtons(objects, technologies!, buttons, events, requests);
                     objects = built.Objects;
                     technologies = built.Technologies;
-                    var registrations = built.Registrations.ToDictionary(registration => Guid.Parse(registration.EffectId));
+                    var registrations = built.Registrations.GroupBy(registration => Guid.Parse(registration.AuthoredEffectId))
+                        .ToDictionary(group => group.Key, group => group.ToArray());
                     foreach (var item in unitAttachments)
                         CivilizationUnitEffects.Write(item.Entity, CivilizationUnitEffects.Read(item.Entity).Select(effect =>
-                            registrations.TryGetValue(Guid.Parse(effect.Id), out var registration)
-                                ? effect with { NativeTechnologyId = registration.TechnologyId } : effect));
+                            registrations.TryGetValue(Guid.Parse(effect.Id), out var commands)
+                                ? effect.Trigger == CivilizationUnitEffectTrigger.ProximityAbility
+                                    ? effect with { NativeTechnologyId = commands.Length == 1 ? commands[0].TechnologyId : null,
+                                        NativeTargetTechnologyIds = commands.ToDictionary(command => command.TargetObjectId, command => command.TechnologyId) }
+                                    : effect with { NativeTechnologyId = commands.Single().TechnologyId } : effect));
                 }
                 foreach (var item in unitAttachments)
                     files.Add(new(CivilizationRuntimeEffects.PathFor(item.Entity), null,

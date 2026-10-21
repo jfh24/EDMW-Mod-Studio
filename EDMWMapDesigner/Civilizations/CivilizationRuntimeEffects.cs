@@ -60,7 +60,7 @@ public static class CivilizationRuntimeEffects
 
     public static IReadOnlyList<CivilizationRuntimeRule> Decode(byte[] bytes)
     {
-        if (bytes.Length >= 8 && (bytes.AsSpan(0, 8).SequenceEqual("EDMWEF02"u8) || bytes.AsSpan(0, 8).SequenceEqual("EDMWEF03"u8) || bytes.AsSpan(0, 8).SequenceEqual("EDMWEF04"u8) || bytes.AsSpan(0, 8).SequenceEqual("EDMWEF05"u8)))
+        if (bytes.Length >= 8 && (bytes.AsSpan(0, 8).SequenceEqual("EDMWEF02"u8) || bytes.AsSpan(0, 8).SequenceEqual("EDMWEF03"u8) || bytes.AsSpan(0, 8).SequenceEqual("EDMWEF04"u8) || bytes.AsSpan(0, 8).SequenceEqual("EDMWEF05"u8) || bytes.AsSpan(0, 8).SequenceEqual("EDMWEF06"u8) || bytes.AsSpan(0, 8).SequenceEqual("EDMWEF07"u8) || bytes.AsSpan(0, 8).SequenceEqual("EDMWEF08"u8)))
             return CivilizationRuntimeConfiguration.Decode(bytes).Research;
         if (bytes.Length < 12 || !bytes.AsSpan(0, 8).SequenceEqual("EDMWEF01"u8))
             throw new InvalidDataException("The runtime effect header is invalid.");

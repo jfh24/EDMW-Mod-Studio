@@ -8,16 +8,17 @@ namespace EDMWMapDesigner.Civilizations;
 
 public sealed record CivilizationInstalledPackage(string PackageId, string ProjectName,
     DateTimeOffset InstalledAt, IReadOnlyList<CivilizationInstallChange> Changes, string Status = "Installed",
-    bool HasRuntimeEffects = false, bool RuntimeEffectsEnabled = true);
+    bool HasRuntimeEffects = false, bool RuntimeEffectsEnabled = true, int ComponentCount = 1);
 
 /// <summary>
 /// Owns semantic fields, never whole database snapshots. Independent packages
 /// may coexist and be removed in any order; overlapping fields/models conflict.
 /// </summary>
-public static class CivilizationPackageManager
+public static partial class CivilizationPackageManager
 {
     private const string Storage = ".edmw-civilization-packages";
     private const int MaximumFileBytes = 32 * 1024 * 1024;
+    [ThreadStatic] private static Dictionary<string, byte[]>? _reviewFiles;
 
     public static IReadOnlyList<CivilizationInstalledPackage> ReadInstalled(string gamePath)
     {
@@ -43,7 +44,7 @@ public static class CivilizationPackageManager
                 else installed.Add(new(transaction.Package.PackageId, transaction.Package.ProjectName, transaction.CreatedAt,
                     transaction.Package.Changes.AsReadOnly(), status));
             }
-        return installed.OrderByDescending(entry => entry.InstalledAt).ToArray();
+        return ReadMergedInventory(root, installed.OrderByDescending(entry => entry.InstalledAt).ToArray());
     }
 
     public static CivilizationInstallResult Recover(string gamePath)
@@ -54,8 +55,10 @@ public static class CivilizationPackageManager
             EnsureGameClosed(root);
             using var packageLock = AcquireLock(root);
             var recovered = RecoverTransactions(root);
-            return new(true, recovered.Count == 0 ? "There are no interrupted transactions to recover." :
-                $"Recovered {recovered.Count} interrupted package transaction(s) from protected backups.");
+            var mergedRecovered = RecoverMergedUnderLock(root);
+            var count = recovered.Count + mergedRecovered;
+            return new(true, count == 0 ? "There are no interrupted transactions to recover." :
+                $"Recovered {count} interrupted package transaction(s) from protected backups.");
         }
         catch (Exception error) when (Expected(error)) { return new(false, error.Message); }
     }
@@ -65,9 +68,13 @@ public static class CivilizationPackageManager
         try
         {
             CivilizationInstallerPackage.Validate(package);
+            if (package.Components.Count > 0) return ReviewMerged(package, Root(gamePath));
             ValidateIncomingNativeAbilityGroups(package);
             var root = Root(gamePath);
             EnsureGameClosed(root);
+            ValidateNoMergedRecovery(root);
+            package = CivilizationRuntimePackageRebaser.Rebase(package,
+                ReadBounded(ResolveTarget(root, "Data\\db\\dbtechtree.dat")));
             CheckCompatibility(package, root, LoadInstalled(root), false);
             if (LoadTransactions(root).Any(transaction => transaction.State != "Complete"))
                 return ["An interrupted package transaction needs recovery. Use Recover interrupted changes before installing this package."];
@@ -80,22 +87,74 @@ public static class CivilizationPackageManager
     public static CivilizationInstallResult Install(CivilizationInstallerPackage package, string gamePath)
         => InstallCore(package, gamePath, allowAlreadyInstalled: false);
 
+    private static IReadOnlyList<string> ReviewMerged(CivilizationInstallerPackage package, string root)
+    {
+        var previous = _reviewFiles;
+        try
+        {
+            EnsureGameClosed(root);
+            ValidateNoMergedRecovery(root);
+            EnsureNoInterruptedPackages(root);
+            var groups = LoadMergedGroups(root);
+            if (groups.Any(group => group.Id != package.PackageId &&
+                group.MemberIds.Intersect(package.Components.Select(component => component.PackageId), StringComparer.Ordinal).Any()))
+                throw new InvalidDataException("A component already belongs to another merged entry. Unmerge it before importing this package.");
+            var installed = LoadInstalled(root).ToList();
+            foreach (var component in package.Components)
+            {
+                var existing = installed.SingleOrDefault(item => item.Package.PackageId == component.PackageId);
+                if (existing is null) continue;
+                if (!CivilizationPackageContentComparer.SameInstalledContent(component, existing.ExportPackage ?? existing.Package))
+                    throw new InvalidDataException("An installed component identity belongs to different export contents.");
+                CheckInstalledState(existing.Package, root, installed);
+            }
+            _reviewFiles = new Dictionary<string, byte[]>(StringComparer.OrdinalIgnoreCase);
+            foreach (var component in package.Components)
+            {
+                ValidateIncomingNativeAbilityGroups(component);
+                var existing = installed.SingleOrDefault(item => item.Package.PackageId == component.PackageId);
+                if (existing is not null)
+                {
+                    if (!CivilizationPackageContentComparer.SameInstalledContent(component, existing.ExportPackage ?? existing.Package))
+                        throw new InvalidDataException("An installed component identity belongs to different export contents.");
+                    continue;
+                }
+                var effective = CivilizationRuntimePackageRebaser.Rebase(component,
+                    ReadBounded(ResolveTarget(root, "Data\\db\\dbtechtree.dat")));
+                CheckCompatibility(effective, root, installed, false);
+                foreach (var edit in PrepareInstall(effective, root))
+                    if (edit.After is { } after) _reviewFiles[Path.GetFullPath(ResolveTarget(root, edit.RelativePath))] = after;
+                installed.Add(new PackageInstallation { Package = effective });
+            }
+            ValidateRuntimeCapacity(installed.Select(item => (item.Package, item.RuntimeEffectsEnabled)));
+            ValidateProgressionAvailability(root, [], installed.Select(item => item.Package));
+            return [];
+        }
+        catch (Exception error) when (Expected(error)) { return [error.Message]; }
+        finally { _reviewFiles = previous; }
+    }
+
     public static void SetRuntimeEffectsEnabled(string gamePath, string packageId, bool enabled)
     {
         var root = Root(gamePath);
         RequireId(packageId);
         EnsureGameClosed(root);
         using var packageLock = AcquireLock(root);
+        ValidateNoMergedRecovery(root);
         if (LoadTransactions(root).Any(transaction => transaction.State != "Complete"))
             throw new InvalidDataException("Recover interrupted civilization package changes before changing runtime effects.");
+        if (IsMergedGroup(root, packageId))
+        {
+            SetMergedRuntimeEffectsEnabled(root, packageId, enabled);
+            return;
+        }
         var installed = LoadInstalled(root);
         var selected = installed.SingleOrDefault(item => item.Package.PackageId == packageId)
             ?? throw new InvalidDataException("This mod is no longer installed.");
         CheckInstalledState(selected.Package, root, installed);
         if (!selected.Package.Files.Any(file => CivilizationRuntimeEffects.IsPath(file.RelativePath)))
             throw new InvalidDataException("This mod has no runtime effects.");
-        if (enabled) ValidateRuntimeCapacity(installed.Where(item => item.RuntimeEffectsEnabled && item != selected)
-            .Select(item => item.Package).Append(selected.Package));
+        ValidateRuntimeCapacity(installed.Select(item => (item.Package, item == selected ? enabled : item.RuntimeEffectsEnabled)));
         selected.RuntimeEffectsEnabled = enabled;
         WriteJson(ManifestPath(root, packageId), selected);
     }
@@ -106,30 +165,38 @@ public static class CivilizationPackageManager
         var root = Root(gamePath);
         EnsureGameClosed(root);
         using var packageLock = AcquireLock(root);
+        ValidateNoMergedRecovery(root);
         if (LoadTransactions(root).Any(transaction => transaction.State != "Complete"))
             throw new InvalidDataException("Recover interrupted civilization package changes before launching.");
         var installed = LoadInstalled(root);
+        ValidateRuntimeCapacity(installed.Select(item => (item.Package, item.RuntimeEffectsEnabled)));
         var rules = new List<CivilizationRuntimeRule>();
         var unitRules = new List<CivilizationRuntimeUnitRule>();
         foreach (var item in installed.Where(item => item.Package.Files.Any(file => CivilizationRuntimeEffects.IsPath(file.RelativePath))))
         {
             var configurations = item.Package.Files.Where(file => CivilizationRuntimeEffects.IsPath(file.RelativePath))
                 .Select(file => CivilizationRuntimeConfiguration.Decode(file.Replacement!)).ToArray();
-            if (!item.RuntimeEffectsEnabled && !configurations.Any(configuration => configuration.Units.Any(rule => rule.Trigger == CivilizationUnitEffectTrigger.Activated)))
+            if (!item.RuntimeEffectsEnabled && !configurations.Any(configuration => configuration.Units.Any(rule => rule.Trigger != CivilizationUnitEffectTrigger.Proximity)))
                 continue;
             CheckInstalledState(item.Package, root, installed);
+            var targetNames = CivilizationRuntimeDescriptions.ReadTargetNames(root,
+                configurations.SelectMany(configuration => configuration.Units).SelectMany(rule => new[] { rule.TargetObjectId }
+                    .Concat(CivilizationRuntimeConfiguration.GetActions(rule).Where(action => action.ObjectId >= 0).Select(action => action.ObjectId))));
+            var describedRules = CivilizationRuntimeDescriptions.ForLaunch(item.Package,
+                configurations.SelectMany(configuration => configuration.Units), targetNames).ToDictionary(rule => rule.Id);
             foreach (var configuration in configurations)
             {
+                var describedUnits = configuration.Units.Select(rule => describedRules[rule.Id]);
                 if (item.RuntimeEffectsEnabled)
                 {
                     rules.AddRange(configuration.Research);
-                    unitRules.AddRange(configuration.Units);
+                    unitRules.AddRange(describedUnits);
                 }
                 else
                 {
                     // Installed native buttons still need their custom labels and a
                     // no-op command binding while this mod's effects are disabled.
-                    unitRules.AddRange(configuration.Units.Where(rule => rule.Trigger == CivilizationUnitEffectTrigger.Activated)
+                    unitRules.AddRange(describedUnits.Where(rule => rule.Trigger != CivilizationUnitEffectTrigger.Proximity)
                         .Select(rule => rule with { Enabled = false }));
                 }
             }
@@ -147,6 +214,8 @@ public static class CivilizationPackageManager
             throw new InvalidDataException("This earlier civilization installation has no saved share package. Restore it, then install it once through the Civ Editor to enable sharing from Home.");
         RequireId(packageId);
         var root = Root(gamePath);
+        ValidateNoMergedRecovery(root);
+        if (CreateMergedSharePackage(root, packageId) is { } merged) return merged;
         var installed = LoadInstalled(root);
         var selected = installed.SingleOrDefault(item => item.Package.PackageId == packageId)
             ?? throw new InvalidDataException("This civilization edit is no longer installed. Refresh the Home inventory before sharing.");
@@ -155,7 +224,7 @@ public static class CivilizationPackageManager
         // This read-only check also rejects interrupted or externally changed
         // installations; no sender installation or project load is necessary.
         CheckInstalledState(selected.Package, root, installed);
-        return selected.Package;
+        return selected.ExportPackage ?? selected.Package;
     }
 
     internal static CivilizationInstallResult InstallOrVerifyInstalled(CivilizationInstallerPackage package, string gamePath)
@@ -166,6 +235,7 @@ public static class CivilizationPackageManager
         try
         {
             CivilizationInstallerPackage.Validate(package);
+            if (package.Components.Count > 0) return InstallMerged(package, Root(gamePath), allowAlreadyInstalled);
             ValidateIncomingNativeAbilityGroups(package);
             var root = Root(gamePath);
             EnsureGameClosed(root);
@@ -176,15 +246,20 @@ public static class CivilizationPackageManager
                 var existing = installed.SingleOrDefault(item => item.Package.PackageId == package.PackageId);
                 if (existing is not null)
                 {
-                    if (!SamePackage(existing.Package, package)) throw new InvalidDataException("The installed package identity belongs to different export contents.");
+                    if (!CivilizationPackageContentComparer.SameInstalledContent(package, existing.ExportPackage ?? existing.Package)) throw new InvalidDataException("The installed package identity belongs to different export contents.");
                     CheckInstalledState(existing.Package, root, installed);
                     return new(true, "Already installed on this computer.", FileCount: package.Files.Count(file => file.WholeFile || file.Patches.Count > 0));
                 }
             }
             RecoverTransactions(root);
+            RecoverMergedUnderLock(root);
+            var exportPackage = package;
+            package = CivilizationRuntimePackageRebaser.Rebase(package,
+                ReadBounded(ResolveTarget(root, "Data\\db\\dbtechtree.dat")));
             CheckCompatibility(package, root, LoadInstalled(root), false);
             var edits = PrepareInstall(package, root);
-            var manifest = new PackageInstallation { Package = package, InstalledAt = DateTimeOffset.UtcNow };
+            var manifest = new PackageInstallation { Package = package,
+                ExportPackage = ReferenceEquals(package, exportPackage) ? null : exportPackage, InstalledAt = DateTimeOffset.UtcNow };
             return Transact(root, package, "Install", edits, () => WriteJson(ManifestPath(root, package.PackageId), manifest));
         }
         catch (Exception error) when (Expected(error)) { return new(false, error.Message); }
@@ -197,7 +272,7 @@ public static class CivilizationPackageManager
         // only when accepting an incoming install, before any mutation.
         if (package.Files.Where(file => CivilizationRuntimeEffects.IsPath(file.RelativePath))
             .SelectMany(file => CivilizationRuntimeConfiguration.Decode(file.Replacement!).Units)
-            .Any(rule => rule.Trigger == CivilizationUnitEffectTrigger.Activated))
+            .Any(rule => rule.Trigger != CivilizationUnitEffectTrigger.Proximity))
             CivilizationUnitEffectBindings.ValidateNativeTechnologyGroups(
                 package.Files.Single(file => CivilizationInstallerPackage.IsTechnologyPath(file.RelativePath)).Replacement!);
     }
@@ -212,7 +287,7 @@ public static class CivilizationPackageManager
         if (matching.Length > 1) throw new InvalidDataException("More than one installed package matches this project. Resolve the package inventory before exporting.");
         if (matching.Length == 0) return null;
         CheckInstalledState(matching[0].Package, root, installed);
-        return matching[0].Package;
+        return matching[0].ExportPackage ?? matching[0].Package;
     }
 
     /// <summary>Read-only acknowledgement of an exact, fully verified prior installation.</summary>
@@ -220,10 +295,18 @@ public static class CivilizationPackageManager
     {
         CivilizationInstallerPackage.Validate(package);
         var root = Root(gamePath);
+        if (package.Components.Count > 0)
+        {
+            var merged = CreateMergedSharePackage(root, package.PackageId);
+            if (merged is null) return false;
+            if (!CivilizationPackageContentComparer.SameInstalledContent(package, merged))
+                throw new InvalidDataException("The installed merged identity belongs to different export contents.");
+            return true;
+        }
         var installed = LoadInstalled(root);
         var existing = installed.SingleOrDefault(item => item.Package.PackageId == package.PackageId);
         if (existing is null) return false;
-        if (!CivilizationPackageContentComparer.SameInstalledContent(package, existing.Package))
+        if (!CivilizationPackageContentComparer.SameInstalledContent(package, existing.ExportPackage ?? existing.Package))
             throw new InvalidDataException("The installed package identity belongs to different export contents.");
         CheckInstalledState(existing.Package, root, installed);
         return true;
@@ -235,7 +318,7 @@ public static class CivilizationPackageManager
         portable.GamePath = "";
         foreach (var entity in portable.Civilizations.SelectMany(civ => civ.Entities))
             if (entity.Properties.ContainsKey(CivilizationUnitEffects.PropertyKey))
-                CivilizationUnitEffects.Write(entity, CivilizationUnitEffects.Read(entity).Select(effect => effect with { NativeTechnologyId = null }));
+                CivilizationUnitEffects.Write(entity, CivilizationUnitEffects.Read(entity).Select(effect => effect with { NativeTechnologyId = null, NativeTargetTechnologyIds = null }));
         return portable.Serialize();
     }
 
@@ -243,18 +326,20 @@ public static class CivilizationPackageManager
         JsonSerializer.SerializeToUtf8Bytes(first, CivilizationInstallerPackageCodec.JsonOptions).AsSpan().SequenceEqual(
             JsonSerializer.SerializeToUtf8Bytes(second, CivilizationInstallerPackageCodec.JsonOptions));
 
-    private static void ValidateRuntimeCapacity(IEnumerable<CivilizationInstallerPackage> packages)
+    private static void ValidateRuntimeCapacity(IEnumerable<(CivilizationInstallerPackage Package, bool Enabled)> packages)
     {
-        var configurations = packages.SelectMany(package => package.Files)
+        var configurations = packages.SelectMany(item => item.Package.Files
             .Where(file => CivilizationRuntimeEffects.IsPath(file.RelativePath))
-            .Select(file => CivilizationRuntimeConfiguration.Decode(file.Replacement!)).ToArray();
+            .Select(file => (Configuration: CivilizationRuntimeConfiguration.Decode(file.Replacement!), item.Enabled)))
+            .Select(item => item.Enabled ? item.Configuration : new CivilizationRuntimeConfiguration([],
+                item.Configuration.Units.Where(rule => rule.Trigger != CivilizationUnitEffectTrigger.Proximity).ToArray())).ToArray();
         if (configurations.Sum(configuration => configuration.Count) > CivilizationRuntimeEffects.MaximumRules)
             throw new InvalidDataException($"Enabled mods exceed the limit of {CivilizationRuntimeEffects.MaximumRules} runtime rules. Disable a runtime mod first.");
         var unitIds = configurations.SelectMany(configuration => configuration.Units).Select(rule => rule.Id).ToArray();
         if (unitIds.Distinct().Count() != unitIds.Length)
             throw new InvalidDataException("Enabled mods contain duplicate unit effect identities. Disable or uninstall the earlier copy first.");
         var commandIds = configurations.SelectMany(configuration => configuration.Units)
-            .Where(rule => rule.Trigger == CivilizationUnitEffectTrigger.Activated).Select(rule => rule.TechnologyId).ToArray();
+            .Where(rule => rule.Trigger != CivilizationUnitEffectTrigger.Proximity).Select(rule => rule.TechnologyId).ToArray();
         if (commandIds.Distinct().Count() != commandIds.Length)
             throw new InvalidDataException("Enabled ability mods contain duplicate in-game command identities. Uninstall the earlier copy first.");
         if (configurations.SelectMany(configuration => configuration.Research).Any(rule => commandIds.Contains(rule.TechnologyId)))
@@ -269,17 +354,26 @@ public static class CivilizationPackageManager
         foreach (var file in package.Files.Where(file => file.WholeFile || file.Patches.Count > 0))
         {
             var current = ReadBounded(ResolveTarget(root, file.RelativePath));
-            if (file.WholeFile)
+            var composition = Composition(package, file);
+            if (composition is not null)
+            {
+                if (!composition.MatchesInstalled(current))
+                    throw new InvalidDataException("An installed ability registration changed externally: " + file.RelativePath);
+                var fields = MappedFields(package, file, current);
+                ValidateMergedTables(fields, current, current, allowUniversalRestoration: true);
+            }
+            else if (file.WholeFile)
             {
                 if (!current.AsSpan().SequenceEqual(file.Replacement))
                     throw new InvalidDataException("An installed export file changed externally. This civilization package cannot be shared as installed: " + file.RelativePath);
             }
             else
             {
-                foreach (var patch in file.Patches)
+                var fields = MappedFields(package, file, current);
+                foreach (var patch in fields.Patches)
                     if (!current.AsSpan(patch.Offset, patch.Length).SequenceEqual(patch.Replacement))
                         throw new InvalidDataException("An installed field changed externally. This civilization package cannot be shared as installed: " + patch.SemanticTarget);
-                ValidateMergedTables(file, current, current, allowUniversalRestoration: true);
+                ValidateMergedTables(fields, current, current, allowUniversalRestoration: true);
             }
         }
         ValidateProgressionAvailability(root, [], installed.Select(item => item.Package));
@@ -292,17 +386,19 @@ public static class CivilizationPackageManager
         foreach (var file in backup.Files)
         {
             var exported = changed.Single(entry => entry.RelativePath.Equals(file.RelativePath, StringComparison.OrdinalIgnoreCase));
-            if (exported.WholeFile && !SameHash(exported.ExpectedHash, file.BeforeHash))
+            var composition = Composition(package, exported);
+            if (exported.WholeFile && composition is null && !SameHash(exported.ExpectedHash, file.BeforeHash))
                 throw new InvalidDataException("The installed package's original file baseline differs from its protected backup.");
-            if (!exported.WholeFile && file.BeforeHash is null)
+            if ((!exported.WholeFile || composition is not null) && file.BeforeHash is null)
                 throw new InvalidDataException("The installed package's original field backup is missing.");
             if (file.BeforeHash is null) continue;
             var original = ReadBounded(Path.Combine(backup.Directory, file.BackupName));
             if (!SameHash(CivilizationInstallerPackage.Hash(original), file.BeforeHash))
                 throw new InvalidDataException("An installed package's protected original backup changed.");
-            if (!exported.WholeFile && (original.Length != exported.ExpectedLength ||
-                exported.Patches.Any(patch => !original.AsSpan(patch.Offset, patch.Length).SequenceEqual(patch.Expected) ||
-                    !original.AsSpan(patch.IdentityOffset, patch.IdentityBytes.Length).SequenceEqual(patch.IdentityBytes))))
+            if (composition is not null) _ = composition.Apply(original);
+            if (!exported.WholeFile &&
+                MappedFields(package, exported, original).Patches.Any(patch => !original.AsSpan(patch.Offset, patch.Length).SequenceEqual(patch.Expected) ||
+                    !original.AsSpan(patch.IdentityOffset, patch.IdentityBytes.Length).SequenceEqual(patch.IdentityBytes)))
                 throw new InvalidDataException("The installed package's original field baselines differ from its protected backup.");
         }
     }
@@ -314,9 +410,13 @@ public static class CivilizationPackageManager
         {
             RequireId(packageId);
             var root = Root(gamePath);
+            if (IsMergedGroup(root, packageId)) return UninstallMerged(gamePath, packageId);
             EnsureGameClosed(root);
             using var packageLock = AcquireLock(root);
             var recovered = RecoverTransactions(root);
+            RecoverMergedUnderLock(root);
+            if (LoadMergedGroups(root).Any(group => group.MemberIds.Contains(packageId)))
+                throw new InvalidDataException("Unmerge this collection before uninstalling one of its civilization edits.");
             var manifests = LoadInstalled(root);
             var manifest = manifests.SingleOrDefault(item => item.Package.PackageId == packageId);
             if (manifest is null)
@@ -332,7 +432,7 @@ public static class CivilizationPackageManager
         IReadOnlyList<PackageInstallation> installed, bool uninstall, bool alreadyInstalled = false)
     {
         if (!uninstall && !alreadyInstalled)
-            ValidateRuntimeCapacity(installed.Where(item => item.RuntimeEffectsEnabled).Select(item => item.Package).Append(package));
+            ValidateRuntimeCapacity(installed.Select(item => (item.Package, item.RuntimeEffectsEnabled)).Append((package, true)));
         var executable = ResolveTarget(root, "Empires_DMW.exe", true);
         if (!SameHash(FileHash(executable), package.ExecutableHash))
             throw new InvalidDataException("Choose the supported Empires: Dawn of the Modern World installation. This game executable has not been verified.");
@@ -340,12 +440,15 @@ public static class CivilizationPackageManager
             throw new InvalidDataException("Uninstall the earlier civilization edit before installing a shared package.");
         if (!uninstall && !alreadyInstalled && installed.Any(item => item.Package.PackageId == package.PackageId))
             throw new InvalidDataException("This civilization package is already installed.");
+        if (!uninstall && !alreadyInstalled && IsMergedGroup(root, package.PackageId))
+            throw new InvalidDataException("This package identity belongs to an installed merged edit.");
         foreach (var other in installed.Where(item => item.Package.PackageId != package.PackageId))
         {
             foreach (var table in package.Files.Where(file => CivilizationInstallerPackage.IsTechnologyPath(file.RelativePath) || CivilizationInstallerPackage.IsObjectPath(file.RelativePath)))
             {
                 var owned = other.Package.Files.FirstOrDefault(file => file.RelativePath.Equals(table.RelativePath, StringComparison.OrdinalIgnoreCase));
-                if (owned is not null && (table.WholeFile || owned.WholeFile))
+                if (owned is not null && ((table.WholeFile && Composition(package, table) is null) ||
+                    (owned.WholeFile && Composition(other.Package, owned) is null)))
                     throw new InvalidDataException($"'{other.Package.ProjectName}' already depends on {table.RelativePath}. Custom ability buttons and progression producer additions own the complete table; uninstall the other package first.");
             }
             if (package.OwnerTargets.Intersect(other.Package.OwnerTargets, StringComparer.Ordinal).Any())
@@ -354,17 +457,26 @@ public static class CivilizationPackageManager
             {
                 var existing = other.Package.Files.FirstOrDefault(candidate => candidate.RelativePath.Equals(file.RelativePath, StringComparison.OrdinalIgnoreCase));
                 if (existing is null || (!existing.WholeFile && existing.Patches.Count == 0)) continue;
-                if (file.WholeFile || existing.WholeFile || file.Patches.Any(patch => existing.Patches.Any(owned => Overlap(patch, owned))))
+                var current = CivilizationInstallerPackage.IsDatabasePath(file.RelativePath)
+                    ? ReadBounded(ResolveTarget(root, file.RelativePath)) : null;
+                var fields = current is null ? file : MappedFields(package, file, current);
+                var otherFields = current is null ? existing : MappedFields(other.Package, existing, current);
+                var commandConflict = CivilizationInstallerPackage.IsTechnologyPath(file.RelativePath) &&
+                    (fields.Patches.Any(patch => AbilityCommands(other.Package).Contains(BinaryPrimitives.ReadInt32LittleEndian(patch.IdentityBytes))) ||
+                        otherFields.Patches.Any(patch => AbilityCommands(package).Contains(BinaryPrimitives.ReadInt32LittleEndian(patch.IdentityBytes))));
+                if ((file.WholeFile && Composition(package, file) is null) ||
+                    (existing.WholeFile && Composition(other.Package, existing) is null) ||
+                    commandConflict || fields.Patches.Any(patch => otherFields.Patches.Any(owned => Overlap(patch, owned))))
                     throw new InvalidDataException($"'{other.Package.ProjectName}' already owns a field or model changed by this package: {file.RelativePath}. Uninstall that package first.");
             }
         }
-        foreach (var file in package.Files.Where(file => !file.WholeFile))
+        foreach (var file in package.Files.Where(file => !file.WholeFile || Composition(package, file) is not null))
         {
             var bytes = ReadBounded(ResolveTarget(root, file.RelativePath));
-            if (bytes.Length != file.ExpectedLength || (!uninstall && !MatchesStructuralHash(file, bytes, installed)))
+            if (!uninstall && !MatchesLayout(package, file, bytes, installed))
                 throw new InvalidDataException($"The table layout, record identities or unmapped game data differ from this package: {file.RelativePath}.");
             var validSlots = CivilizationInstallerPackage.SemanticSlots(file.RelativePath, bytes).ToHashSet();
-            foreach (var patch in file.Patches)
+            foreach (var patch in MappedFields(package, file, bytes).Patches)
             {
                 if (!validSlots.Contains((patch.Offset, patch.Length)))
                     throw new InvalidDataException("The package contains a patch outside a verified semantic field.");
@@ -382,8 +494,9 @@ public static class CivilizationPackageManager
             var objects = ReadBounded(ResolveTarget(root, "Data\\db\\dbobjects.dat"));
             var count = objects.Length >= 4 ? BinaryPrimitives.ReadInt32LittleEndian(objects) : 0;
             if (count <= 0 || objects.LongLength != 4L + count * 1936L ||
-                unitRules.Any(rule => rule.SourceObjectId >= count || rule.TargetObjectId >= count ||
-                    objects[4 + rule.SourceObjectId * 1936 + 232] == 0 || objects[4 + rule.TargetObjectId * 1936 + 232] == 0))
+                unitRules.SelectMany(rule => new[] { rule.SourceObjectId, rule.TargetObjectId }.Concat(
+                    CivilizationRuntimeConfiguration.GetActions(rule).Where(action => action.ObjectId >= 0).Select(action => action.ObjectId)))
+                    .Any(id => id >= count || objects[4 + id * 1936 + 232] == 0))
                 throw new InvalidDataException("A runtime effect refers to a source or target absent from the installed game catalog.");
         }
         var researchRules = runtimeConfigurations.SelectMany(configuration => configuration.Research).ToArray();
@@ -418,6 +531,75 @@ public static class CivilizationPackageManager
                     throw new InvalidDataException("A source model mapping or asset differs from this package: " + reference.ModelName);
             }
         }
+    }
+
+    private static CivilizationAbilityTableComposition? Composition(CivilizationInstallerPackage package, CivilizationPackageFile file)
+    {
+        if (!file.WholeFile || file.Replacement is null ||
+            !(CivilizationInstallerPackage.IsObjectPath(file.RelativePath) || CivilizationInstallerPackage.IsTechnologyPath(file.RelativePath))) return null;
+        var original = file.Original ?? package.InstallationOriginals.GetValueOrDefault(file.RelativePath);
+        // The same validated tables are consulted repeatedly while combining
+        // packages. Hash all inputs so mutable caller buffers cannot reuse a
+        // stale interpretation, and always check live owned bytes separately.
+        var fingerprint = file.RelativePath + ":" + file.ExpectedHash + ":" +
+            (original is null ? "" : CivilizationInstallerPackage.Hash(original)) + ":" + CivilizationInstallerPackage.Hash(file.Replacement) + ":" +
+            string.Join(";", package.Files.Where(candidate => CivilizationRuntimeEffects.IsPath(candidate.RelativePath))
+                .Select(candidate => candidate.RelativePath + ":" + CivilizationInstallerPackage.Hash(candidate.Replacement!)));
+        if (file.CompositionFingerprint == fingerprint) return file.CachedComposition;
+        CivilizationAbilityTableComposition? result = null;
+        if (CivilizationAbilityTableComposition.TryCreate(package, file, out var composition)) result = composition;
+        else if (file.Original is null && original is not null)
+        {
+            var retained = new CivilizationPackageFile
+            {
+                RelativePath = file.RelativePath, WholeFile = file.WholeFile, ExpectedHash = file.ExpectedHash,
+                Replacement = file.Replacement, Original = original, Patches = file.Patches
+            };
+            if (CivilizationAbilityTableComposition.TryCreate(package, retained, out composition)) result = composition;
+        }
+        file.CompositionFingerprint = fingerprint;
+        file.CachedComposition = result;
+        return result;
+    }
+
+    private static CivilizationPackageFile MappedFields(CivilizationInstallerPackage package, CivilizationPackageFile file, byte[] current)
+    {
+        var composition = Composition(package, file);
+        var fields = composition is null ? file : new CivilizationPackageFile
+        {
+            RelativePath = file.RelativePath, Original = composition.Original,
+            ExpectedLength = composition.Original.Length, Patches = composition.Patches.ToList()
+        };
+        return new()
+        {
+            RelativePath = file.RelativePath, ExpectedLength = current.Length,
+            Patches = CivilizationAbilityTableComposition.TranslatePatches(fields, current).ToList()
+        };
+    }
+
+    private static IEnumerable<int> AbilityCommands(CivilizationInstallerPackage package) => package.Files
+        .Where(file => CivilizationRuntimeEffects.IsPath(file.RelativePath))
+        .SelectMany(file => CivilizationRuntimeConfiguration.Decode(file.Replacement!).Units)
+        .Where(rule => rule.Trigger != CivilizationUnitEffectTrigger.Proximity).Select(rule => rule.TechnologyId);
+
+    internal static IReadOnlyList<int> ReadBaselineAbilityCommands(string gamePath) =>
+        LoadInstalled(Root(gamePath)).SelectMany(item => AbilityCommands(item.Package)).Distinct().Order().ToArray();
+
+    private static bool MatchesLayout(CivilizationInstallerPackage package, CivilizationPackageFile file, byte[] current,
+        IReadOnlyList<PackageInstallation> installed)
+    {
+        // Source snapshots can include commands belonging to edits installed on
+        // the author's computer. Compare the common database after removing
+        // those registrations; mapped values still have their own field guards.
+        var source = Composition(package, file)?.Original ?? file.Original;
+        var currentCommands = installed.SelectMany(item => AbilityCommands(item.Package)).ToHashSet();
+        var currentBase = CivilizationAbilityTableComposition.WithoutCommands(file.RelativePath, current, currentCommands);
+        if (source is null)
+            return MatchesStructuralHash(file, current, installed) || MatchesStructuralHash(file, currentBase, installed);
+        var sourceCommands = package.BaselineAbilityTechnologyIds.ToHashSet();
+        var sourceBase = CivilizationAbilityTableComposition.WithoutCommands(file.RelativePath, source, sourceCommands);
+        return SameHash(CivilizationInstallerPackage.StructuralHash(file.RelativePath, sourceBase),
+            CivilizationInstallerPackage.StructuralHash(file.RelativePath, currentBase));
     }
 
     private static bool MatchesStructuralHash(CivilizationPackageFile file, byte[] bytes,
@@ -458,7 +640,18 @@ public static class CivilizationPackageManager
         {
             var target = ResolveTarget(root, file.RelativePath);
             var original = File.Exists(target) ? ReadBounded(target) : null;
-            if (file.WholeFile)
+            var composition = Composition(package, file);
+            if (composition is not null)
+            {
+                if (original is null) throw new FileNotFoundException("An ability database is missing: " + file.RelativePath);
+                var patched = composition.Apply(original);
+                // Validate mapped fields using the resulting record offsets.
+                var beforeFields = CivilizationAbilityTableComposition.WithoutCommands(file.RelativePath, original, composition.CommandIds);
+                var afterFields = CivilizationAbilityTableComposition.WithoutCommands(file.RelativePath, patched, composition.CommandIds);
+                ValidateMergedTables(MappedFields(package, file, afterFields), beforeFields, afterFields);
+                pending.Add(new(file.RelativePath, original, patched));
+            }
+            else if (file.WholeFile)
             {
                 if (!SameHash(original is null ? null : CivilizationInstallerPackage.Hash(original), file.ExpectedHash))
                     throw new InvalidDataException("A whole-file replacement's original file differs: " + file.RelativePath);
@@ -470,13 +663,14 @@ public static class CivilizationPackageManager
             {
                 if (original is null) throw new FileNotFoundException("A target database is missing: " + file.RelativePath);
                 var patched = original.ToArray();
-                foreach (var patch in file.Patches)
+                var fields = MappedFields(package, file, original);
+                foreach (var patch in fields.Patches)
                 {
                     if (!original.AsSpan(patch.Offset, patch.Length).SequenceEqual(patch.Expected))
                         throw new InvalidDataException("A field's current value differs from the reviewed package baseline: " + patch.SemanticTarget);
                     patch.Replacement.CopyTo(patched, patch.Offset);
                 }
-                ValidateMergedTables(file, original, patched);
+                ValidateMergedTables(fields, original, patched);
                 pending.Add(new(file.RelativePath, original, patched));
             }
         }
@@ -484,7 +678,8 @@ public static class CivilizationPackageManager
         return pending;
     }
 
-    private static List<PendingFile> PrepareUninstall(CivilizationInstallerPackage package, string root)
+    private static List<PendingFile> PrepareUninstall(CivilizationInstallerPackage package, string root,
+        IReadOnlySet<string>? excludedPackageIds = null)
     {
         var backup = InstalledBackups(root, package.PackageId);
         var pending = new List<PendingFile>();
@@ -492,7 +687,22 @@ public static class CivilizationPackageManager
         {
             var target = ResolveTarget(root, file.RelativePath);
             var current = File.Exists(target) ? ReadBounded(target) : null;
-            if (file.WholeFile)
+            var composition = Composition(package, file);
+            if (composition is not null)
+            {
+                if (current is null) throw new InvalidDataException("An installed ability database is missing.");
+                var entry = backup.Files.Single(item => item.RelativePath.Equals(file.RelativePath, StringComparison.OrdinalIgnoreCase));
+                if (entry.BeforeHash is null) throw new InvalidDataException("The ability database's protected original backup is missing.");
+                var protectedOriginal = ReadBounded(Path.Combine(backup.Directory, entry.BackupName));
+                if (!SameHash(CivilizationInstallerPackage.Hash(protectedOriginal), entry.BeforeHash))
+                    throw new InvalidDataException("The ability database's protected original backup changed.");
+                _ = composition.Apply(protectedOriginal);
+                var restored = composition.Remove(current);
+                var beforeFields = CivilizationAbilityTableComposition.WithoutCommands(file.RelativePath, current, composition.CommandIds);
+                ValidateMergedTables(MappedFields(package, file, restored), beforeFields, restored, allowUniversalRestoration: true);
+                pending.Add(new(file.RelativePath, current, restored));
+            }
+            else if (file.WholeFile)
             {
                 if (current is null || !SameHash(CivilizationInstallerPackage.Hash(current), CivilizationInstallerPackage.Hash(file.Replacement!)))
                     throw new InvalidDataException("An installed export file changed externally; removal was cancelled: " + file.RelativePath);
@@ -509,17 +719,19 @@ public static class CivilizationPackageManager
             {
                 if (current is null) throw new InvalidDataException("An installed database is missing.");
                 var restored = current.ToArray();
-                foreach (var patch in file.Patches)
+                var fields = MappedFields(package, file, current);
+                foreach (var patch in fields.Patches)
                 {
                     if (!current.AsSpan(patch.Offset, patch.Length).SequenceEqual(patch.Replacement))
                         throw new InvalidDataException("An installed field changed externally; removal was cancelled: " + patch.SemanticTarget);
                     patch.Expected.CopyTo(restored, patch.Offset);
                 }
-                ValidateMergedTables(file, current, restored, allowUniversalRestoration: true);
+                ValidateMergedTables(fields, current, restored, allowUniversalRestoration: true);
                 pending.Add(new(file.RelativePath, current, restored));
             }
         }
-        ValidateProgressionAvailability(root, pending, LoadInstalled(root).Where(item => item.Package.PackageId != package.PackageId).Select(item => item.Package));
+        ValidateProgressionAvailability(root, pending, LoadInstalled(root).Where(item => item.Package.PackageId != package.PackageId &&
+            !(excludedPackageIds?.Contains(item.Package.PackageId) ?? false)).Select(item => item.Package));
         return pending;
     }
 
@@ -792,8 +1004,35 @@ public static class CivilizationPackageManager
             RejectReparse(path);
             var manifest = ReadJson<PackageInstallation>(path, 384 * 1024 * 1024);
             CivilizationInstallerPackage.Validate(manifest.Package);
+            if (manifest.ExportPackage is { } export)
+            {
+                CivilizationInstallerPackage.Validate(export);
+                if (export.PackageId != manifest.Package.PackageId)
+                    throw new InvalidDataException("The saved portable export belongs to a different installed package.");
+                var backup = InstalledBackups(root, manifest.Package.PackageId);
+                var technology = backup.Files.Single(entry => CivilizationInstallerPackage.IsTechnologyPath(entry.RelativePath));
+                var original = ReadBounded(Path.Combine(backup.Directory, technology.BackupName));
+                if (!SameHash(CivilizationInstallerPackage.Hash(original), technology.BeforeHash) ||
+                    !SamePackage(CivilizationRuntimePackageRebaser.Rebase(export, original), manifest.Package))
+                    throw new InvalidDataException("The saved portable export differs from its installed ability registrations.");
+            }
             if (Path.GetFileNameWithoutExtension(path) != manifest.Package.PackageId)
                 throw new InvalidDataException("An installed package manifest identity differs from its filename.");
+            var legacyTables = manifest.Package.Files.Where(file => file.WholeFile && file.Original is null &&
+                (CivilizationInstallerPackage.IsObjectPath(file.RelativePath) || CivilizationInstallerPackage.IsTechnologyPath(file.RelativePath))).ToArray();
+            if (legacyTables.Length > 0 && AbilityCommands(manifest.Package).Any())
+            {
+                var backup = InstalledBackups(root, manifest.Package.PackageId);
+                foreach (var file in legacyTables)
+                {
+                    var entry = backup.Files.Single(item => item.RelativePath.Equals(file.RelativePath, StringComparison.OrdinalIgnoreCase));
+                    if (entry.BeforeHash is null || !SameHash(entry.BeforeHash, file.ExpectedHash)) continue;
+                    var original = ReadBounded(Path.Combine(backup.Directory, entry.BackupName));
+                    if (!SameHash(CivilizationInstallerPackage.Hash(original), entry.BeforeHash))
+                        throw new InvalidDataException("An installed ability package's protected original changed.");
+                    manifest.Package.InstallationOriginals[file.RelativePath] = original;
+                }
+            }
             entries.Add(manifest);
         }
         return entries;
@@ -808,6 +1047,10 @@ public static class CivilizationPackageManager
             RejectReparse(folder);
             var path = Path.Combine(folder, "transaction.json");
             if (!File.Exists(path)) continue;
+            // Completed journals are retained for their protected originals,
+            // which InstalledBackups verifies when used. Avoid decoding every
+            // historical package payload just to look for pending recovery.
+            if (TransactionIsComplete(path)) continue;
             var journal = ReadJson<PackageTransaction>(path, 384 * 1024 * 1024);
             if (journal.State is not ("Prepared" or "Complete") || journal.Operation is not ("Install" or "Uninstall"))
                 throw new InvalidDataException("A package transaction status is invalid.");
@@ -819,6 +1062,17 @@ public static class CivilizationPackageManager
             entries.Add(journal);
         }
         return entries;
+    }
+    private static bool TransactionIsComplete(string path)
+    {
+        RejectReparse(path);
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+        Span<byte> header = stackalloc byte[256];
+        var length = stream.Read(header);
+        var reader = new Utf8JsonReader(header[..length], isFinalBlock: false, state: default);
+        return reader.Read() && reader.TokenType == JsonTokenType.StartObject &&
+            reader.Read() && reader.TokenType == JsonTokenType.PropertyName && reader.ValueTextEquals("state"u8) &&
+            reader.Read() && reader.TokenType == JsonTokenType.String && reader.ValueTextEquals("Complete"u8);
     }
     private static PackageBackup InstalledBackups(string root, string id)
     {
@@ -894,6 +1148,11 @@ public static class CivilizationPackageManager
     private static void RequireHash(string path, string? expected, string message) { if (!SameHash(FileHash(path), expected)) throw new InvalidDataException(message + " " + Path.GetFileName(path)); }
     private static byte[] ReadBounded(string path, int maximum = MaximumFileBytes)
     {
+        if (_reviewFiles is not null && _reviewFiles.TryGetValue(Path.GetFullPath(path), out var reviewed))
+        {
+            if (reviewed.Length > maximum) throw new InvalidDataException("A reviewed game file exceeds its supported size.");
+            return reviewed.ToArray();
+        }
         RejectReparse(path);
         using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
         if (stream.Length > maximum) throw new InvalidDataException("A game/package file exceeds its supported size.");
@@ -943,6 +1202,7 @@ public static class CivilizationPackageManager
     {
         public PackageInstallation() { }
         public CivilizationInstallerPackage Package { get; set; } = new();
+        public CivilizationInstallerPackage? ExportPackage { get; set; }
         public DateTimeOffset InstalledAt { get; set; }
         public bool RuntimeEffectsEnabled { get; set; } = true;
     }

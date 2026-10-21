@@ -9,6 +9,9 @@ internal static class CivilizationPackageContentComparer
     internal static bool SameInstalledContent(CivilizationInstallerPackage received, CivilizationInstallerPackage installed) =>
         received.FormatVersion == installed.FormatVersion && received.PackageId == installed.PackageId &&
         received.ProjectName == installed.ProjectName && SameHash(received.ExecutableHash, installed.ExecutableHash) &&
+        received.Components.Count == installed.Components.Count && received.Components.All(component =>
+            installed.Components.SingleOrDefault(candidate => candidate.PackageId == component.PackageId) is { } other && SameInstalledContent(component, other)) &&
+        received.BaselineAbilityTechnologyIds.ToHashSet().SetEquals(installed.BaselineAbilityTechnologyIds) &&
         SameFiles(received.Files, installed.Files) && SameHashes(received.Dependencies, installed.Dependencies) &&
         SameHashes(received.AssetDependencies, installed.AssetDependencies) &&
         received.OwnerTargets.ToHashSet(StringComparer.Ordinal).SetEquals(installed.OwnerTargets) &&
@@ -36,6 +39,7 @@ internal static class CivilizationPackageContentComparer
         {
             var expected = rebuilt.SingleOrDefault(candidate => candidate.RelativePath.Equals(file.RelativePath, StringComparison.OrdinalIgnoreCase));
             if (expected is null || file.WholeFile != expected.WholeFile) return false;
+            if (!SameBytes(file.Original, expected.Original)) return false;
             if (file.WholeFile)
             {
                 if (!SameHash(file.ExpectedHash, expected.ExpectedHash) || !SameBytes(file.Replacement, expected.Replacement)) return false;

@@ -316,6 +316,35 @@ void edmw::UpdateProductionEffects(void* unit, uint32_t id) {
     else durations[unit] = { id, technology, adjusted };
 }
 
+bool edmw::SuspendProductionEffects(void* unit) {
+    const std::lock_guard<std::mutex> guard(durationMutex);
+    const auto found = durations.find(unit);
+    if (found == durations.end()) return true;
+    if (!unit) { durations.erase(found); return true; }
+    const auto technology = Read<uint32_t>(unit, 0x4E4);
+    const auto remaining = Read<int32_t>(unit, 0x508);
+    if (found->second.id != Read<uint32_t>(unit, 0x24) || found->second.technology != technology ||
+        technology == 100000 || remaining <= 0) {
+        durations.erase(found);
+        return true;
+    }
+    const auto owner = Read<void*>(unit, 0x18);
+    const auto tree = owner ? Read<void*>(owner, 0xD58) : nullptr;
+    const auto playerCount = Read<uint32_t>(reinterpret_cast<const void*>(0x0099EF30), 0);
+    const auto player = owner ? Read<uint32_t>(owner, 0x478) : UINT32_MAX;
+    if (!originalDuration || !tree || !playerCount || playerCount > 16 || player >= playerCount ||
+        Read<void*>(reinterpret_cast<const void*>(0x0099EED8), player * 4) != owner ||
+        Read<void*>(tree, 0x16D0) != owner) return false;
+    const auto node = reinterpret_cast<FindTechnology>(0x00401D64)(tree, technology);
+    if (!ProductionNode(node)) return false;
+    const auto native = originalDuration(unit, node);
+    if (native <= 0 || found->second.adjusted <= 0) return false;
+    const auto restored = ScaleProductionRemaining(remaining, found->second.adjusted, native);
+    if (restored != remaining) Put(unit, 0x508, restored);
+    durations.erase(found);
+    return true;
+}
+
 void edmw::ForgetProductionEffects(void* unit) {
     const std::lock_guard<std::mutex> guard(durationMutex);
     durations.erase(unit);

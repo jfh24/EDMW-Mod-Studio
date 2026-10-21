@@ -4,7 +4,7 @@ using System.Text.Json.Serialization;
 
 namespace EDMWMapDesigner.Civilizations;
 
-public enum CivilizationUnitEffectTrigger { Proximity, Activated }
+public enum CivilizationUnitEffectTrigger { Proximity, Activated, ProximityAbility }
 // These identities are persisted in projects and version 4+ runtime files. Never reorder or reuse them.
 public enum CivilizationUnitEffectStat
 {
@@ -20,9 +20,19 @@ public enum CivilizationUnitEffectStat
     GarrisonCapacity = 43, PopulationProvided = 44, FootprintWidth = 45, FootprintDepth = 46,
     BuildLimit = 47, QueueCapacity = 48, ProductionRate = 49, BuildRate = 50
 }
-public enum CivilizationUnitEffectActivationMode { Toggle, Timed }
+public enum CivilizationUnitEffectActivationMode { Toggle, Timed, Instant }
+public enum CivilizationUnitEffectOutputKind { StatModifier, OwnershipTransfer, Transform, Spawn }
+public enum CivilizationUnitEffectOwner { SourcePlayer, AffectedPlayer, SpecificPlayer }
+public enum CivilizationUnitEffectTargetPlayers { Own, Other, Any }
 
-public sealed record CivilizationUnitEffectOutput(CivilizationUnitEffectStat Stat, decimal Amount);
+public sealed record CivilizationUnitEffectOutput(CivilizationUnitEffectStat Stat, decimal Amount)
+{
+    public CivilizationUnitEffectOutputKind Kind { get; init; }
+    public int? ObjectId { get; init; }
+    public int Count { get; init; } = 1;
+    public CivilizationUnitEffectOwner Owner { get; init; }
+    public int PlayerSlot { get; init; } = 1;
+}
 
 public sealed record CivilizationUnitEffectStatDefinition(CivilizationUnitEffectStat Stat, string Name,
     string Unit, decimal MinimumAmount, decimal MaximumAmount, int DecimalPlaces, decimal DefaultAmount,
@@ -46,6 +56,14 @@ public sealed record CivilizationUnitEffect
     // Stat/Amount remain the legacy first-output mirror for existing project readers.
     // All current consumers use GetOutputs; a trigger and button belong to the whole output list.
     public IReadOnlyList<CivilizationUnitEffectOutput>? Outputs { get; init; }
+    public CivilizationUnitEffectTargetPlayers TargetPlayers { get; init; }
+    public int ProximityDelaySeconds { get; init; }
+    public int MaxAffectedTargets { get; init; }
+    public int MaxConcurrentTargets { get; init; }
+    public int FoodCost { get; init; }
+    public int WoodCost { get; init; }
+    public int GoldCost { get; init; }
+    public int StoneCost { get; init; }
     [JsonRequired] public int RadiusTiles { get; init; } = 5;
     [JsonRequired] public CivilizationUnitEffectActivationMode ActivationMode { get; init; } = CivilizationUnitEffectActivationMode.Timed;
     [JsonRequired] public int DurationSeconds { get; init; } = 30;
@@ -54,6 +72,8 @@ public sealed record CivilizationUnitEffect
     [JsonRequired] public int ButtonSlot { get; init; } = 13;
     // Assigned only to a portable export after reserving an unused native command.
     public int? NativeTechnologyId { get; init; }
+    // Per-recipient commands for an exported proximity-granted ability.
+    public IReadOnlyDictionary<int, int>? NativeTargetTechnologyIds { get; init; }
 }
 
 /// <summary>Custom attachments for experimental proximity effects and session-only activated abilities.</summary>
@@ -61,11 +81,21 @@ public static class CivilizationUnitEffects
 {
     public const string PropertyKey = "runtime.unitEffects";
     public const int MaximumAttachments = 64;
-    public const int MaximumOutputs = 51;
+    public const int MaximumOutputs = 64;
     public static IReadOnlyList<CivilizationUnitEffectStatDefinition> StatChoices { get; } = CreateStatChoices();
 
     public static IReadOnlyList<CivilizationUnitEffectOutput> GetOutputs(CivilizationUnitEffect effect) =>
         effect.Outputs ?? [new(effect.Stat, effect.Amount)];
+
+    public static IReadOnlyList<CivilizationUnitEffectOutput> GetStatOutputs(CivilizationUnitEffect effect) =>
+        GetOutputs(effect).Where(output => output.Kind == CivilizationUnitEffectOutputKind.StatModifier).ToArray();
+
+    public static string DescribeOwner(CivilizationUnitEffectOutput output) => output.Owner switch
+    {
+        CivilizationUnitEffectOwner.AffectedPlayer => "the affected player's control",
+        CivilizationUnitEffectOwner.SpecificPlayer => $"Player {output.PlayerSlot}",
+        _ => "the source player's control"
+    };
 
     public static IReadOnlyList<int> GetTargetObjectIds(CivilizationUnitEffect effect) =>
         effect.TargetObjectIds is null ? [effect.TargetObjectId] : effect.TargetObjectIds.Distinct().Order().ToArray();
@@ -73,8 +103,16 @@ public static class CivilizationUnitEffects
     public static bool IsLimit(CivilizationUnitEffectStat stat) =>
         stat is CivilizationUnitEffectStat.BuildLimit or CivilizationUnitEffectStat.QueueCapacity;
 
-    public static string DescribeOutput(CivilizationUnitEffectOutput output)
+    public static string DescribeOutput(CivilizationUnitEffectOutput output, Func<int, string>? objectName = null)
     {
+        var target = output.ObjectId is int id ? objectName?.Invoke(id) ?? "the chosen unit or building" : "a unit or building";
+        if (output.Kind != CivilizationUnitEffectOutputKind.StatModifier) return output.Kind switch
+        {
+            CivilizationUnitEffectOutputKind.OwnershipTransfer => "Transfer ownership to " + DescribeOwner(output),
+            CivilizationUnitEffectOutputKind.Transform => "Change into " + target,
+            CivilizationUnitEffectOutputKind.Spawn => $"Spawn {output.Count} × {target} for " + DescribeOwner(output),
+            _ => throw new InvalidDataException("Select a supported effect output.")
+        };
         var stat = GetStatDefinition(output.Stat);
         return IsLimit(output.Stat)
             ? $"Limit {output.Amount.ToString("0", CultureInfo.InvariantCulture)} {stat.Name.ToLowerInvariant()}"
@@ -84,9 +122,14 @@ public static class CivilizationUnitEffects
     private static CivilizationUnitEffect Normalize(CivilizationUnitEffect effect)
     {
         var outputs = GetOutputs(effect).ToArray();
+        var firstStat = outputs.FirstOrDefault(output => output.Kind == CivilizationUnitEffectOutputKind.StatModifier);
         var targets = GetTargetObjectIds(effect);
-        return effect with { Outputs = Array.AsReadOnly(outputs), Stat = outputs[0].Stat, Amount = outputs[0].Amount,
-            TargetObjectId = targets[0], TargetObjectIds = effect.TargetObjectIds is null ? null : Array.AsReadOnly(targets.ToArray()) };
+        return effect with { Outputs = Array.AsReadOnly(outputs), Stat = firstStat?.Stat ?? CivilizationUnitEffectStat.LineOfSight, Amount = firstStat?.Amount ?? 0,
+            TargetObjectId = targets[0], TargetObjectIds = effect.TargetObjectIds is null ? null : Array.AsReadOnly(targets.ToArray()),
+            DurationSeconds = effect.Trigger == CivilizationUnitEffectTrigger.ProximityAbility || effect.ActivationMode == CivilizationUnitEffectActivationMode.Instant ? 0 : effect.DurationSeconds,
+            NativeTargetTechnologyIds = effect.NativeTargetTechnologyIds is null ? null :
+                new System.Collections.ObjectModel.ReadOnlyDictionary<int, int>(effect.NativeTargetTechnologyIds.OrderBy(pair => pair.Key)
+                    .ToDictionary(pair => pair.Key, pair => pair.Value)) };
     }
 
     public static CivilizationUnitEffectStatDefinition GetStatDefinition(CivilizationUnitEffectStat stat) =>
@@ -242,29 +285,64 @@ public static class CivilizationUnitEffects
                 throw new InvalidDataException($"{entity.Name}: every effect needs a unique identifier.");
             if (string.IsNullOrWhiteSpace(effect.Name) || effect.Name.Length > 100)
                 throw new InvalidDataException("An effect name must contain 1 to 100 characters.");
-            if (!Enum.IsDefined(effect.Trigger) || !Enum.IsDefined(effect.ActivationMode))
+            if (!Enum.IsDefined(effect.Trigger) || !Enum.IsDefined(effect.ActivationMode) || !Enum.IsDefined(effect.TargetPlayers))
                 throw new InvalidDataException($"{effect.Name}: unsupported trigger or activation mode.");
+            if (effect.ProximityDelaySeconds is < 0 or > 3600 || effect.MaxAffectedTargets is < 0 or > 100000 ||
+                effect.MaxConcurrentTargets is < 0 or > 100000 || new[] { effect.FoodCost, effect.WoodCost, effect.GoldCost, effect.StoneCost }.Any(cost => cost is < 0 or > 100000) ||
+                (effect.Trigger == CivilizationUnitEffectTrigger.Proximity && (effect.FoodCost != 0 || effect.WoodCost != 0 || effect.GoldCost != 0 || effect.StoneCost != 0)) ||
+                (effect.Trigger == CivilizationUnitEffectTrigger.Activated && (effect.ProximityDelaySeconds != 0 || effect.MaxAffectedTargets != 0 || effect.MaxConcurrentTargets != 0)))
+                throw new InvalidDataException($"{effect.Name}: proximity delay must be 0–3,600 seconds; limits and costs must be 0–100,000. Costs belong to activated abilities and limits belong to proximity effects.");
             var targets = GetTargetObjectIds(effect);
             if (targets.Count == 0 || targets.Any(target => target is < 0 or >= 100_000) || effect.ButtonIconId is < 0 or >= 100_000)
                 throw new InvalidDataException($"{effect.Name}: select a valid target and button icon source.");
             var outputs = GetOutputs(effect);
             if (outputs.Count is < 1 or > MaximumOutputs)
-                throw new InvalidDataException($"{effect.Name}: choose from 1 to {MaximumOutputs} stat outputs.");
+                throw new InvalidDataException($"{effect.Name}: choose from 1 to {MaximumOutputs} outputs.");
             var stats = new HashSet<CivilizationUnitEffectStat>();
+            var actions = new HashSet<CivilizationUnitEffectOutputKind>();
             foreach (var output in outputs)
             {
-                if (output is null || !Enum.IsDefined(output.Stat) || !stats.Add(output.Stat))
+                if (output is null || !Enum.IsDefined(output.Kind))
+                    throw new InvalidDataException($"{effect.Name}: select a supported output type.");
+                if (output.Kind != CivilizationUnitEffectOutputKind.StatModifier)
+                {
+                    if (!Enum.IsDefined(output.Owner) || output.PlayerSlot is < 1 or > 8 ||
+                        output.Count is < 1 or > 64 || output.Kind != CivilizationUnitEffectOutputKind.Spawn && output.Count != 1 ||
+                        (output.Kind is CivilizationUnitEffectOutputKind.Transform or CivilizationUnitEffectOutputKind.Spawn
+                            ? output.ObjectId is not (>= 0 and < 100_000) : output.ObjectId is not null) ||
+                        output.Kind != CivilizationUnitEffectOutputKind.Spawn && !actions.Add(output.Kind))
+                        throw new InvalidDataException($"{effect.Name}: choose a valid action, object, owner and count (1–64).");
+                    continue;
+                }
+                if (!Enum.IsDefined(output.Stat) || !stats.Add(output.Stat) || output.ObjectId is not null || output.Count != 1 ||
+                    output.Owner != CivilizationUnitEffectOwner.SourcePlayer || output.PlayerSlot != 1)
                     throw new InvalidDataException($"{effect.Name}: each stat output must be valid and appear only once.");
                 ValidateAmount(output.Stat, output.Amount);
             }
+            if (outputs.Where(output => output.Kind == CivilizationUnitEffectOutputKind.Spawn).Sum(output => output.Count) > 64)
+                throw new InvalidDataException($"{effect.Name}: spawn outputs can create at most 64 objects in one activation.");
+            if (effect.ActivationMode == CivilizationUnitEffectActivationMode.Instant && stats.Count != 0)
+                throw new InvalidDataException($"{effect.Name}: instant abilities contain permanent actions only. Choose a toggle or duration for stat modifiers.");
+            if (effect.Trigger != CivilizationUnitEffectTrigger.Proximity && effect.TargetPlayers != CivilizationUnitEffectTargetPlayers.Own)
+                throw new InvalidDataException($"{effect.Name}: target-player filtering belongs to proximity effects.");
             if (effect.RadiusTiles is < 1 or > 64)
                 throw new InvalidDataException($"{effect.Name}: proximity radius must be between 1 and 64 tiles.");
-            if (effect.DurationSeconds is <= 0 or > 3600)
+            if (effect.DurationSeconds > 3600 || effect.DurationSeconds < (effect.Trigger == CivilizationUnitEffectTrigger.ProximityAbility || effect.ActivationMode == CivilizationUnitEffectActivationMode.Instant ? 0 : 1))
                 throw new InvalidDataException($"{effect.Name}: duration must be greater than zero and at most 3,600 seconds.");
             if (effect.ButtonSlot is < 1 or > 41 || string.IsNullOrWhiteSpace(effect.ButtonCaption) || effect.ButtonCaption.Length > 40)
                 throw new InvalidDataException($"{effect.Name}: choose a button slot from 1 to 41 and a caption of 1 to 40 characters.");
             if (effect.NativeTechnologyId is not null and not (>= 10000 and < 15000))
                 throw new InvalidDataException($"{effect.Name}: the exported native command identity is invalid.");
+            if (effect.NativeTargetTechnologyIds is { } commands &&
+                (effect.Trigger != CivilizationUnitEffectTrigger.ProximityAbility || commands.Count != targets.Count ||
+                 !commands.Keys.Order().SequenceEqual(targets) || commands.Values.Any(value => value is < 10000 or >= 15000) ||
+                 commands.Values.Distinct().Count() != commands.Count ||
+                 (targets.Count == 1 ? effect.NativeTechnologyId != commands[targets[0]] : effect.NativeTechnologyId is not null)))
+                throw new InvalidDataException($"{effect.Name}: the exported recipient command identities are invalid.");
+            if (effect.Trigger == CivilizationUnitEffectTrigger.ProximityAbility &&
+                (effect.ActivationMode == CivilizationUnitEffectActivationMode.Timed ||
+                 effect.NativeTechnologyId is not null && (targets.Count != 1 || effect.NativeTargetTechnologyIds is null)))
+                throw new InvalidDataException($"{effect.Name}: proximity-granted abilities must use a toggle and per-target command identities.");
             if (effect.Trigger == CivilizationUnitEffectTrigger.Activated)
             {
                 if (targets.Count != 1 || targets[0] != entity.SourceObjectId)
@@ -277,11 +355,14 @@ public static class CivilizationUnitEffects
 
     public static string Describe(CivilizationUnitEffect effect, Func<int, string>? objectName = null)
     {
-        var adjustments = string.Join(", ", GetOutputs(effect).Select(DescribeOutput));
+        var adjustments = string.Join(", ", GetOutputs(effect).Select(output => DescribeOutput(output, objectName)));
         var target = string.Join(", ", GetTargetObjectIds(effect).Select(id => objectName?.Invoke(id) ?? $"object {id}"));
-        var behavior = effect.Trigger == CivilizationUnitEffectTrigger.Proximity
-            ? $"other nearby {target}: {adjustments} within {effect.RadiusTiles.ToString("0.##", CultureInfo.InvariantCulture)} tiles"
-            : $"selected: {adjustments} · {(effect.ActivationMode == CivilizationUnitEffectActivationMode.Toggle ? "toggle" : effect.DurationSeconds.ToString("0.##", CultureInfo.InvariantCulture) + " seconds")}";
+        var behavior = effect.Trigger switch
+        {
+            CivilizationUnitEffectTrigger.Proximity => $"other nearby {target}: {adjustments} within {effect.RadiusTiles.ToString("0.##", CultureInfo.InvariantCulture)} tiles",
+            CivilizationUnitEffectTrigger.ProximityAbility => $"other nearby {target} gain a toggle: {adjustments} within {effect.RadiusTiles.ToString("0.##", CultureInfo.InvariantCulture)} tiles",
+            _ => $"selected: {adjustments} · {(effect.ActivationMode == CivilizationUnitEffectActivationMode.Instant ? "instant" : effect.ActivationMode == CivilizationUnitEffectActivationMode.Toggle ? "toggle" : effect.DurationSeconds.ToString("0.##", CultureInfo.InvariantCulture) + " seconds")}"
+        };
         return $"{effect.Name} · {(effect.Enabled ? "Enabled" : "Disabled")} · {behavior}";
     }
 }

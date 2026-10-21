@@ -110,15 +110,67 @@ internal sealed class CivilizationInstalledEditsPanel : UserControl
         var complete = string.Equals(package.Status, "Installed", StringComparison.OrdinalIgnoreCase);
         var listedGamePath = _listedGamePath;
         var canShare = complete && package.PackageId != "legacy" && listedGamePath is not null && _share is not null;
+        var canMerge = complete && package.PackageId != "legacy" && listedGamePath is not null;
         return new DashboardInstalledItemRow(package.ProjectName,
-            (complete ? "Installed " : "Recorded ") + package.InstalledAt.ToLocalTime().ToString("g", CultureInfo.CurrentCulture),
+            (complete ? "Installed " : "Recorded ") + package.InstalledAt.ToLocalTime().ToString("g", CultureInfo.CurrentCulture) +
+                (package.ComponentCount > 1 ? $" · {package.ComponentCount} edits merged" : ""),
             complete ? (package.HasRuntimeEffects ? "Runtime effects " + (package.RuntimeEffectsEnabled ? "enabled" : "disabled") : null) : package.Status,
             canShare, () => ShowDetails(package), () => Uninstall(package),
             destination => _share!(listedGamePath!, package, destination == InstalledShareDestination.Lan,
                 destination == InstalledShareDestination.Friends),
             package.PackageId == "legacy" ? "Reinstall this edit as a managed package to enable sharing." : null,
             package.RuntimeEffectsEnabled ? "Disable runtime effects" : "Enable runtime effects",
-            complete && package.HasRuntimeEffects ? () => ToggleEffects(package) : null);
+            complete && package.HasRuntimeEffects ? () => ToggleEffects(package) : null,
+            canMerge ? () => MergeWith(package) : null,
+            canMerge && package.ComponentCount > 1 ? () => Unmerge(package) : null);
+    }
+
+    private void MergeWith(CivilizationInstalledPackage package)
+    {
+        try
+        {
+            var path = RequireListedGame();
+            var installed = CivilizationPackageManager.ReadInstalled(path);
+            if (!installed.Any(entry => entry.PackageId == package.PackageId))
+                throw new InvalidOperationException("This civilization edit is no longer installed. Refresh the mod list.");
+            using var dialog = new CivilizationMergeDialog(installed, package.PackageId);
+            if (dialog.ShowDialog((IWin32Window?)FindForm() ?? this) != DialogResult.OK) return;
+            var result = CivilizationPackageManager.MergeInstalled(path, dialog.SelectedPackageIds, dialog.MergedName);
+            if (!result.Success) throw new InvalidOperationException(result.Message);
+            RefreshInstalledPackages();
+            _installedPackagesChanged();
+        }
+        catch (Exception exception) when (Expected(exception))
+        {
+            MedievalDialog.Show((IWin32Window?)FindForm() ?? this, exception.Message,
+                "Could not merge civilization edits", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+    }
+
+    private void Unmerge(CivilizationInstalledPackage package)
+    {
+        try
+        {
+            var path = RequireListedGame();
+            var result = CivilizationPackageManager.Unmerge(path, package.PackageId);
+            if (!result.Success) throw new InvalidOperationException(result.Message);
+            RefreshInstalledPackages();
+            _installedPackagesChanged();
+        }
+        catch (Exception exception) when (Expected(exception))
+        {
+            MedievalDialog.Show((IWin32Window?)FindForm() ?? this, exception.Message,
+                "Could not unmerge civilization edits", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+    }
+
+    private string RequireListedGame()
+    {
+        var path = _locateGame();
+        if (string.IsNullOrWhiteSpace(path) || string.IsNullOrWhiteSpace(_listedGamePath) ||
+            !string.Equals(Path.GetFullPath(path), Path.GetFullPath(_listedGamePath), StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("The selected game folder changed. Refresh the mod list.");
+        return path;
     }
 
     private void ToggleEffects(CivilizationInstalledPackage package)
@@ -228,6 +280,11 @@ internal sealed class CivilizationInstalledEditsPanel : UserControl
     {
         var details = new StringBuilder();
         details.AppendLine("Status: " + package.Status);
+        if (package.ComponentCount > 1)
+        {
+            details.AppendLine($"Merged edit: {package.ComponentCount} constituent edits.");
+            details.AppendLine("Share this entry to share the edits together. Use Unmerge from its menu to restore the individual entries.");
+        }
         if (package.HasRuntimeEffects)
         {
             details.AppendLine("Runtime effects: " + (package.RuntimeEffectsEnabled ? "Enabled" : "Disabled"));

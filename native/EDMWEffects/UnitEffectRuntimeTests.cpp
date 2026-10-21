@@ -68,10 +68,490 @@ void VerifyProximityExcludesEmitter() {
     runtime.Evaluate({ first, second, third }, 10);
     expect(18, false); expect(19, false); expect(20, false);
 }
+
+void VerifyGrantedAbilities() {
+    auto rule = Proximity(90);
+    rule.trigger = edmw::UnitEffectTrigger::ProximityAbility;
+    rule.activation = edmw::UnitEffectActivation::Toggle;
+    rule.durationMilliseconds = 0;
+    rule.outputs = { { edmw::UnitEffectStat::Health, 1000 }, { edmw::UnitEffectStat::LineOfSight, 30 } };
+    edmw::UnitEffectRuntime runtime({ rule });
+    auto source = Ranger(1, 0, 0);
+    auto target = Sherman(2, 3, 4);
+    auto second = Sherman(3, 0, 1);
+    auto outside = Sherman(4, 6, 0);
+    auto foreign = target; foreign.id = 5; foreign.player = 2;
+    assert(!runtime.Activate(rule.id, target, 0));
+    runtime.Evaluate({ source, target, second, outside, foreign }, 1);
+    assert(runtime.Granted(rule.id, target) && runtime.Granted(rule.id, second));
+    assert(!runtime.Granted(rule.id, outside) && !runtime.Granted(rule.id, foreign) && !runtime.Granted(rule.id, source));
+    assert(runtime.Bonus(target.id, edmw::UnitEffectStat::Health) == 0); // Granted is available, not automatically active.
+    const std::vector<uint32_t> canonical{ 1729, 10000, 1719 };
+    const std::vector<uint32_t> hidden{ 1729, 1719 };
+    const std::map<uint32_t, edmw::UnitEffectId> conditional{ { 10000, rule.id } };
+    assert(edmw::FilterGrantedAbilityActions(canonical, conditional, runtime, target) == canonical);
+    assert(edmw::FilterGrantedAbilityActions(canonical, conditional, runtime, outside) == hidden);
+    assert(canonical.size() == 3 && canonical[1] == 10000); // Global action list is never edited.
+    edmw::UnitStatProjection projection;
+    const std::array<uint8_t, 0x348> originalPrototype{};
+    const std::array<uint8_t, 0x1C0> originalStatistics{};
+    projection.Refresh(originalPrototype.data(), originalStatistics.data());
+    projection.ReplaceActions(hidden);
+    assert((projection.actions == hidden && projection.Read<0x348, uint32_t>(projection.prototype, 0x3C) -
+        projection.Read<0x348, uint32_t>(projection.prototype, 0x38) == hidden.size() * 4));
+    assert(originalPrototype[0x38] == 0);
+    assert(runtime.ActivateGroup(rule.id, { target, outside, foreign, target }, 1, 2) == 1);
+    runtime.Evaluate({ source, target, second, outside, foreign }, 3);
+    assert(runtime.Bonus(target.id, edmw::UnitEffectStat::Health) == 1000 && runtime.Bonus(target.id) == 30);
+    target.x = 6; target.y = 0;
+    assert(runtime.Evaluate({ source, target, second }, 4).size() == 2);
+    assert(!runtime.Granted(rule.id, target) && !runtime.Activate(rule.id, target, 5));
+    assert(runtime.Bonus(target.id, edmw::UnitEffectStat::Health) == 0 && runtime.Bonus(target.id) == 0);
+    assert(edmw::FilterGrantedAbilityActions(canonical, conditional, runtime, target) == hidden);
+    target.x = 3; target.y = 4;
+    runtime.Evaluate({ source, target, second }, 6);
+    assert(runtime.Granted(rule.id, target) && runtime.Bonus(target.id) == 0); // Re-entry starts off.
+    assert(runtime.ActivateGroup(rule.id, { target, second }, 1, 7) == 2);
+    runtime.Evaluate({ source, target, second }, 8);
+    assert(runtime.Bonus(target.id) == 30 && runtime.Bonus(second.id) == 30);
+    assert(runtime.Activate(rule.id, target, 9));
+    runtime.Evaluate({ source, target, second }, 10);
+    assert(runtime.Bonus(target.id) == 0 && runtime.Bonus(second.id) == 30);
+    runtime.ActivateGroup(rule.id, { target, second }, 1, 11); // Mixed group turns on together.
+    auto otherSource = source; otherSource.id = 6;
+    runtime.Evaluate({ source, otherSource, target, second }, 12);
+    source.x = 100;
+    runtime.Evaluate({ source, otherSource, target, second }, 13);
+    assert(runtime.Granted(rule.id, target) && runtime.Bonus(target.id) == 30); // Last provider owns revocation.
+    otherSource.alive = false;
+    runtime.Evaluate({ source, otherSource, target, second }, 14);
+    assert(!runtime.Granted(rule.id, target) && runtime.Bonus(target.id) == 0 && runtime.Bonus(second.id) == 0);
+    source.x = 0;
+    runtime.Evaluate({ source, target, second }, 15);
+    assert(runtime.Granted(rule.id, target) && runtime.Bonus(target.id) == 0);
+    auto reused = target; ++reused.generation;
+    assert(!runtime.Granted(rule.id, reused) && !runtime.Activate(rule.id, reused, 16));
+    runtime.Activate(rule.id, target, 17);
+    runtime.Evaluate({ source, reused }, 18);
+    assert(runtime.Granted(rule.id, reused) && runtime.Bonus(reused.id) == 0);
+    runtime.Activate(rule.id, reused, 19);
+    runtime.Evaluate({ source, reused }, 20);
+    assert(runtime.Bonus(reused.id) == 30);
+    reused.player = 2;
+    runtime.Evaluate({ source, reused }, 21);
+    assert(!runtime.Granted(rule.id, reused) && runtime.Bonus(reused.id) == 0);
+    reused.player = 1;
+    runtime.Evaluate({ source, reused }, 22);
+    runtime.Activate(rule.id, reused, 23);
+    runtime.Evaluate({ source, reused }, 1); // Backwards clock discards toggles.
+    assert(runtime.Granted(rule.id, reused) && runtime.Bonus(reused.id) == 0);
+    runtime.ForgetUnit(reused.id);
+    assert(!runtime.Granted(rule.id, reused));
+    auto sameType = rule; sameType.targetObject = sameType.sourceObject;
+    edmw::UnitEffectRuntime isolated({ sameType });
+    isolated.Evaluate({ source }, 1);
+    assert(!isolated.Granted(sameType.id, source));
+}
+}
+
+namespace {
+void VerifyMixedRecipientGrantFamily() {
+    auto firstRule = Proximity(91);
+    firstRule.trigger = edmw::UnitEffectTrigger::ProximityAbility;
+    firstRule.activation = edmw::UnitEffectActivation::Toggle;
+    firstRule.durationMilliseconds = 0;
+    firstRule.outputs = { { edmw::UnitEffectStat::Health, 100.0f }, { edmw::UnitEffectStat::LineOfSight, 3.0f } };
+    auto secondRule = firstRule;
+    secondRule.id[0] = 92;
+    secondRule.targetObject = 878;
+    edmw::NativeAbilityBinding firstBinding;
+    firstBinding.effect = firstRule.id;
+    firstBinding.technology = 10000;
+    firstBinding.civilization = firstRule.civilization;
+    firstBinding.sourceObject = firstRule.targetObject;
+    firstBinding.caption = "Shared courage";
+    firstBinding.tooltip = "Toggle courage while a source is nearby.";
+    firstBinding.proximityGranted = true;
+    firstBinding.grantFamilyTechnology = 10000;
+    auto secondBinding = firstBinding;
+    secondBinding.effect = secondRule.id;
+    secondBinding.technology = 10001;
+    secondBinding.sourceObject = secondRule.targetObject;
+    const edmw::NativeAbilityNodeIdentity firstIdentity{ 10000, 3, 51, 0 }, secondIdentity{ 10001, 3, 51, 0 };
+    const auto firstKey = edmw::NativeAbilityGroupActionKey(&firstBinding, 10000, 9, firstIdentity, { 51, 0 }, true);
+    const auto secondKey = edmw::NativeAbilityGroupActionKey(&secondBinding, 10001, 9, secondIdentity, { 51, 0 }, true);
+    assert(firstKey.command == 51 && secondKey.command == 51 && firstKey.parameter == 10000 && firstKey.parameter == secondKey.parameter);
+    auto unrelatedBinding = secondBinding;
+    unrelatedBinding.technology = 10002;
+    unrelatedBinding.grantFamilyTechnology = 10002;
+    assert(edmw::NativeAbilityGroupActionKey(&unrelatedBinding, 10002, 9, { 10002, 3, 51, 0 }, { 51, 0 }, true).parameter != firstKey.parameter);
+    assert(edmw::NativeAbilityGroupActionKey(&secondBinding, 10001, 8, secondIdentity, { 51, 0 }, true).parameter == 0);
+    assert(edmw::NativeAbilityGroupActionKey(&secondBinding, 10001, 9, secondIdentity, { 51, 0 }, false).parameter == 0);
+
+    auto provider = Ranger(1, 0, 0);
+    auto first = Sherman(2, 3, 4);
+    auto second = first; second.id = 3; second.object = 878; second.x = 1; second.y = 0;
+    auto outside = first; outside.id = 4; outside.x = 6; outside.y = 0;
+    auto foreign = second; foreign.id = 5; foreign.player = 2;
+    auto unrelated = second; unrelated.id = 6; unrelated.object = 999;
+    auto dead = first; dead.id = 7; dead.alive = false;
+    auto otherCivilization = first; otherCivilization.id = 8; otherCivilization.civilization = 11;
+    std::vector<edmw::UnitEffectSnapshot> selected{ first, second, outside, foreign, unrelated, dead, otherCivilization, second };
+    const std::vector<uint32_t> recipients{ 777, 878 };
+    assert(edmw::NativeAbilityActivationTargets(firstBinding, first, selected, recipients) == std::vector<uint32_t>({ 2, 3, 4 }));
+    auto ordinaryBinding = firstBinding; ordinaryBinding.proximityGranted = false;
+    assert(edmw::NativeAbilityActivationTargets(ordinaryBinding, first, selected, recipients) == std::vector<uint32_t>({ 2, 4 }));
+    assert(edmw::NativeAbilityActivationTargets(firstBinding, first, { second }, recipients) == std::vector<uint32_t>({ 2 }));
+
+    edmw::UnitEffectRuntime runtime({ firstRule, secondRule });
+    const std::vector<edmw::UnitEffectId> family{ firstRule.id, secondRule.id, firstRule.id };
+    const auto evaluate = [&](uint32_t time) {
+        runtime.Evaluate({ provider, first, second, outside, foreign, unrelated, dead, otherCivilization }, time);
+    };
+    const auto expect = [&](uint32_t id, bool active) {
+        assert(runtime.Bonus(id, edmw::UnitEffectStat::Health) == (active ? 100.0f : 0.0f));
+        assert(runtime.Bonus(id, edmw::UnitEffectStat::LineOfSight) == (active ? 3.0f : 0.0f));
+    };
+    evaluate(0);
+    assert(runtime.Granted(firstRule.id, first) && runtime.Granted(secondRule.id, second));
+    assert(!runtime.Granted(firstRule.id, outside) && !runtime.Granted(secondRule.id, foreign));
+    const std::map<uint32_t, edmw::UnitEffectId> conditional{ { 10000, firstRule.id }, { 10001, secondRule.id } };
+    const std::vector<uint32_t> actions{ 1729, 10000, 10001 };
+    assert(edmw::FilterGrantedAbilityActions(actions, conditional, runtime, first) == std::vector<uint32_t>({ 1729, 10000 }));
+    assert(edmw::FilterGrantedAbilityActions(actions, conditional, runtime, second) == std::vector<uint32_t>({ 1729, 10001 }));
+    expect(first.id, false); expect(second.id, false); // The shared button grants no automatic output.
+    assert(runtime.ActivateGroups(family, selected, 1, 1) == 2);
+    evaluate(2);
+    expect(first.id, true); expect(second.id, true);
+    for (const auto id : { outside.id, foreign.id, unrelated.id, dead.id, otherCivilization.id }) expect(id, false);
+    runtime.Activate(firstRule.id, first, 3);
+    evaluate(4);
+    expect(first.id, false); expect(second.id, true);
+    runtime.ActivateGroups(family, { first, second }, 1, 5);
+    evaluate(6);
+    expect(first.id, true); expect(second.id, true); // Mixed ON/OFF recipient types turn ON together.
+    runtime.ActivateGroups(family, { first, second }, 1, 7);
+    evaluate(8);
+    expect(first.id, false); expect(second.id, false); // An entirely ON family turns OFF together.
+    runtime.ActivateGroups(family, { first, second }, 1, 9);
+    evaluate(10);
+    first.x = 6; first.y = 0;
+    evaluate(11);
+    expect(first.id, false); expect(second.id, true);
+    assert(!runtime.Granted(firstRule.id, first) && runtime.Granted(secondRule.id, second));
+    assert(edmw::FilterGrantedAbilityActions(actions, conditional, runtime, first) == std::vector<uint32_t>({ 1729 }));
+    first.x = 3; first.y = 4;
+    evaluate(12);
+    expect(first.id, false); expect(second.id, true); // Only the returning type starts OFF.
+    runtime.ActivateGroups(family, { first, second }, 1, 13);
+    evaluate(14);
+    expect(first.id, true); expect(second.id, true);
+    second.x = 6;
+    evaluate(15);
+    expect(first.id, true); expect(second.id, false); // Revocation is independent for the other type too.
+    second.x = 1;
+    evaluate(16);
+    expect(first.id, true); expect(second.id, false);
+    provider.alive = false;
+    evaluate(17);
+    expect(first.id, false); expect(second.id, false);
+    assert(runtime.ActivateGroups(family, { first, second }, 1, 18) == 0);
+    provider.alive = true;
+    evaluate(19);
+    expect(first.id, false); expect(second.id, false);
+}
+}
+
+namespace {
+void VerifyProximityEffectInfo() {
+    auto positive = Proximity(102);
+    positive.outputs = { { edmw::UnitEffectStat::Health, 25 }, { edmw::UnitEffectStat::LineOfSight, 5 } };
+    auto negative = positive;
+    negative.id[0] = 101;
+    negative.outputs = { { edmw::UnitEffectStat::Health, -25 }, { edmw::UnitEffectStat::LineOfSight, -5 } };
+    auto grant = positive;
+    grant.id[0] = 104;
+    grant.trigger = edmw::UnitEffectTrigger::ProximityAbility;
+    grant.activation = edmw::UnitEffectActivation::Toggle;
+    grant.durationMilliseconds = 0;
+    grant.outputs = { { edmw::UnitEffectStat::MovementSpeed, 0.125f } };
+    auto intrinsic = grant;
+    intrinsic.id[0] = 103;
+    intrinsic.trigger = edmw::UnitEffectTrigger::Activated;
+    intrinsic.sourceObject = intrinsic.targetObject;
+    intrinsic.radiusTiles = 0;
+    intrinsic.outputs = { { edmw::UnitEffectStat::ArmorShock, 7 } };
+    edmw::UnitEffectRuntime runtime({ positive, grant, intrinsic, negative });
+    auto provider = Ranger(1, 0, 0);
+    auto otherProvider = Ranger(9, 1, 0);
+    auto target = Sherman(2, 3, 4); // At the exact radius boundary of the first provider.
+    auto foreign = target; foreign.id = 3; foreign.player = 2;
+    auto dead = target; dead.id = 4; dead.alive = false;
+    auto otherCivilization = target; otherCivilization.id = 5; otherCivilization.civilization = 11;
+    auto outside = target; outside.id = 6; outside.x = 8; outside.y = 0;
+    auto unrelated = target; unrelated.id = 7; unrelated.object = 878;
+    std::vector<edmw::UnitEffectSnapshot> population{ provider, otherProvider, target, foreign, dead, otherCivilization, outside, unrelated };
+    const auto expectRows = [&](const edmw::UnitEffectSnapshot& actor, bool grantActive) {
+        const auto rows = runtime.ProximityEffects(actor);
+        assert(rows.size() == 3);
+        assert(rows[0].rule.id == negative.id && rows[0].active);
+        assert(rows[1].rule.id == positive.id && rows[1].active);
+        assert(rows[2].rule.id == grant.id && rows[2].active == grantActive);
+        for (const auto& row : rows) assert(!row.provides && row.receives);
+        assert(rows[0].rule.sourceObject == 749 && rows[0].rule.targetObject == 777 && rows[0].rule.radiusTiles == 5);
+        assert(rows[0].rule.outputs.size() == 2 && rows[0].rule.outputs[0].amount == -25);
+    };
+    assert(runtime.ProximityEffects(target).empty());
+    runtime.Evaluate(population, 10);
+    expectRows(target, false); // Two providers still produce one row for each distinct rule.
+    assert(runtime.Bonus(target.id, edmw::UnitEffectStat::Health) == 0 && runtime.Bonus(target.id) == 0);
+    for (const auto actor : { provider, foreign, dead, otherCivilization, outside, unrelated })
+        assert(runtime.ProximityEffects(actor).empty());
+    auto mismatched = target;
+    mismatched.player = 2; assert(runtime.ProximityEffects(mismatched).empty());
+    mismatched = target; mismatched.civilization = 11; assert(runtime.ProximityEffects(mismatched).empty());
+    mismatched = target; mismatched.object = 878; assert(runtime.ProximityEffects(mismatched).empty());
+    mismatched = target; ++mismatched.generation; assert(runtime.ProximityEffects(mismatched).empty());
+    mismatched = target; mismatched.alive = false; assert(runtime.ProximityEffects(mismatched).empty());
+    mismatched = target; mismatched.id = UINT32_MAX; assert(runtime.ProximityEffects(mismatched).empty());
+    assert(runtime.Activate(intrinsic.id, target, 11));
+    runtime.Evaluate(population, 12);
+    assert(runtime.Bonus(target.id, edmw::UnitEffectStat::ArmorShock) == 7);
+    expectRows(target, false); // Ordinary activated effects never appear in this proximity panel.
+    const edmw::UnitEffectRuntime& readOnly = runtime;
+    for (unsigned count = 0; count < 10; ++count) assert(readOnly.ProximityEffects(target).size() == 3);
+    auto copy = readOnly.ProximityEffects(target);
+    copy[0].rule.outputs[0].amount = 999;
+    expectRows(target, false); // Returned descriptions cannot mutate the runtime's rules.
+    assert(runtime.Evaluate(population, 12).empty());
+    assert(runtime.Bonus(target.id, edmw::UnitEffectStat::ArmorShock) == 7 && runtime.Bonus(target.id) == 0);
+    runtime.Evaluate({ otherProvider, target }, 13);
+    expectRows(target, false); // Losing one provider does not remove a description.
+    assert(runtime.Activate(grant.id, target, 14));
+    expectRows(target, true);
+    runtime.Evaluate({ otherProvider, target }, 15);
+    assert(runtime.Bonus(target.id, edmw::UnitEffectStat::MovementSpeed) == 0.125f);
+    assert(runtime.Activate(grant.id, target, 16));
+    expectRows(target, false);
+    runtime.Evaluate({ otherProvider, target }, 17);
+    assert(runtime.Bonus(target.id, edmw::UnitEffectStat::MovementSpeed) == 0);
+    runtime.Activate(grant.id, target, 18);
+    runtime.Evaluate({ otherProvider, target }, 19);
+    target.x = 8; target.y = 0;
+    runtime.Evaluate({ provider, otherProvider, target }, 20);
+    assert(runtime.ProximityEffects(target).empty());
+    assert(runtime.Bonus(target.id, edmw::UnitEffectStat::ArmorShock) == 7);
+    target.x = 3; target.y = 4;
+    runtime.Evaluate({ provider, otherProvider, target }, 21);
+    expectRows(target, false); // Re-entry exposes an available grant with no inherited activation.
+    runtime.ForgetUnit(target.id);
+    assert(runtime.ProximityEffects(target).empty());
+    runtime.Evaluate({ provider, target }, 22);
+    expectRows(target, false);
+    runtime.Activate(grant.id, target, 23);
+    runtime.Evaluate({ provider, target }, 24);
+    expectRows(target, true);
+    runtime.Activate(intrinsic.id, target, 1); // Clock rollback clears both matched-aura and grant snapshots.
+    assert(runtime.ProximityEffects(target).empty());
+    runtime.Evaluate({ provider, target }, 2);
+    expectRows(target, false);
+    runtime.Reset();
+    assert(runtime.ProximityEffects(target).empty());
+    assert(runtime.Bonus(target.id, edmw::UnitEffectStat::ArmorShock) == 0);
+    runtime.Evaluate({ provider, target }, 3);
+    expectRows(target, false);
+    auto reused = target; ++reused.generation;
+    assert(runtime.ProximityEffects(reused).empty());
+    runtime.Evaluate({ provider, reused }, 4);
+    expectRows(reused, false);
+    assert(runtime.ProximityEffects(target).empty());
+    runtime.Evaluate({ reused }, 5); // No live provider remains.
+    assert(runtime.ProximityEffects(reused).empty());
+    reused.alive = false;
+    runtime.Evaluate({ provider, reused }, 6);
+    assert(runtime.ProximityEffects(reused).empty());
+}
+}
+
+namespace {
+void VerifyProvidedProximityEffectInfo() {
+    auto aura = Proximity(110);
+    aura.outputs = { { edmw::UnitEffectStat::Health, 25 }, { edmw::UnitEffectStat::LineOfSight, 5 } };
+    auto grant = aura;
+    grant.id[0] = 111;
+    grant.trigger = edmw::UnitEffectTrigger::ProximityAbility;
+    grant.activation = edmw::UnitEffectActivation::Toggle;
+    grant.durationMilliseconds = 0;
+    grant.outputs = { { edmw::UnitEffectStat::MovementSpeed, 0.125f } };
+    auto intrinsic = aura;
+    intrinsic.id[0] = 109;
+    intrinsic.trigger = edmw::UnitEffectTrigger::Activated;
+    intrinsic.targetObject = intrinsic.sourceObject;
+    intrinsic.outputs = { { edmw::UnitEffectStat::ArmorShock, 7 } };
+    edmw::UnitEffectRuntime runtime({ grant, intrinsic, aura });
+    auto emitter = Ranger(1, 0, 0);
+    emitter.generation = 17;
+    const auto expectProvided = [&](const edmw::UnitEffectSnapshot& actor) {
+        const auto rows = runtime.ProvidedProximityEffects(actor);
+        assert(rows.size() == 2 && rows[0].rule.id == aura.id && rows[1].rule.id == grant.id);
+        for (const auto& row : rows) assert(!row.active && row.provides && !row.receives);
+        assert(rows[0].rule.sourceObject == 749 && rows[0].rule.targetObject == 777 && rows[0].rule.radiusTiles == 5);
+        assert(rows[0].rule.outputs.size() == 2 && rows[0].rule.outputs[0].amount == 25);
+    };
+    assert(runtime.ProvidedProximityEffects(emitter).empty());
+    runtime.Evaluate({ emitter }, 10);
+    expectProvided(emitter); // An isolated emitter describes its aura without receiving it.
+    assert(runtime.ProximityEffects(emitter).empty() && runtime.Bonus(emitter.id) == 0);
+    assert(runtime.Activate(intrinsic.id, emitter, 11));
+    runtime.Evaluate({ emitter }, 12);
+    expectProvided(emitter); // Intrinsic activated abilities are excluded from the provider list.
+    assert(runtime.Bonus(emitter.id, edmw::UnitEffectStat::ArmorShock) == 7);
+    const edmw::UnitEffectRuntime& readOnly = runtime;
+    for (unsigned count = 0; count < 10; ++count) assert(readOnly.ProvidedProximityEffects(emitter).size() == 2);
+    auto copied = readOnly.ProvidedProximityEffects(emitter);
+    copied[0].rule.outputs[0].amount = 999;
+    copied[0].provides = false;
+    expectProvided(emitter);
+    assert(runtime.Evaluate({ emitter }, 12).empty()); // Queries do not change gameplay state.
+    auto mismatch = emitter;
+    mismatch.player = 2; assert(runtime.ProvidedProximityEffects(mismatch).empty());
+    mismatch = emitter; mismatch.civilization = 11; assert(runtime.ProvidedProximityEffects(mismatch).empty());
+    mismatch = emitter; mismatch.object = 878; assert(runtime.ProvidedProximityEffects(mismatch).empty());
+    mismatch = emitter; ++mismatch.generation; assert(runtime.ProvidedProximityEffects(mismatch).empty());
+    mismatch = emitter; mismatch.alive = false; assert(runtime.ProvidedProximityEffects(mismatch).empty());
+    mismatch = emitter; mismatch.id = 2; assert(runtime.ProvidedProximityEffects(mismatch).empty());
+    mismatch = emitter; mismatch.id = UINT32_MAX; assert(runtime.ProvidedProximityEffects(mismatch).empty());
+    auto reused = emitter; ++reused.generation;
+    runtime.Evaluate({ reused }, 13);
+    expectProvided(reused);
+    assert(runtime.ProvidedProximityEffects(emitter).empty());
+    auto changedOwner = reused; changedOwner.player = 2;
+    runtime.Evaluate({ changedOwner }, 14);
+    expectProvided(changedOwner); // Matching civilizations can provide for their own separate player.
+    assert(runtime.ProvidedProximityEffects(reused).empty());
+    auto wrongCivilization = changedOwner; wrongCivilization.civilization = 11;
+    runtime.Evaluate({ wrongCivilization }, 15);
+    assert(runtime.ProvidedProximityEffects(wrongCivilization).empty());
+    auto dead = changedOwner; dead.alive = false;
+    runtime.Evaluate({ dead }, 16);
+    assert(runtime.ProvidedProximityEffects(changedOwner).empty());
+    runtime.Evaluate({}, 17);
+    assert(runtime.ProvidedProximityEffects(emitter).empty());
+    runtime.Evaluate({ emitter }, 18);
+    expectProvided(emitter);
+    runtime.ForgetUnit(emitter.id);
+    assert(runtime.ProvidedProximityEffects(emitter).empty());
+    runtime.Evaluate({ emitter }, 19);
+    expectProvided(emitter);
+    runtime.Reset();
+    assert(runtime.ProvidedProximityEffects(emitter).empty());
+    runtime.Evaluate({ emitter }, 20);
+    expectProvided(emitter);
+    assert(runtime.Activate(intrinsic.id, emitter, 1)); // Rollback clears observation snapshots too.
+    assert(runtime.ProvidedProximityEffects(emitter).empty());
+    runtime.Evaluate({ emitter }, 2);
+    expectProvided(emitter);
+
+    auto mutualAura = aura;
+    mutualAura.id[0] = 112;
+    mutualAura.sourceObject = mutualAura.targetObject = 878;
+    auto mutualGrant = grant;
+    mutualGrant.id[0] = 113;
+    mutualGrant.sourceObject = mutualGrant.targetObject = 878;
+    edmw::UnitEffectRuntime mutual({ mutualGrant, mutualAura });
+    auto first = emitter; first.id = 10; first.object = 878;
+    auto second = first; second.id = 11; second.x = 3; second.y = 4;
+    const auto expectMutual = [&](const edmw::UnitEffectSnapshot& actor, bool grantActive) {
+        const auto incoming = mutual.ProximityEffects(actor);
+        const auto provided = mutual.ProvidedProximityEffects(actor);
+        assert(incoming.size() == 2 && provided.size() == 2);
+        for (size_t index = 0; index < incoming.size(); ++index) {
+            assert(incoming[index].rule.id == provided[index].rule.id);
+            assert(incoming[index].receives && !incoming[index].provides);
+            assert(!provided[index].receives && provided[index].provides && !provided[index].active);
+        }
+        assert(incoming[0].active && incoming[1].active == grantActive);
+    };
+    mutual.Evaluate({ first }, 100);
+    assert(mutual.ProvidedProximityEffects(first).size() == 2 && mutual.ProximityEffects(first).empty());
+    assert(!mutual.Granted(mutualGrant.id, first)); // The provided description does not grant to itself.
+    mutual.Evaluate({ first, second }, 101);
+    expectMutual(first, false); expectMutual(second, false);
+    assert(mutual.Activate(mutualGrant.id, first, 102));
+    mutual.Evaluate({ first, second }, 103);
+    expectMutual(first, true); expectMutual(second, false);
+    assert(mutual.Bonus(first.id, edmw::UnitEffectStat::MovementSpeed) == 0.125f);
+    mutual.Evaluate({ first }, 104);
+    assert(mutual.ProximityEffects(first).empty() && mutual.ProvidedProximityEffects(first).size() == 2);
+    assert(mutual.Bonus(first.id, edmw::UnitEffectStat::MovementSpeed) == 0);
+    mutual.Evaluate({ first, second }, 105);
+    expectMutual(first, false); expectMutual(second, false); // Re-entry starts the grant off.
+}
+}
+
+namespace {
+void VerifyAttackRangeProjection() {
+    const auto combatRange = [](const edmw::UnitStatProjection& projection) {
+        const auto base = edmw::UnitStatProjection::Read<0x348, float>(projection.prototype, 0xEC);
+        const auto multiplier = edmw::UnitStatProjection::Read<0x1C0, float>(projection.statistics, 0x144);
+        const auto additive = edmw::UnitStatProjection::Read<0x1C0, float>(projection.statistics, 0xE0);
+        return static_cast<double>(base) * multiplier + additive;
+    };
+    const auto hudRange = [&](const edmw::UnitStatProjection& projection) {
+        // HUD 0x00772B9E adds the prototype base to the native statistics'
+        // effective-minus-base range. The adapter points statistics +0xB4 at
+        // this same per-unit prototype, as combat getter 0x006B6E53 expects.
+        const auto base = edmw::UnitStatProjection::Read<0x348, float>(projection.prototype, 0xEC);
+        return base + (combatRange(projection) - base);
+    };
+    for (const auto mode : { std::pair<float, float>{ 0.0f, 5.0f }, { 1.0f, 0.0f }, { 2.0f, 0.0f } }) {
+        edmw::UnitStatProjection canonical, projected, unrelated;
+        edmw::UnitStatProjection::Put(canonical.prototype, 0xEC, 5.0f);
+        edmw::UnitStatProjection::Put(canonical.statistics, 0x144, mode.first);
+        edmw::UnitStatProjection::Put(canonical.statistics, 0xE0, mode.second);
+        const auto originalPrototype = canonical.prototype;
+        const auto originalStatistics = canonical.statistics;
+        const auto before = combatRange(canonical);
+        unrelated.Refresh(canonical.prototype.data(), canonical.statistics.data());
+        for (unsigned frame = 0; frame < 100; ++frame) {
+            projected.Refresh(canonical.prototype.data(), canonical.statistics.data());
+            assert(projected.Apply(edmw::UnitEffectStat::AttackRange, 5.0f));
+            assert(combatRange(projected) == before + 5.0 && hudRange(projected) == before + 5.0);
+            assert((edmw::UnitStatProjection::Read<0x348, float>(projected.prototype, 0xEC) == 5.0f));
+            assert((edmw::UnitStatProjection::Read<0x1C0, float>(projected.statistics, 0x144) == mode.first));
+            assert(combatRange(unrelated) == before && canonical.prototype == originalPrototype && canonical.statistics == originalStatistics);
+        }
+        // Expiry copies canonical data back; neither repeated frames nor
+        // returning to a native researched multiplier can retain an increment.
+        projected.Refresh(canonical.prototype.data(), canonical.statistics.data());
+        assert(projected.prototype == originalPrototype && projected.statistics == originalStatistics);
+        assert(combatRange(projected) == before && hudRange(projected) == before);
+        assert(projected.Apply(edmw::UnitEffectStat::AttackRange, -2.0f));
+        assert(combatRange(projected) == before - 2.0 && hudRange(projected) == before - 2.0);
+        projected.Refresh(canonical.prototype.data(), canonical.statistics.data());
+        assert(projected.Apply(edmw::UnitEffectStat::AttackRange, -20.0f));
+        assert(combatRange(projected) == 0.0 && hudRange(projected) == 0.0);
+        assert(canonical.prototype == originalPrototype && canonical.statistics == originalStatistics);
+    }
+    edmw::UnitStatProjection fractional;
+    edmw::UnitStatProjection::Put(fractional.prototype, 0xEC, 0.1f);
+    edmw::UnitStatProjection::Put(fractional.statistics, 0x144, 0.3f);
+    assert(fractional.Apply(edmw::UnitEffectStat::AttackRange, -5.0f));
+    assert(combatRange(fractional) >= 0.0 && combatRange(fractional) < 0.000001);
+    assert(hudRange(fractional) >= 0.0 && hudRange(fractional) < 0.000001);
+    const auto validStatistics = fractional.statistics;
+    assert(!fractional.Apply(edmw::UnitEffectStat::AttackRange, std::numeric_limits<float>::infinity()));
+    assert(fractional.statistics == validStatistics);
+}
 }
 
 int main() {
     VerifyProximityExcludesEmitter();
+    VerifyGrantedAbilities();
+    VerifyMixedRecipientGrantFamily();
+    VerifyProximityEffectInfo();
+    VerifyProvidedProximityEffectInfo();
+    VerifyAttackRangeProjection();
     {
         auto aura = Proximity(70);
         aura.outputs = { { edmw::UnitEffectStat::Health, 1000.0f }, { edmw::UnitEffectStat::LineOfSight, 30.0f },
@@ -461,5 +941,5 @@ int main() {
             assert(indexed.Bonus(target.id) == (nearby ? 3 : 0));
         }
     }
-    puts("UNIT EFFECTS PASS: independent stats, fractional movement, radius boundary, source death, owner/civilization filters, non-stacking providers, independent mods, reused IDs, deterministic order, toggle and simulation-time expiry.");
+    puts("UNIT EFFECTS PASS: independent stats, proximity grants, per-unit action masks, mixed-recipient group toggles, revoke/re-entry, provider death, ownership, reused IDs, deterministic order and simulation-time expiry.");
 }

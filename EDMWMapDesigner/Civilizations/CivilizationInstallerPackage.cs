@@ -19,10 +19,20 @@ public sealed class CivilizationInstallerPackage
     public Dictionary<string, string> AssetDependencies { get; set; } = new(StringComparer.OrdinalIgnoreCase);
     public List<CivilizationPackageModelReference> ModelReferences { get; set; } = [];
     public List<string> OwnerTargets { get; set; } = [];
+    public List<int> BaselineAbilityTechnologyIds { get; set; } = [];
+    public List<CivilizationInstallerPackage> Components { get; set; } = [];
+    // Read-only installation evidence for older exports without embedded
+    // source layouts. It never becomes part of a portable package.
+    internal Dictionary<string, byte[]> InstallationOriginals { get; } = new(StringComparer.OrdinalIgnoreCase);
 
     public static CivilizationInstallerPackage Create(CivilizationEditProject project, string gamePath)
+        => Create(project, gamePath, null);
+
+    internal static CivilizationInstallerPackage Create(CivilizationEditProject project, string gamePath,
+        CivilizationInstallerPackage? reviewSource)
     {
-        var plan = CivilizationGameInstaller.BuildPlan(project, gamePath, forExport: true);
+        var sources = reviewSource is null ? null : CivilizationPackageReviewSources.BuildSources(reviewSource, gamePath);
+        var plan = CivilizationGameInstaller.BuildPlan(project, gamePath, forExport: true, sourceFiles: sources);
         if (!plan.CanInstall)
             throw new InvalidDataException(plan.Issues.Count > 0 ? string.Join(Environment.NewLine, plan.Issues) : "There are no changes to export.");
         var portableProject = plan.PreparedProject.Clone();
@@ -30,6 +40,7 @@ public sealed class CivilizationInstallerPackage
         var package = new CivilizationInstallerPackage
         {
             ProjectName = project.Name, ProjectJson = portableProject.Serialize(),
+            BaselineAbilityTechnologyIds = reviewSource?.BaselineAbilityTechnologyIds.ToList() ?? CivilizationPackageManager.ReadBaselineAbilityCommands(plan.GamePath).ToList(),
             Changes = plan.Changes.ToList(),
             ModelReferences = plan.Models.Select(model => new CivilizationPackageModelReference(model.GraphicsId, model.ModelName, model.Hash)).ToList()
         };
@@ -49,13 +60,13 @@ public sealed class CivilizationInstallerPackage
                 (file.Original.Length != file.Patched.Length || TechnologyButtonsDiffer(file.Original, file.Patched)))
             {
                 package.Files.Add(new() { RelativePath = file.RelativePath, WholeFile = true,
-                    ExpectedHash = file.OriginalHash, Replacement = file.Patched.ToArray() });
+                    ExpectedHash = file.OriginalHash, Original = file.Original.ToArray(), Replacement = file.Patched.ToArray() });
                 continue;
             }
             if (IsObjectPath(file.RelativePath) && file.Original is not null && ObjectActionListsDiffer(file.Original, file.Patched))
             {
                 package.Files.Add(new() { RelativePath = file.RelativePath, WholeFile = true,
-                    ExpectedHash = file.OriginalHash, Replacement = file.Patched.ToArray() });
+                    ExpectedHash = file.OriginalHash, Original = file.Original.ToArray(), Replacement = file.Patched.ToArray() });
                 continue;
             }
             if (file.Original is null || file.Original.Length != file.Patched.Length)
@@ -89,7 +100,7 @@ public sealed class CivilizationInstallerPackage
                     throw new InvalidDataException("The proposed changes contain bytes outside a verified writable field.");
             if (patches.Count > 0)
                 package.Files.Add(new() { RelativePath = file.RelativePath, ExpectedLength = file.Original.Length,
-                    StructuralHash = StructuralHash(file.RelativePath, file.Original), Patches = patches });
+                    StructuralHash = StructuralHash(file.RelativePath, file.Original), Original = file.Original.ToArray(), Patches = patches });
         }
         // Mutable tables are checked through structure/identity fingerprints and
         // field-sized expected bytes, allowing unrelated installed packages.
@@ -98,11 +109,21 @@ public sealed class CivilizationInstallerPackage
             if (IsDatabasePath(dependency.Key))
             {
                 if (package.Files.Any(file => file.RelativePath.Equals(dependency.Key, StringComparison.OrdinalIgnoreCase))) continue;
-                var data = File.ReadAllBytes(Path.Combine(plan.GamePath, dependency.Key));
+                var data = sources?.GetValueOrDefault(dependency.Key) ?? File.ReadAllBytes(Path.Combine(plan.GamePath, dependency.Key));
                 package.Files.Add(new() { RelativePath = dependency.Key, ExpectedLength = data.Length,
-                    StructuralHash = StructuralHash(dependency.Key, data) });
+                    StructuralHash = StructuralHash(dependency.Key, data), Original = data });
             }
             else package.Dependencies[dependency.Key] = dependency.Value;
+        }
+        // Retain the source record layout so offsets can be translated when
+        // independent custom commands are added or removed on this computer.
+        if (package.Files.Any(file => IsObjectPath(file.RelativePath)) && !package.Files.Any(file => IsTechnologyPath(file.RelativePath)) &&
+            (reviewSource is null || reviewSource.Files.Any(file => IsTechnologyPath(file.RelativePath))))
+        {
+            const string path = "Data\\db\\dbtechtree.dat";
+            var data = sources?.GetValueOrDefault(path) ?? File.ReadAllBytes(Path.Combine(plan.GamePath, path));
+            package.Files.Add(new() { RelativePath = path, ExpectedLength = data.Length,
+                StructuralHash = StructuralHash(path, data), Original = data });
         }
         // A model upload and the same object's graphics reference are coupled
         // logical overrides even when they touch different physical files.
@@ -299,12 +320,41 @@ public sealed class CivilizationInstallerPackage
     internal static void Validate(CivilizationInstallerPackage package)
     {
         if (package is null) throw new InvalidDataException("The civilization package manifest is empty.");
+        if (package.Components is null) throw new InvalidDataException("The merged package components are missing.");
+        if (package.Components.Count > 0)
+        {
+            if (package.FormatVersion != 2 || !Guid.TryParseExact(package.PackageId, "N", out _) ||
+                string.IsNullOrWhiteSpace(package.ProjectName) || package.ProjectName.Length > 120 || package.ProjectName != package.ProjectName.Trim() ||
+                package.ProjectName.Any(character => char.IsControl(character) || character is '\u2028' or '\u2029') ||
+                package.ExecutableHash != CivilizationGameInstaller.SupportedExecutableSha256 || package.Components.Count is < 2 or > 64 ||
+                package.Components.Any(component => component is null || component.Components is null || component.Components.Count != 0 || component.PackageId == package.PackageId) ||
+                package.Components.Select(component => component.PackageId).Distinct(StringComparer.Ordinal).Count() != package.Components.Count ||
+                package.Files is null || package.Files.Count != 0 || package.Changes is null || package.Changes.Count is < 1 or > 100_000 ||
+                package.Dependencies is null || package.Dependencies.Count != 0 || package.AssetDependencies is null || package.AssetDependencies.Count != 0 ||
+                package.ModelReferences is null || package.ModelReferences.Count != 0 || package.OwnerTargets is null || package.OwnerTargets.Count != 0 ||
+                package.BaselineAbilityTechnologyIds is null || package.BaselineAbilityTechnologyIds.Count != 0)
+                throw new InvalidDataException("The merged civilization package is invalid.");
+            foreach (var component in package.Components) Validate(component);
+            if (package.Components.Sum(component => component.Files.Sum(file => (long)(file.Original?.Length ?? 0) +
+                (file.Replacement?.Length ?? 0) + file.Patches.Sum(patch => (long)patch.Length * 2))) > 128L * 1024 * 1024)
+                throw new InvalidDataException("The combined civilization edits exceed the merged package payload limit.");
+            var summary = CivilizationEditProject.Deserialize(package.ProjectJson);
+            if (summary.Name != package.ProjectName || summary.ModelAssets.Count != 0 ||
+                summary.Civilizations.Any(civilization => civilization.Entities.Count != 0 || civilization.Properties.Count != 0))
+                throw new InvalidDataException("The merged package summary differs from its name or components.");
+            if (!package.Changes.SequenceEqual(package.Components.SelectMany(component => component.Changes)))
+                throw new InvalidDataException("The merged package changes differ from its components.");
+            return;
+        }
         if (package.FormatVersion != 1 || !Guid.TryParseExact(package.PackageId, "N", out _) ||
             string.IsNullOrWhiteSpace(package.ProjectName) || package.ProjectName.Length > 120 ||
             package.ExecutableHash != CivilizationGameInstaller.SupportedExecutableSha256 ||
             package.Files is null || package.Files.Count is < 1 or > 10_000 || package.Changes is null ||
             package.Changes.Count is < 1 or > 100_000 || package.Dependencies is null || package.AssetDependencies is null || package.AssetDependencies.Count > 100 ||
-            package.ModelReferences is null || package.OwnerTargets is null ||
+            package.ModelReferences is null || package.OwnerTargets is null || package.BaselineAbilityTechnologyIds is null ||
+            package.BaselineAbilityTechnologyIds.Count > CivilizationRuntimeEffects.MaximumRules ||
+            package.BaselineAbilityTechnologyIds.Distinct().Count() != package.BaselineAbilityTechnologyIds.Count ||
+            package.BaselineAbilityTechnologyIds.Any(id => id is < 10000 or > 14999) ||
             package.OwnerTargets.Count > 100_000 || package.OwnerTargets.Any(target => string.IsNullOrEmpty(target) || target.Length > 200))
             throw new InvalidDataException("The civilization package manifest is invalid.");
         var project = CivilizationEditProject.Deserialize(package.ProjectJson);
@@ -322,6 +372,14 @@ public sealed class CivilizationInstallerPackage
             _ = CivilizationPackageManager.ResolveTarget(Path.GetFullPath("."), file.RelativePath);
             if (!paths.Add(file.RelativePath) || file.Patches is null) throw new InvalidDataException("Duplicate or missing package file entries.");
             if (file.Patches.Any(patch => patch is null)) throw new InvalidDataException("A package field entry is empty.");
+            if (file.Original is { } original)
+            {
+                if (!IsDatabasePath(file.RelativePath) || original.Length is < 4 or > 32 * 1024 * 1024 ||
+                    (file.WholeFile ? !string.Equals(Hash(original), file.ExpectedHash, StringComparison.OrdinalIgnoreCase) :
+                        !MatchesStructuralHash(file, original)))
+                    throw new InvalidDataException("A database source layout differs from its package baseline.");
+                bytes += original.Length;
+            }
             if (file.WholeFile)
             {
                 var databaseTable = IsTechnologyPath(file.RelativePath) || IsObjectPath(file.RelativePath);
@@ -367,7 +425,7 @@ public sealed class CivilizationInstallerPackage
         var unitRules = configurations.SelectMany(configuration => configuration.Units).ToArray();
         if (unitRules.Select(rule => rule.Id).Distinct().Count() != unitRules.Length)
             throw new InvalidDataException("The package contains duplicate unit effect identities.");
-        var activated = unitRules.Where(rule => rule.Trigger == CivilizationUnitEffectTrigger.Activated).ToArray();
+        var activated = unitRules.Where(rule => rule.Trigger != CivilizationUnitEffectTrigger.Proximity).ToArray();
         if (activated.Length > 0)
         {
             if (activated.Select(rule => rule.TechnologyId).Distinct().Count() != activated.Length)
@@ -377,20 +435,31 @@ public sealed class CivilizationInstallerPackage
             if (technologyFile is not { WholeFile: true, Replacement: not null } || objectsFile is not { WholeFile: true, Replacement: not null })
                 throw new InvalidDataException("An activated ability package is missing its in-game button tables.");
             var records = CivilizationTechnologyBindings.ReadRecords(technologyFile.Replacement).ToDictionary(record => record.TechId);
+            var claimedButtonSlots = new HashSet<(int Civilization, int Source, int Slot)>();
             foreach (var rule in activated)
             {
                 var entity = project.Civilizations.Where(civ => civ.SourceCivilizationId == rule.CivilizationId).SelectMany(civ => civ.Entities)
-                    .Single(entity => CivilizationUnitEffects.Read(entity).Any(effect => Guid.Parse(effect.Id) == rule.Id));
-                var attachment = CivilizationUnitEffects.Read(entity).Single(effect => Guid.Parse(effect.Id) == rule.Id);
-                if (!records.TryGetValue(rule.TechnologyId, out var record) || record.NodeKind != 3 || record.CreatesObject || record.EditorOnly ||
+                    .Single(entity => entity.SourceObjectId == rule.SourceObjectId && CivilizationUnitEffects.Read(entity).Any(effect =>
+                        CivilizationUnitEffects.GetTargetObjectIds(effect).Contains(rule.TargetObjectId) &&
+                        CivilizationRuntimeConfiguration.RuleIdForTarget(effect, rule.TargetObjectId) == rule.Id));
+                var attachment = CivilizationUnitEffects.Read(entity).Single(effect =>
+                    CivilizationRuntimeConfiguration.RuleIdForTarget(effect, rule.TargetObjectId) == rule.Id);
+                var commandSource = rule.Trigger == CivilizationUnitEffectTrigger.ProximityAbility ? rule.TargetObjectId : rule.SourceObjectId;
+                var commandCategory = CivilizationUnitEffectBindings.CommandSourceCategory(objectsFile.Replacement, commandSource);
+                if (!records.TryGetValue(rule.TechnologyId, out var record) || record.Identifier != "EDMW ability " + rule.Id.ToString("N") ||
+                    record.NodeKind != 3 || record.CreatesObject || record.EditorOnly ||
                     record.CommandId != 51 || record.EventId != 0 || record.WoodCost != 0 || record.StoneCost != 0 || record.GoldCost != 0 || record.FoodCost != 0 ||
                     BinaryPrimitives.ReadInt32LittleEndian(technologyFile.Replacement.AsSpan(record.Offset + 136)) != 0 ||
                     record.CreatedObjectId != 0 || record.PrerequisiteTechnologyIds.Count != 0 || record.AdditionalTechnologyIds.Count != 0 ||
-                    !record.ProducerObjectIds.SequenceEqual([rule.SourceObjectId]) || !record.AllowedCivilizationRows.SequenceEqual([rule.CivilizationId - 1]) ||
-                    !CivilizationObjectDetails.ReadActionTechnologyIds(objectsFile.Replacement, rule.SourceObjectId, entity.Category).Contains((uint)rule.TechnologyId) ||
+                    !record.ProducerObjectIds.SequenceEqual([commandSource]) || !record.AllowedCivilizationRows.SequenceEqual([rule.CivilizationId - 1]) ||
+                    !CivilizationObjectDetails.ReadActionTechnologyIds(objectsFile.Replacement, commandSource, commandCategory).Contains((uint)rule.TechnologyId) ||
                     BinaryPrimitives.ReadInt32LittleEndian(technologyFile.Replacement.AsSpan(record.Offset + 168)) != attachment.ButtonIconId ||
                     BinaryPrimitives.ReadInt32LittleEndian(technologyFile.Replacement.AsSpan(record.Offset + 176)) != 1_000_000 + rule.TechnologyId ||
-                    record.CommonButtonSlot != attachment.ButtonSlot || record.CivilizationButtonSlots[rule.CivilizationId - 2] != attachment.ButtonSlot ||
+                    (rule.Trigger == CivilizationUnitEffectTrigger.ProximityAbility
+                        ? !CivilizationUnitEffectBindings.CustomAbilityButtonSlots.Contains(record.CommonButtonSlot)
+                        : record.CommonButtonSlot != attachment.ButtonSlot) ||
+                    record.CivilizationButtonSlots[rule.CivilizationId - 2] != record.CommonButtonSlot ||
+                    !claimedButtonSlots.Add((rule.CivilizationId, commandSource, record.CommonButtonSlot)) ||
                     record.ToolTipStringId != 2_000_000 + rule.TechnologyId || record.PrerequisiteStringId1 != 2_000_000 + rule.TechnologyId ||
                     record.PrerequisiteStringId2 != 2_000_000 + rule.TechnologyId)
                     throw new InvalidDataException("An activated ability does not match its in-game button registration.");
@@ -422,7 +491,10 @@ public sealed class CivilizationPackageFile
     public string? StructuralHash { get; set; }
     public string? ExpectedHash { get; set; }
     public byte[]? Replacement { get; set; }
+    public byte[]? Original { get; set; }
     public List<CivilizationPackagePatch> Patches { get; set; } = [];
+    internal string? CompositionFingerprint { get; set; }
+    internal CivilizationAbilityTableComposition? CachedComposition { get; set; }
 }
 public sealed class CivilizationPackagePatch
 {

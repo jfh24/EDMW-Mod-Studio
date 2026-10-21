@@ -9,6 +9,7 @@
 #include "UnitEffectNative.h"
 #include "NativeAbilityBindings.h"
 #include "EffectTrace.h"
+#include "UnitEffectModsPanel.h"
 
 namespace {
 std::vector<edmw::EffectRule> rules;
@@ -92,35 +93,49 @@ void edmw::TraceEffect(const char* format, ...) {
 
 // Invoked by the owned game's launcher thread, outside DllMain/loader lock.
 extern "C" DWORD WINAPI InitializeEffects(void* configuration) {
-    if (initialized || reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr)) != 0x00400000 || !configuration) return 0;
-    if (memcmp(reinterpret_cast<void*>(hookAddress), callBytes, sizeof(callBytes))) return 0;
-    constexpr uint8_t grantBytes[] = { 0x8B,0x54,0x24,0x08,0x8B,0x44,0x24,0x04,0x01,0x94,0x81,0xBC,0x0E,0x00,0x00 };
-    if (memcmp(reinterpret_cast<void*>(grantAddress), grantBytes, sizeof(grantBytes))) return 0;
+    if (!configuration) return 0;
     const auto path = static_cast<const wchar_t*>(configuration);
+    wchar_t logPath[32768];
+    if (swprintf_s(logPath, L"%s.log", path) > 0)
+        trace = CreateFileW(logPath, GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    const auto fail = [](const char* stage) -> DWORD {
+        edmw::TraceEffect("initialization-failed stage=%s win32-error=%lu", stage, GetLastError()); return 0;
+    };
+    edmw::TraceEffect("initialization-start");
+    if (initialized || reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr)) != 0x00400000) return fail("game-module");
+    if (memcmp(reinterpret_cast<void*>(hookAddress), callBytes, sizeof(callBytes))) return fail("research-call-signature");
+    constexpr uint8_t grantBytes[] = { 0x8B,0x54,0x24,0x08,0x8B,0x44,0x24,0x04,0x01,0x94,0x81,0xBC,0x0E,0x00,0x00 };
+    if (memcmp(reinterpret_cast<void*>(grantAddress), grantBytes, sizeof(grantBytes))) return fail("resource-credit-signature");
     HANDLE file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (file == INVALID_HANDLE_VALUE) return 0;
+    if (file == INVALID_HANDLE_VALUE) return fail("configuration-open");
     const DWORD size = GetFileSize(file, nullptr);
-    if (size < 12 || size > 16 + 1024 * 508) { CloseHandle(file); return 0; }
+    if (size < 12 || size > 16 + 1024 * (1316 + 52 + 64 * 424)) { CloseHandle(file); return fail("configuration-size"); }
     std::vector<uint8_t> bytes(size);
     DWORD read = 0;
     const bool loaded = ReadFile(file, bytes.data(), size, &read, nullptr) && read == size;
     CloseHandle(file);
     std::vector<edmw::UnitEffectRule> unitRules;
     std::vector<edmw::NativeAbilityBinding> abilities;
-    if (!loaded || !edmw::ReadRuntimeRules(bytes, rules, unitRules, abilities)) return 0;
-    wchar_t logPath[32768];
-    if (swprintf_s(logPath, L"%s.log", path) > 0)
-        trace = CreateFileW(logPath, GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (!loaded || !edmw::ReadRuntimeRules(bytes, rules, unitRules, abilities)) return fail("configuration-parse");
+    edmw::TraceEffect("configuration-loaded research=%u units=%u abilities=%u", static_cast<uint32_t>(rules.size()),
+        static_cast<uint32_t>(unitRules.size()), static_cast<uint32_t>(abilities.size()));
     DWORD oldProtect;
-    if (!VirtualProtect(reinterpret_cast<void*>(hookAddress), 5, PAGE_EXECUTE_READWRITE, &oldProtect)) return 0;
+    if (!VirtualProtect(reinterpret_cast<void*>(hookAddress), 5, PAGE_EXECUTE_READWRITE, &oldProtect)) return fail("research-hook-protection");
     uint8_t patch[5] = { 0xE8 };
     const auto displacement = static_cast<int32_t>(reinterpret_cast<uintptr_t>(&ResearchHook) - hookAddress - 5);
     memcpy(patch + 1, &displacement, 4);
     memcpy(reinterpret_cast<void*>(hookAddress), patch, 5);
     DWORD ignored;
     if (!VirtualProtect(reinterpret_cast<void*>(hookAddress), 5, oldProtect, &ignored) ||
-        !FlushInstructionCache(GetCurrentProcess(), reinterpret_cast<void*>(hookAddress), 5)) return 0;
-    if (!edmw::InstallUnitEffects(unitRules) || !edmw::InstallNativeAbilities(abilities)) return 0;
+        !FlushInstructionCache(GetCurrentProcess(), reinterpret_cast<void*>(hookAddress), 5)) return fail("research-hook-commit");
+    if (!edmw::InstallUnitEffects(unitRules)) return fail("unit-effects");
+    edmw::TraceEffect("unit-effects-installed");
+    if (!edmw::InstallNativeAbilities(abilities)) return fail("ability-bindings");
+    edmw::TraceEffect("ability-bindings-installed");
+    if (std::any_of(unitRules.begin(), unitRules.end(), [](const auto& rule) {
+        return rule.trigger != edmw::UnitEffectTrigger::Activated;
+    }) && !edmw::InstallUnitEffectModsPanel()) return fail("unit-information");
+    edmw::TraceEffect("unit-information-installed");
     initialized = true;
     if (trace != INVALID_HANDLE_VALUE) {
         constexpr char message[] = "EDMW runtime effects initialized (prototype)\r\n";

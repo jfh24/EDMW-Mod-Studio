@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.3.0 — 2026-10-21
+
+See the [release notes](docs/releases/v1.3.0.md) for compatibility and verification scope.
+
+- Enabled compatible civilization edits to run together, with automatic ability-command reassignment, support for older installed edits, and selective uninstall.
+- Added named **Merge with…** and **Unmerge** actions on Home, including LAN/Friends sharing with recoverable component packages.
+- Added ownership transfer, unit/building transformation, spawning, instant abilities, proximity delays and recipient limits, and resource activation costs.
+- Added proximity-granted toggle abilities for multiple recipient types, plus named effect descriptions and toggle states in the existing unit tooltip.
+- Fixed action completion and erroneous refunds, instant-ability startup, and effective attack-range modifiers. Expanded offline installation, sharing, rollback, and recovery checks.
+- Prevented native installation-rule tests from requesting Windows administrator access during builds.
+
 ## 1.2.1 — 2026-10-15
 
 See the [release notes](docs/releases/v1.2.1.md) for usage, compatibility, and verification scope.

@@ -15,8 +15,27 @@ public static class CivilizationLanPackageReview
     {
         try
         {
-            var issues = CivilizationPackageManager.Review(incoming, gamePath);
+            var issues = incoming.Components.Count == 0 && CivilizationPackageManager.IsInstalledAndVerified(incoming, gamePath)
+                ? [] : CivilizationPackageManager.Review(incoming, gamePath);
             if (issues.Count != 0) return new(null, issues);
+            if (incoming.Components.Count > 0)
+            {
+                var components = new List<CivilizationInstallerPackage>();
+                foreach (var component in incoming.Components)
+                {
+                    var reviewed = Prepare(component, gamePath);
+                    if (reviewed.Issues.Count != 0) return new(null, reviewed.Issues);
+                    components.Add(reviewed.Package!);
+                }
+                var merged = new CivilizationInstallerPackage
+                {
+                    FormatVersion = 2, PackageId = incoming.PackageId, ProjectName = incoming.ProjectName,
+                    ProjectJson = incoming.ProjectJson, Components = components,
+                    Changes = components.SelectMany(component => component.Changes).ToList()
+                };
+                CivilizationInstallerPackage.Validate(merged);
+                return new(merged, []);
+            }
             var project = CivilizationEditProject.Deserialize(incoming.ProjectJson);
             var catalog = CivilizationGameCatalog.Load(gamePath);
             var gameData = new CivilizationGameData(gamePath, catalog);
@@ -34,15 +53,16 @@ public static class CivilizationLanPackageReview
                     entity.Name = gameData.GetDisplayName(entity);
                 }
             }
-            var canonical = CivilizationInstallerPackage.Create(project, gamePath);
+            var canonical = CivilizationInstallerPackage.Create(project, gamePath, incoming);
             PreserveReviewedLegacyFingerprints(incoming, canonical, gamePath);
-            if (!SameFiles(incoming.Files, canonical.Files) ||
+            if (!CivilizationPackageReviewSources.SameEdits(incoming, canonical) ||
                 !SameHashes(incoming.Dependencies, canonical.Dependencies) ||
                 !SameHashes(incoming.AssetDependencies, canonical.AssetDependencies) ||
                 !incoming.OwnerTargets.ToHashSet(StringComparer.Ordinal).SetEquals(canonical.OwnerTargets) ||
                 !SameModels(incoming.ModelReferences, canonical.ModelReferences))
                 return new(null, ["The received edits do not match their project. Installation blocked."]);
             canonical.PackageId = incoming.PackageId;
+            canonical.Files = incoming.Files;
             return new(canonical, []);
         }
         catch (Exception error) when (error is IOException or InvalidDataException or ArgumentException or

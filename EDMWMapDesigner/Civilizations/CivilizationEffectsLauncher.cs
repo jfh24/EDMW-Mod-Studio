@@ -20,7 +20,7 @@ internal static class CivilizationEffectsLauncher
             using (var gameFile = File.OpenRead(executable))
                 if (Convert.ToHexString(SHA256.HashData(gameFile)) != CivilizationGameInstaller.SupportedExecutableSha256)
                     throw new InvalidDataException("Runtime effects require the supported EDMW executable.");
-            if (configuration.Units.Any(rule => rule.Trigger == CivilizationUnitEffectTrigger.Activated))
+            if (configuration.Units.Any(rule => rule.Trigger != CivilizationUnitEffectTrigger.Proximity))
                 CivilizationUnitEffectBindings.ValidateNativeTechnologyGroups(
                     File.ReadAllBytes(Path.Combine(gamePath, "Data", "db", "dbtechtree.dat")));
             // A unique immutable snapshot per launch also keeps the exact rules and
@@ -50,7 +50,8 @@ internal static class CivilizationEffectsLauncher
             // before the game was resumed, not merely that a helper was started.
             var error = launcher.StandardError.ReadToEnd();
             launcher.WaitForExit();
-            if (launcher.ExitCode != 0) throw new InvalidOperationException(error.Trim());
+            if (launcher.ExitCode != 0) throw new InvalidOperationException(error.Trim() +
+                Environment.NewLine + "Diagnostics: " + config + ".log");
         });
     }
 }

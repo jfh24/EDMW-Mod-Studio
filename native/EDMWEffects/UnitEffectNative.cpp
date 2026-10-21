@@ -1,6 +1,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <cstring>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include "UnitEffectNative.h"
@@ -8,6 +9,13 @@
 #include "UnitEffectExtras.h"
 #include "UnitEffectProduction.h"
 #include "EffectTrace.h"
+#include "NativeAbilityBindings.h"
+#include "UnitEffectDescriptions.h"
+#include "UnitEffectModsPanel.h"
+#include "UnitEffectActionsNative.h"
+#include "UnitEffectSpawnNative.h"
+#include "UnitEffectAbilityCostsNative.h"
+#include "UnitEffectInstallRules.h"
 
 namespace {
 constexpr uintptr_t complexUnitVtable = 0x007F6C48;
@@ -66,7 +74,25 @@ std::map<void*, uint32_t> unitIdentities;
 uint64_t nextGeneration = 1;
 uint32_t lastSimulationMilliseconds = 0;
 std::set<uint32_t> relevantObjects;
+std::set<edmw::UnitEffectId> conditionalEffects;
+std::map<uint32_t, edmw::UnitEffectId> grantedTechnologies;
+std::map<edmw::UnitEffectId, std::string> grantedCaptions;
 std::recursive_mutex cacheMutex;
+struct PendingActionEvent {
+    edmw::UnitEffectActionEvent event;
+    size_t nextAction = 0;
+    void* actor = nullptr;
+    edmw::UnitEffectSnapshot identity;
+    bool started = false;
+    bool succeeded = false;
+};
+struct PendingActionEntry {
+    edmw::UnitEffectId effect;
+    void* actor;
+    edmw::UnitEffectSnapshot identity;
+};
+std::deque<PendingActionEvent> actionEvents;
+std::vector<PendingActionEntry> actionEntries;
 
 template<class T> T Read(const void* pointer, size_t offset) {
     T value;
@@ -156,6 +182,25 @@ void ProjectStatistics(void* unit, uint32_t id, bool traceApplication = false) {
         const auto stat = static_cast<edmw::UnitEffectStat>(value);
         const auto amount = runtime->Bonus(id, stat);
         if (amount && candidate->values.Apply(stat, amount)) changed = true;
+    }
+    if (!grantedTechnologies.empty()) {
+        size_t count = 0;
+        const auto firstAction = Read<uintptr_t>(prototype, 0x38);
+        if (edmw::NativeAbilityVectorCount(firstAction, Read<uintptr_t>(prototype, 0x3C), Read<uintptr_t>(prototype, 0x40),
+            4, 4096, count)) {
+            std::vector<uint32_t> actions(count);
+            if (count) memcpy(actions.data(), reinterpret_cast<const void*>(firstAction), count * 4);
+            const auto tree = Read<void*>(owner, 0xD58);
+            const edmw::UnitEffectSnapshot actor{ id, Read<uint32_t>(owner, 0x478),
+                tree ? edmw::NativeCivilizationToWireId(Read<uint32_t>(tree, 0x16D4)) : 0u, object,
+                Read<int32_t>(unit, 0x1C), Read<int32_t>(unit, 0x20), Read<int32_t>(unit, 0x90) > 0,
+                generations.count(unit) ? generations.at(unit) : 0u };
+            auto visible = edmw::FilterGrantedAbilityActions(actions, grantedTechnologies, *runtime, actor);
+            if (visible != actions) {
+                candidate->values.ReplaceActions(std::move(visible));
+                changed = true;
+            }
+        }
     }
     if (!changed) {
         RestoreProjection(unit);
@@ -337,6 +382,180 @@ float __fastcall ReadDisplayMovement(void* unit, void*) {
     return AdjustMovement(unit, originalDisplayMovementGetter(unit));
 }
 
+void* ResolveActionActor(const edmw::UnitEffectSnapshot& identity) {
+    using Find = void*(__thiscall*)(void*, uint32_t);
+    const auto unit = reinterpret_cast<Find>(0x005A3D5C)(reinterpret_cast<void*>(0x0099EE58), identity.id);
+    if (!unit || Read<uintptr_t>(unit, 0) != complexUnitVtable || Read<uint32_t>(unit, 0x24) != identity.id ||
+        Read<int32_t>(unit, 0x90) <= 0) return nullptr;
+    const auto owner = Read<void*>(unit, 0x18), prototype = Read<void*>(unit, 0x64);
+    const auto generation = generations.find(unit);
+    return owner && prototype && Read<uint32_t>(owner, 0x478) == identity.player &&
+        Read<uint32_t>(prototype, 0x1AC) == identity.object && generation != generations.end() && generation->second == identity.generation ? unit : nullptr;
+}
+
+void* ActionOwner(uint32_t index) {
+    const auto count = *reinterpret_cast<const uint32_t*>(0x0099EF30);
+    if (!count || count > 16 || index >= count) return nullptr;
+    const auto owner = reinterpret_cast<void* const*>(0x0099EED8)[index];
+    return owner && Read<uint32_t>(owner, 0x478) == index ? owner : nullptr;
+}
+
+edmw::UnitEffectSnapshot ActionSnapshot(void* unit) {
+    const auto owner = Read<void*>(unit, 0x18), prototype = Read<void*>(unit, 0x64);
+    const auto tree = owner ? Read<void*>(owner, 0xD58) : nullptr;
+    return { Read<uint32_t>(unit, 0x24), owner ? Read<uint32_t>(owner, 0x478) : UINT32_MAX,
+        tree ? edmw::NativeCivilizationToWireId(Read<uint32_t>(tree, 0x16D4)) : 0u,
+        prototype ? Read<uint32_t>(prototype, 0x1AC) : UINT32_MAX, Read<int32_t>(unit, 0x1C), Read<int32_t>(unit, 0x20),
+        Read<int32_t>(unit, 0x90) > 0, Generation(unit) };
+}
+
+bool PrepareActionReplacement(void* unit) {
+    // Native conversion/replacement copies canonical gameplay state and runs
+    // its own full teardown. Suspend borrowed overlays before that lifecycle.
+    RestoreProjection(unit);
+    if (!edmw::SuspendProductionEffects(unit)) return false;
+    projectedUnits.erase(unit);
+    if (cachedSight.find(unit) != cachedSight.end()) {
+        reinterpret_cast<SightRefresh>(0x006C29E3)(unit);
+        cachedSight.erase(unit);
+        reinterpret_cast<SightRefresh>(0x006C2891)(unit);
+    }
+    cachedMovement.erase(unit);
+    if (const auto model = modelScales.find(unit); model != modelScales.end()) {
+        Put(unit, 0x348, model->second.Update(Read<float>(unit, 0x348), 0)); modelScales.erase(model);
+    }
+    if (const auto resource = resourceAmounts.find(unit); resource != resourceAmounts.end()) {
+        Put(unit, 0x94, resource->second.Update(Read<int32_t>(unit, 0x94), 0)); resourceAmounts.erase(resource);
+    }
+    healthFractions.erase(unit);
+    edmw::ForgetAdditionalUnitEffects(unit);
+    // Retain runtime entry/activation identity on a failed native call. The
+    // verified destructor invalidates it when replacement actually succeeds.
+    return true;
+}
+
+bool LiveActionResult(void* unit) {
+    if (!unit || Read<uintptr_t>(unit, 0) != complexUnitVtable || Read<void*>(unit, 0x68) != unit ||
+        Read<int32_t>(unit, 0x90) <= 0) return false;
+    const auto owner = Read<void*>(unit, 0x18), prototype = Read<void*>(unit, 0x64);
+    if (!owner || !prototype || ActionOwner(Read<uint32_t>(owner, 0x478)) != owner) return false;
+    // Native creation returns a completed actor before the world processes its
+    // registration queue. Its ID can still be UINT32_MAX here. Global lookup
+    // cannot decide whether the lifecycle succeeded or whether to refund it.
+    return Read<uint32_t>(prototype, 0x1AC) < 2049;
+}
+
+bool RegisteredActionActor(void* unit) {
+    if (!LiveActionResult(unit)) return false;
+    const auto id = Read<uint32_t>(unit, 0x24);
+    using Find = void*(__thiscall*)(void*, uint32_t);
+    return id != UINT32_MAX && reinterpret_cast<Find>(0x005A3D5C)(reinterpret_cast<void*>(0x0099EE58), id) == unit;
+}
+
+void* RetainedActionActor(void* unit, const edmw::UnitEffectSnapshot& identity) {
+    // Check the tracked generation before touching memory: a destructor or pool
+    // checkout invalidates it even if the native pointer is reused immediately.
+    const auto generation = generations.find(unit);
+    if (generation == generations.end() || generation->second != identity.generation || !LiveActionResult(unit)) return nullptr;
+    return edmw::SamePendingUnitEffectActor(identity, ActionSnapshot(unit)) ? unit : nullptr;
+}
+
+void RetainActionResult(const edmw::UnitEffectId& effect, void* unit) {
+    actionEntries.push_back({ effect, unit, ActionSnapshot(unit) });
+}
+
+void RegisterActionEntries() {
+    for (auto entry = actionEntries.begin(); entry != actionEntries.end();) {
+        const auto unit = RetainedActionActor(entry->actor, entry->identity);
+        if (!unit) entry = actionEntries.erase(entry);
+        else if (RegisteredActionActor(unit)) {
+            runtime->RetainActionEntry(entry->effect, ActionSnapshot(unit));
+            entry = actionEntries.erase(entry);
+        } else ++entry;
+    }
+}
+
+void ApplyActionEvents() {
+    const auto events = runtime->TakeActions();
+    for (const auto& event : events) actionEvents.push_back({ event });
+    uint32_t budget = 128;
+    size_t scheduled = actionEvents.size();
+    while (!actionEvents.empty() && scheduled--) {
+        const auto& next = actionEvents.front();
+        uint32_t work = 0;
+        for (size_t index = next.nextAction; index < next.event.actions.size(); ++index) {
+            const auto& action = next.event.actions[index];
+            work += action.kind == edmw::UnitEffectActionKind::Spawn ? action.count : 1u;
+        }
+        work = (std::max)(1u, work);
+        if (work > budget) break;
+        budget -= work;
+        auto pending = std::move(actionEvents.front());
+        actionEvents.pop_front();
+        const auto& event = pending.event;
+        auto unit = pending.started ? RetainedActionActor(pending.actor, pending.identity) : ResolveActionActor(event.target);
+        if (!pending.started && unit) {
+            pending.started = true;
+            pending.actor = unit;
+            pending.identity = ActionSnapshot(unit);
+        }
+        bool waiting = false;
+        for (; unit && pending.nextAction < event.actions.size(); ++pending.nextAction) {
+            // A later output may require the replacement's native world ID.
+            // Resume once registration has run, without replaying earlier
+            // outputs, refunding a successful action, or paying a second time.
+            if (!RegisteredActionActor(unit)) { waiting = true; break; }
+            const auto& action = event.actions[pending.nextAction];
+            const auto owner = action.owner == edmw::UnitEffectOwner::AffectedPlayer ? Read<void*>(unit, 0x18) :
+                ActionOwner(action.owner == edmw::UnitEffectOwner::SpecificPlayer ? action.playerSlot : event.source.player);
+            const auto id = Read<uint32_t>(unit, 0x24);
+            if (action.kind == edmw::UnitEffectActionKind::Spawn) {
+                if (!owner) continue;
+                const auto beforeSpawn = ActionSnapshot(unit);
+                const auto centerX = Read<int32_t>(unit, 0x1C), centerY = Read<int32_t>(unit, 0x20);
+                uint32_t created = 0;
+                for (uint32_t index = 0; index < action.count; ++index) {
+                    const auto spawned = edmw::SpawnEffectObject(owner, action.object, centerX, centerY);
+                    if (!LiveActionResult(spawned)) break;
+                    RetainActionResult(event.effect, spawned);
+                    ++created;
+                }
+                pending.succeeded |= created != 0;
+                edmw::TraceEffect("effect-action unit=%u kind=spawn object=%u requested=%u created=%u", id, action.object, action.count, created);
+                unit = RetainedActionActor(unit, beforeSpawn);
+                if (!unit) break;
+                continue;
+            }
+            if ((action.kind == edmw::UnitEffectActionKind::OwnershipTransfer && (!owner || Read<void*>(unit, 0x18) == owner)) ||
+                (action.kind == edmw::UnitEffectActionKind::Transform && Read<uint32_t>(Read<void*>(unit, 0x64), 0x1AC) == action.object)) continue;
+            const auto before = ActionSnapshot(unit);
+            if (!PrepareActionReplacement(unit)) {
+                edmw::TraceEffect("effect-action unit=%u rejected=production-state", id);
+                continue;
+            }
+            const auto replacement = action.kind == edmw::UnitEffectActionKind::OwnershipTransfer ?
+                edmw::TransferEffectUnit(unit, owner) : edmw::TransformEffectUnit(unit, action.object);
+            edmw::TraceEffect("effect-action unit=%u kind=%u object=%u succeeded=%u", id, static_cast<uint32_t>(action.kind), action.object, replacement ? 1u : 0u);
+            if (LiveActionResult(replacement) && (action.kind == edmw::UnitEffectActionKind::OwnershipTransfer ?
+                Read<void*>(replacement, 0x18) == owner : Read<uint32_t>(Read<void*>(replacement, 0x64), 0x1AC) == action.object)) {
+                unit = replacement;
+                pending.succeeded = true;
+                pending.actor = unit;
+                pending.identity = ActionSnapshot(unit);
+                RetainActionResult(event.effect, unit);
+            } else {
+                unit = RetainedActionActor(unit, before);
+                if (!unit) break;
+            }
+        }
+        if (waiting) { actionEvents.push_back(std::move(pending)); continue; }
+        runtime->CommitAction(event, pending.succeeded || event.hasStatOutputs, pending.succeeded);
+        edmw::TraceEffect("effect-action completed unit=%u succeeded=%u refund=%u", event.target.id,
+            pending.succeeded ? 1u : 0u, !pending.succeeded && !event.hasStatOutputs ? 1u : 0u);
+        if (!pending.succeeded && !event.hasStatOutputs) edmw::RefundEffectCost(ActionOwner(event.target.player), event.resourceCosts, 1);
+    }
+}
+
 void EvaluateUnits(void* physics) {
     const std::lock_guard<std::recursive_mutex> guard(cacheMutex);
     edmw::BeginAdditionalUnitEffectFrame();
@@ -378,7 +597,9 @@ void EvaluateUnits(void* physics) {
         }
     }
     const auto time = Read<uint32_t>(physics, 0xE8);
+    if (time < lastSimulationMilliseconds) { actionEvents.clear(); actionEntries.clear(); }
     lastSimulationMilliseconds = time;
+    RegisterActionEntries();
     const auto changes = runtime->Evaluate(units, time);
     std::set<uint32_t> changedUnits;
     for (const auto& change : changes) {
@@ -428,11 +649,13 @@ void EvaluateUnits(void* physics) {
         edmw::UpdateAdditionalUnitEffects(unit, entry.first, time, *runtime);
     }
     edmw::EndAdditionalUnitEffectFrame();
+    ApplyActionEvents();
 }
 
 int __fastcall UpdateUnits(void* physics, void*) {
     const int result = reinterpret_cast<PhysicsUpdate>(tickFunctionAddress)(physics);
     EvaluateUnits(physics);
+    edmw::UpdateUnitEffectModsPanel();
     return result;
 }
 
@@ -471,35 +694,40 @@ void* MakeTrampoline(uintptr_t address, const uint8_t* expected, size_t size) {
 }
 
 bool edmw::InstallUnitEffects(const std::vector<UnitEffectRule>& rules) {
+    TraceEffect("unit-install begin rules=%u", static_cast<uint32_t>(rules.size()));
+    const auto fail = [](const char* stage) {
+        TraceEffect("unit-install failed stage=%s", stage);
+        return false;
+    };
     if (rules.empty()) return true;
-    if (runtime || rules.size() > 1024) return false;
-    std::set<UnitEffectId> identities;
-    for (const auto& rule : rules) {
-        if (rule.sourceObject >= 100000 || rule.targetObject >= 100000 || rule.civilization < 4 || rule.civilization > 12 ||
-            !ValidUnitEffectOutputs(rule) ||
-            std::all_of(rule.id.begin(), rule.id.end(), [](uint8_t value) { return value == 0; }) ||
-            !identities.insert(rule.id).second) return false;
-        if (rule.trigger == UnitEffectTrigger::Proximity) {
-            if (rule.radiusTiles < 1 || rule.radiusTiles > 64) return false;
-        } else if (rule.trigger == UnitEffectTrigger::Activated) {
-            if (rule.radiusTiles || rule.sourceObject != rule.targetObject) return false;
-            if (rule.activation == UnitEffectActivation::Toggle) {
-                if (rule.durationMilliseconds) return false;
-            } else if (rule.activation == UnitEffectActivation::Timed) {
-                if (rule.durationMilliseconds < 1000 || rule.durationMilliseconds > 3600000) return false;
-            } else return false;
-        } else return false;
+    if (std::any_of(rules.begin(), rules.end(), [](const auto& rule) { return !rule.actions.empty(); })) {
+        if (!ValidateNativeUnitActions()) return fail("native-actions-signatures");
+        if (!ValidateNativeEffectSpawning()) return fail("native-spawning-signatures");
     }
-    if (memcmp(reinterpret_cast<const void*>(getterAddress), getterBytes, sizeof(getterBytes)) ||
-        memcmp(reinterpret_cast<const void*>(scalarModifierAddress), scalarModifierBytes, sizeof(scalarModifierBytes)) ||
-        memcmp(reinterpret_cast<const void*>(sharedModifierAddress), sharedModifierBytes, sizeof(sharedModifierBytes)) ||
-        memcmp(reinterpret_cast<const void*>(movementGetterAddress), movementGetterBytes, sizeof(movementGetterBytes)) ||
-        memcmp(reinterpret_cast<const void*>(displayMovementGetterAddress), displayMovementGetterBytes, sizeof(displayMovementGetterBytes)) ||
-        memcmp(reinterpret_cast<const void*>(constructorAddress), constructorBytes, sizeof(constructorBytes)) ||
-        memcmp(reinterpret_cast<const void*>(destructorAddress), destructorBytes, sizeof(destructorBytes)) ||
-        memcmp(reinterpret_cast<const void*>(poolCheckoutAddress), poolCheckoutBytes, sizeof(poolCheckoutBytes)) ||
-        memcmp(reinterpret_cast<const void*>(tickCallAddress), tickBytes, sizeof(tickBytes)) ||
-        !ValidateAdditionalUnitEffectBindings()) return false;
+    if (std::any_of(rules.begin(), rules.end(), [](const auto& rule) {
+        return std::any_of(rule.resourceCosts.begin(), rule.resourceCosts.end(), [](uint32_t cost) { return cost != 0; });
+    }) && !ValidateNativeEffectCosts()) return fail("native-cost-signatures");
+    if (runtime || rules.size() > 1024) return fail("runtime-state-or-rule-count");
+    std::set<UnitEffectId> identities;
+    uint32_t ruleIndex = 0;
+    for (const auto& rule : rules) {
+        TraceEffect("unit-install rule index=%u source=%u target=%u trigger=%u activation=%u actions=%u duration=%u radius=%u grant=%u",
+            ruleIndex++, rule.sourceObject, rule.targetObject, static_cast<uint32_t>(rule.trigger),
+            static_cast<uint32_t>(rule.activation), static_cast<uint32_t>(rule.actions.size()),
+            rule.durationMilliseconds, rule.radiusTiles, rule.grantFamilyTechnology);
+        if (!ValidInstalledUnitEffectRule(rule)) return fail("rule-contract");
+        if (!identities.insert(rule.id).second) return fail("rule-duplicate-identity");
+    }
+    if (memcmp(reinterpret_cast<const void*>(getterAddress), getterBytes, sizeof(getterBytes))) return fail("sight-signature");
+    if (memcmp(reinterpret_cast<const void*>(scalarModifierAddress), scalarModifierBytes, sizeof(scalarModifierBytes))) return fail("scalar-signature");
+    if (memcmp(reinterpret_cast<const void*>(sharedModifierAddress), sharedModifierBytes, sizeof(sharedModifierBytes))) return fail("shared-stat-signature");
+    if (memcmp(reinterpret_cast<const void*>(movementGetterAddress), movementGetterBytes, sizeof(movementGetterBytes))) return fail("movement-signature");
+    if (memcmp(reinterpret_cast<const void*>(displayMovementGetterAddress), displayMovementGetterBytes, sizeof(displayMovementGetterBytes))) return fail("display-movement-signature");
+    if (memcmp(reinterpret_cast<const void*>(constructorAddress), constructorBytes, sizeof(constructorBytes))) return fail("constructor-signature");
+    if (memcmp(reinterpret_cast<const void*>(destructorAddress), destructorBytes, sizeof(destructorBytes))) return fail("destructor-signature");
+    if (memcmp(reinterpret_cast<const void*>(poolCheckoutAddress), poolCheckoutBytes, sizeof(poolCheckoutBytes))) return fail("pool-signature");
+    if (memcmp(reinterpret_cast<const void*>(tickCallAddress), tickBytes, sizeof(tickBytes))) return fail("tick-signature");
+    if (!ValidateAdditionalUnitEffectBindings()) return fail("additional-signatures");
     originalGetter = reinterpret_cast<SightGetter>(MakeTrampoline(getterAddress, getterBytes, sizeof(getterBytes)));
     originalScalarModifier = reinterpret_cast<ScalarModifier>(MakeTrampoline(scalarModifierAddress, scalarModifierBytes, sizeof(scalarModifierBytes)));
     originalSharedModifier = reinterpret_cast<SharedModifier>(MakeTrampoline(sharedModifierAddress, sharedModifierBytes, sizeof(sharedModifierBytes)));
@@ -509,24 +737,72 @@ bool edmw::InstallUnitEffects(const std::vector<UnitEffectRule>& rules) {
     originalDestructor = reinterpret_cast<Destructor>(MakeTrampoline(destructorAddress, destructorBytes, sizeof(destructorBytes)));
     originalPoolCheckout = reinterpret_cast<Constructor>(MakeTrampoline(poolCheckoutAddress, poolCheckoutBytes, sizeof(poolCheckoutBytes)));
     if (!originalGetter || !originalScalarModifier || !originalSharedModifier || !originalMovementGetter || !originalDisplayMovementGetter ||
-        !originalConstructor || !originalDestructor || !originalPoolCheckout) return false;
+        !originalConstructor || !originalDestructor || !originalPoolCheckout) {
+        TraceEffect("unit-install trampoline sight=%u scalar=%u shared=%u movement=%u display=%u constructor=%u destructor=%u pool=%u",
+            originalGetter != nullptr, originalScalarModifier != nullptr, originalSharedModifier != nullptr,
+            originalMovementGetter != nullptr, originalDisplayMovementGetter != nullptr, originalConstructor != nullptr,
+            originalDestructor != nullptr, originalPoolCheckout != nullptr);
+        return fail("trampoline-allocation-or-protection");
+    }
+    TraceEffect("unit-install signatures-and-trampolines-ready");
     runtime = std::make_unique<edmw::UnitEffectRuntime>(rules);
     for (const auto& rule : rules) {
         relevantObjects.insert(rule.sourceObject);
         relevantObjects.insert(rule.targetObject);
+        if (rule.trigger == UnitEffectTrigger::ProximityAbility) conditionalEffects.insert(rule.id);
     }
     // Initialization failure terminates the still-suspended owned game. Thus a
     // partial patch set can never be resumed by the launcher.
-    return InstallProductionEffects(rules) && InstallAdditionalUnitEffects(rules) &&
-        WriteBranch(constructorAddress, reinterpret_cast<const void*>(&ConstructUnit), sizeof(constructorBytes), 0xE9) &&
-        WriteBranch(destructorAddress, reinterpret_cast<const void*>(&DestroyUnit), sizeof(destructorBytes), 0xE9) &&
-        WriteBranch(poolCheckoutAddress, reinterpret_cast<const void*>(&CheckoutUnit), sizeof(poolCheckoutBytes), 0xE9) &&
-        WriteBranch(getterAddress, reinterpret_cast<const void*>(&ReadSight), sizeof(getterBytes), 0xE9) &&
-        WriteBranch(scalarModifierAddress, reinterpret_cast<const void*>(&ModifyNativeScalar), sizeof(scalarModifierBytes), 0xE9) &&
-        WriteBranch(sharedModifierAddress, reinterpret_cast<const void*>(&ModifySharedStatistics), sizeof(sharedModifierBytes), 0xE9) &&
-        WriteBranch(movementGetterAddress, reinterpret_cast<const void*>(&ReadMovement), sizeof(movementGetterBytes), 0xE9) &&
-        WriteBranch(displayMovementGetterAddress, reinterpret_cast<const void*>(&ReadDisplayMovement), sizeof(displayMovementGetterBytes), 0xE9) &&
-        WriteBranch(tickCallAddress, reinterpret_cast<const void*>(&UpdateUnits), sizeof(tickBytes), 0xE8);
+    if (!InstallProductionEffects(rules)) return fail("production-install");
+    if (!InstallAdditionalUnitEffects(rules)) return fail("additional-install");
+    if (!WriteBranch(constructorAddress, reinterpret_cast<const void*>(&ConstructUnit), sizeof(constructorBytes), 0xE9)) return fail("constructor-patch");
+    if (!WriteBranch(destructorAddress, reinterpret_cast<const void*>(&DestroyUnit), sizeof(destructorBytes), 0xE9)) return fail("destructor-patch");
+    if (!WriteBranch(poolCheckoutAddress, reinterpret_cast<const void*>(&CheckoutUnit), sizeof(poolCheckoutBytes), 0xE9)) return fail("pool-patch");
+    if (!WriteBranch(getterAddress, reinterpret_cast<const void*>(&ReadSight), sizeof(getterBytes), 0xE9)) return fail("sight-patch");
+    if (!WriteBranch(scalarModifierAddress, reinterpret_cast<const void*>(&ModifyNativeScalar), sizeof(scalarModifierBytes), 0xE9)) return fail("scalar-patch");
+    if (!WriteBranch(sharedModifierAddress, reinterpret_cast<const void*>(&ModifySharedStatistics), sizeof(sharedModifierBytes), 0xE9)) return fail("shared-stat-patch");
+    if (!WriteBranch(movementGetterAddress, reinterpret_cast<const void*>(&ReadMovement), sizeof(movementGetterBytes), 0xE9)) return fail("movement-patch");
+    if (!WriteBranch(displayMovementGetterAddress, reinterpret_cast<const void*>(&ReadDisplayMovement), sizeof(displayMovementGetterBytes), 0xE9)) return fail("display-movement-patch");
+    if (!WriteBranch(tickCallAddress, reinterpret_cast<const void*>(&UpdateUnits), sizeof(tickBytes), 0xE8)) return fail("tick-patch");
+    TraceEffect("unit-install complete");
+    return true;
+}
+
+bool edmw::RegisterGrantedUnitAbility(const UnitEffectId& effect, uint32_t technology, const std::string& caption) {
+    if (!runtime || conditionalEffects.find(effect) == conditionalEffects.end() || technology < 10000 || technology > 14999)
+        return false;
+    if (!grantedTechnologies.emplace(technology, effect).second) return false;
+    grantedCaptions.emplace(effect, caption);
+    return true;
+}
+
+std::string edmw::DescribeUnitProximityEffects(uint32_t unitId) {
+    if (!runtime || unitId == UINT32_MAX) return "";
+    const std::lock_guard<std::recursive_mutex> guard(cacheMutex);
+    const auto count = *reinterpret_cast<const uint32_t*>(0x0099EF30);
+    if (!count || count > 16) return "";
+    using FindUnit = void*(__thiscall*)(void*, uint32_t);
+    const auto actor = reinterpret_cast<FindUnit>(0x005A3D5C)(reinterpret_cast<void*>(0x0099EE58), unitId);
+    if (!actor || Read<uintptr_t>(actor, 0) != complexUnitVtable || Read<uint32_t>(actor, 0x24) != unitId ||
+        Read<int32_t>(actor, 0x90) <= 0) return "";
+    const auto owner = Read<void*>(actor, 0x18);
+    const auto prototype = Read<void*>(actor, 0x64);
+    if (!owner || !prototype) return "";
+    const auto player = Read<uint32_t>(owner, 0x478);
+    if (player >= count || reinterpret_cast<void* const*>(0x0099EED8)[player] != owner) return "";
+    const auto tree = Read<void*>(owner, 0xD58);
+    if (!tree) return "";
+    const UnitEffectSnapshot snapshot{ unitId, player, NativeCivilizationToWireId(Read<uint32_t>(tree, 0x16D4)),
+        Read<uint32_t>(prototype, 0x1AC), Read<int32_t>(actor, 0x1C), Read<int32_t>(actor, 0x20), true,
+        generations.count(actor) ? generations.at(actor) : 0u };
+    auto effects = runtime->ProximityEffects(snapshot);
+    for (auto provided : runtime->ProvidedProximityEffects(snapshot)) {
+        const auto received = std::find_if(effects.begin(), effects.end(), [&](const auto& item) { return item.rule.id == provided.rule.id; });
+        if (received == effects.end()) effects.push_back(std::move(provided));
+        else received->provides = true;
+    }
+    std::sort(effects.begin(), effects.end(), [](const auto& left, const auto& right) { return left.rule.id < right.rule.id; });
+    return DescribeProximityEffects(effects, grantedCaptions);
 }
 
 bool edmw::ActivateUnitEffect(const UnitEffectId& effect, void* actor, uint32_t expectedPlayer) {
@@ -534,6 +810,11 @@ bool edmw::ActivateUnitEffect(const UnitEffectId& effect, void* actor, uint32_t 
 }
 
 bool edmw::ActivateUnitEffects(const UnitEffectId& effect, const std::vector<void*>& actors, uint32_t expectedPlayer) {
+    return ActivateUnitEffectGroup({ effect }, actors, expectedPlayer);
+}
+
+bool edmw::ActivateUnitEffectGroup(const std::vector<UnitEffectId>& effects, const std::vector<void*>& actors, uint32_t expectedPlayer,
+    const std::array<uint32_t, 4>& resourceCosts) {
     if (!runtime || expectedPlayer > 15 || actors.empty() || actors.size() > 4096) return false;
     const std::lock_guard<std::recursive_mutex> guard(cacheMutex);
     std::vector<UnitEffectSnapshot> snapshots;
@@ -548,7 +829,13 @@ bool edmw::ActivateUnitEffects(const UnitEffectId& effect, const std::vector<voi
         snapshots.push_back({ Read<uint32_t>(actor, 0x24), expectedPlayer, NativeCivilizationToWireId(Read<uint32_t>(tree, 0x16D4)),
             Read<uint32_t>(prototype, 0x1AC), Read<int32_t>(actor, 0x1C), Read<int32_t>(actor, 0x20), true, Generation(actor) });
     }
-    const auto activated = runtime->ActivateGroup(effect, snapshots, expectedPlayer, lastSimulationMilliseconds);
+    const auto charged = runtime->CountActivationTargets(effects, snapshots, expectedPlayer, lastSimulationMilliseconds);
+    if (charged && std::any_of(resourceCosts.begin(), resourceCosts.end(), [](uint32_t cost) { return cost != 0; }) &&
+        !edmw::PayEffectCost(ActionOwner(expectedPlayer), resourceCosts, static_cast<uint32_t>(charged))) {
+        edmw::TraceEffect("effect-group rejected=insufficient-resources player=%u targets=%u", expectedPlayer, static_cast<uint32_t>(charged));
+        return false;
+    }
+    const auto activated = runtime->ActivateGroups(effects, snapshots, expectedPlayer, lastSimulationMilliseconds);
     edmw::TraceEffect("effect-group eligible=%u activated=%u player=%u simulation-ms=%u",
         static_cast<uint32_t>(snapshots.size()), static_cast<uint32_t>(activated), expectedPlayer, lastSimulationMilliseconds);
     return activated != 0;

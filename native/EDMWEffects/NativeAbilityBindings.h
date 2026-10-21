@@ -13,6 +13,9 @@ struct NativeAbilityBinding {
     std::string caption;
     std::string tooltip;
     bool enabled = true;
+    bool proximityGranted = false;
+    uint32_t grantFamilyTechnology = 0;
+    std::array<uint32_t, 4> resourceCosts{};
 };
 
 struct NativeAbilityNodeIdentity {
@@ -27,7 +30,19 @@ inline bool MatchesNativeAbilityNode(const NativeAbilityBinding* binding, uint32
 inline int32_t NativeAbilityMinimumAge(const NativeAbilityBinding* binding, uint32_t requestedTechnology,
     uint32_t nativeCivilization, const NativeAbilityNodeIdentity& identity, int32_t nativeMinimumAge) {
     return MatchesNativeAbilityNode(binding, requestedTechnology, identity) &&
-        binding->civilization == NativeCivilizationToWireId(nativeCivilization) ? 0 : nativeMinimumAge;
+        binding->civilization == NativeCivilizationToWireId(nativeCivilization)
+        ? (binding->proximityGranted && !binding->enabled ? INT32_MAX : 0) : nativeMinimumAge;
+}
+
+inline std::vector<uint32_t> FilterGrantedAbilityActions(const std::vector<uint32_t>& actions,
+    const std::map<uint32_t, UnitEffectId>& conditional, const UnitEffectRuntime& runtime,
+    const UnitEffectSnapshot& actor) {
+    std::vector<uint32_t> visible;
+    for (const auto technology : actions) {
+        const auto found = conditional.find(technology);
+        if (found == conditional.end() || runtime.Granted(found->second, actor)) visible.push_back(technology);
+    }
+    return visible;
 }
 inline uint8_t NativeAbilityGroupVisibilityByte(const NativeAbilityBinding* binding, uint32_t requestedTechnology,
     uint32_t nativeCivilization, const NativeAbilityNodeIdentity& identity, uint8_t nativeFlags) {
@@ -42,7 +57,8 @@ inline NativeAbilityActionKey NativeAbilityGroupActionKey(const NativeAbilityBin
     if (groupHud && nativeKey.command == 51 && nativeKey.parameter == 0 &&
         MatchesNativeAbilityNode(binding, requestedTechnology, identity) &&
         binding->civilization == NativeCivilizationToWireId(nativeCivilization))
-        nativeKey.parameter = binding->technology;
+        nativeKey.parameter = binding->proximityGranted && binding->grantFamilyTechnology >= 10000
+            ? binding->grantFamilyTechnology : binding->technology;
     return nativeKey;
 }
 
@@ -56,10 +72,13 @@ inline uint32_t NativeAbilityCommandPlayerIndex(uint32_t commandIdentity, uint32
 }
 
 inline std::vector<uint32_t> NativeAbilityActivationTargets(const NativeAbilityBinding& binding,
-    const UnitEffectSnapshot& anchor, const std::vector<UnitEffectSnapshot>& selection) {
+    const UnitEffectSnapshot& anchor, const std::vector<UnitEffectSnapshot>& selection,
+    const std::vector<uint32_t>& grantRecipientObjects = {}) {
     const auto eligible = [&](const UnitEffectSnapshot& unit) {
         return unit.id != UINT32_MAX && unit.alive && unit.player == anchor.player &&
-            unit.civilization == binding.civilization && unit.object == binding.sourceObject;
+            unit.civilization == binding.civilization && (binding.proximityGranted && !grantRecipientObjects.empty()
+                ? std::find(grantRecipientObjects.begin(), grantRecipientObjects.end(), unit.object) != grantRecipientObjects.end()
+                : unit.object == binding.sourceObject);
     };
     if (!binding.enabled || !eligible(anchor)) return {};
     std::set<uint32_t> targets{ anchor.id };

@@ -18,6 +18,22 @@ int main() {
     assert(ScaleProductionRemaining(7500, 30000, 15000) == 3750);
     assert(ScaleProductionRemaining(3750, 15000, 30000) == 7500);
     assert(ScaleProductionRemaining(7500, 30000, 30000) == 7500);
+    // A failed transform first suspends the accelerated countdown, then the
+    // next effect frame resumes it. Repeating cannot repeatedly halve progress.
+    int32_t acceleratedRemaining = 3750;
+    for (int repeat = 0; repeat < 100; ++repeat) {
+        const auto nativeRemaining = ScaleProductionRemaining(acceleratedRemaining, 15000, 30000);
+        assert(nativeRemaining == 7500);
+        acceleratedRemaining = ScaleProductionRemaining(nativeRemaining, 30000, 15000);
+        assert(acceleratedRemaining == 3750);
+    }
+    int32_t slowedRemaining = 15000;
+    for (int repeat = 0; repeat < 100; ++repeat) {
+        const auto nativeRemaining = ScaleProductionRemaining(slowedRemaining, 60000, 30000);
+        assert(nativeRemaining == 7500);
+        slowedRemaining = ScaleProductionRemaining(nativeRemaining, 30000, 60000);
+        assert(slowedRemaining == 15000);
+    }
     void* slot = nullptr;
     int first = 1, second = 2;
     { ProductionActorScope outer(slot, &first);

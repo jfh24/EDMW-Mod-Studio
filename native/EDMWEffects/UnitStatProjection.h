@@ -4,6 +4,8 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <limits>
+#include <vector>
 #include "UnitEffectStats.h"
 
 namespace edmw {
@@ -75,6 +77,17 @@ private:
 struct UnitStatProjection {
     std::array<uint8_t, 0x348> prototype{};
     std::array<uint8_t, 0x1C0> statistics{};
+    std::vector<uint32_t> actions;
+
+    void ReplaceActions(std::vector<uint32_t> replacement) {
+        actions = std::move(replacement);
+        // The verified x86 vector header has vtable/+4 begin/+8 end/+12 capacity.
+        // Only its pointer words are replaced; the native vtable remains borrowed.
+        const auto first = actions.empty() ? 0u : static_cast<uint32_t>(reinterpret_cast<uintptr_t>(actions.data()));
+        Put(prototype, 0x38, first);
+        Put(prototype, 0x3C, first + static_cast<uint32_t>(actions.size() * 4));
+        Put(prototype, 0x40, first + static_cast<uint32_t>(actions.size() * 4));
+    }
 
     void Refresh(const void* sourcePrototype, const void* sourceStatistics) {
         memcpy(prototype.data(), sourcePrototype, prototype.size());
@@ -117,7 +130,25 @@ struct UnitStatProjection {
         switch (stat) {
         case UnitEffectStat::Health: IntegerPair(0x254, 0x184, amount, 1); break;
         case UnitEffectStat::AttackDamage: IntegerFloatPair(0x208, 0x11C, amount); break;
-        case UnitEffectStat::AttackRange: AddFloat(prototype, 0xEC, amount); break;
+        case UnitEffectStat::AttackRange: {
+            // Native combat and HUD range are base * multiplier + additive.
+            // Some native modes use multiplier zero and put all range in the
+            // additive field, so changing the prototype base has no effect.
+            const auto base = Read<0x348, float>(prototype, 0xEC);
+            const auto multiplier = Read<0x1C0, float>(statistics, 0x144);
+            const auto additive = Read<0x1C0, float>(statistics, 0xE0);
+            if (!std::isfinite(base) || !std::isfinite(multiplier) || !std::isfinite(additive) || !std::isfinite(amount)) return false;
+            const auto scaled = static_cast<double>(base) * multiplier;
+            const auto adjusted = (std::max)(-scaled, static_cast<double>(additive) + amount);
+            const auto maximum = static_cast<double>((std::numeric_limits<float>::max)());
+            if (!std::isfinite(adjusted) || adjusted < -maximum || adjusted > maximum) return false;
+            auto next = static_cast<float>(adjusted);
+            // The native x87 expression can retain more precision than the
+            // stored float; round a clamped subtraction toward a nonnegative result.
+            if (scaled + next < 0.0) next = std::nextafter(next, (std::numeric_limits<float>::infinity)());
+            Put(statistics, 0xE0, next);
+            break;
+        }
         case UnitEffectStat::MinimumRange: AddFloat(prototype, 0xE4, amount); break;
         case UnitEffectStat::AttackInterval: IntegerPair(0x204, 0x178, amount * 1000.0f, 1); break;
         case UnitEffectStat::SplashRadius: FloatPair(0xF0, 0xE4, amount); break;

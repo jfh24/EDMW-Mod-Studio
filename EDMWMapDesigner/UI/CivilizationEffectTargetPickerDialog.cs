@@ -10,6 +10,7 @@ internal sealed class CivilizationEffectTargetPickerDialog : Form
     private readonly CivilizationCatalogItem[] _items;
     private readonly HashSet<int> _selected;
     private readonly HashSet<int> _valid;
+    private readonly bool _singleSelection;
     private readonly CivilizationGameIcons? _icons;
     private readonly IReadOnlyDictionary<int, CivilizationCatalogAvailability> _availability;
     private readonly TextBox _search = new() { Dock = DockStyle.Fill, PlaceholderText = "Search by name or object ID…", AccessibleName = "Search affected targets" };
@@ -29,16 +30,18 @@ internal sealed class CivilizationEffectTargetPickerDialog : Form
     internal IReadOnlyList<int> SelectedObjectIds => _selected.Order().ToArray();
 
     internal CivilizationEffectTargetPickerDialog(IReadOnlyList<CivilizationCatalogItem> items,
-        IEnumerable<int> selectedIds, CivilizationGameIcons? icons, CivilizationGameData? gameData)
+        IEnumerable<int> selectedIds, CivilizationGameIcons? icons, CivilizationGameData? gameData,
+        bool singleSelection = false, string? title = null)
     {
+        _singleSelection = singleSelection;
         _items = items.Where(item => item.Category is CivilizationCategory.Units or CivilizationCategory.Buildings)
             .OrderBy(item => item.Name, StringComparer.CurrentCultureIgnoreCase).ThenBy(item => item.SourceId).ToArray();
         _filtered = _items;
         _valid = _items.Select(item => item.SourceId).ToHashSet();
-        _selected = selectedIds.ToHashSet();
+        _selected = (singleSelection ? selectedIds.Take(1) : selectedIds).ToHashSet();
         _icons = icons;
         _availability = gameData?.GetTargetAvailability() ?? new Dictionary<int, CivilizationCatalogAvailability>();
-        Text = "Choose affected targets";
+        Text = title ?? (singleSelection ? "Choose a unit or building" : "Choose affected targets");
         StartPosition = FormStartPosition.CenterParent;
         ShowInTaskbar = false;
         MinimizeBox = false;
@@ -55,7 +58,7 @@ internal sealed class CivilizationEffectTargetPickerDialog : Form
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        layout.Controls.Add(new Label { Text = "Choose units and buildings", Dock = DockStyle.Fill, Font = MedievalTheme.UiFont(13, FontStyle.Bold), ForeColor = MedievalTheme.Gold, Margin = Padding.Empty }, 0, 0);
+        layout.Controls.Add(new Label { Text = title ?? (singleSelection ? "Choose a unit or building" : "Choose units and buildings"), Dock = DockStyle.Fill, Font = MedievalTheme.UiFont(13, FontStyle.Bold), ForeColor = MedievalTheme.Gold, Margin = Padding.Empty }, 0, 0);
         MedievalTheme.StyleTextInput(_search);
         layout.Controls.Add(MedievalTheme.FrameInput(_search), 0, 1);
         var filters = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3, RowCount = 1, Padding = new Padding(0, 6, 0, 8), Margin = Padding.Empty };
@@ -159,7 +162,12 @@ internal sealed class CivilizationEffectTargetPickerDialog : Form
             var detail = $"{(item.Category == CivilizationCategory.Units ? "Unit" : "Building")} · ID {item.SourceId}";
             var card = new TargetCard(item.Name, detail, _icons?.ForObject(item.SourceId) ?? ProgressionIcons.ForKind(item.Category.ToString()))
             { Tag = item.SourceId, AccessibleName = "Select target " + item.Name, AccessibleRole = AccessibleRole.CheckButton };
-            card.Click += (_, _) => { if (!_selected.Add(item.SourceId)) _selected.Remove(item.SourceId); UpdateSelection(); };
+            card.Click += (_, _) =>
+            {
+                if (_singleSelection) { _selected.Clear(); _selected.Add(item.SourceId); }
+                else if (!_selected.Add(item.SourceId)) _selected.Remove(item.SourceId);
+                UpdateSelection();
+            };
             card.KeyDown += (_, args) => MoveCardFocus(item.SourceId, card, args);
             _cards.Controls.Add(card);
         }
@@ -178,7 +186,7 @@ internal sealed class CivilizationEffectTargetPickerDialog : Form
         var unavailable = _selected.Count(id => !_valid.Contains(id));
         _selection.Text = $"{_selected.Count:N0} selected" + (unavailable > 0 ? $" ({unavailable} unavailable)" : "");
         _unavailableWarning.Visible = unavailable > 0;
-        _use.Enabled = _selected.Count > 0 && unavailable == 0;
+        _use.Enabled = _selected.Count > 0 && (!_singleSelection || _selected.Count == 1) && unavailable == 0;
         foreach (var card in _cards.Controls.OfType<TargetCard>()) card.SetSelected(_selected.Contains((int)card.Tag!));
     }
 

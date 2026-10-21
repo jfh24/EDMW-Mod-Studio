@@ -25,24 +25,31 @@ internal sealed class CivilizationUnitEffectsDialog : Form
     private readonly Button _target = new() { Text = "Choose target…", AccessibleName = "Effect target", TextAlign = ContentAlignment.MiddleLeft, AutoEllipsis = true, UseMnemonic = false };
     private readonly List<int> _targetIds = [];
     private readonly Dictionary<string, int[]> _proximityTargets = [];
+    private readonly MedievalComboBox _targetPlayers = Choice("Affected target players");
     private readonly TableLayoutPanel _outputsHost = Stack();
     private readonly List<OutputFields> _outputRows = [];
     private readonly Button _addOutput;
-    private MedievalComboBox FirstStat => _outputRows[0].Stat;
-    private NumericUpDown FirstAmount => _outputRows[0].Amount;
     private readonly NumericUpDown _radius = Number("Proximity radius in tiles", 1, 64, 5);
+    private readonly NumericUpDown _proximityDelay = Number("Required nearby time in seconds", 0, 3600, 0);
+    private readonly NumericUpDown _maxAffected = Number("Total affected recipient limit", 0, 100000, 0);
+    private readonly NumericUpDown _maxConcurrent = Number("Concurrent affected recipient limit", 0, 100000, 0);
+    private readonly Label _proximityConditions = Hint("The wait must be continuous; leaving range or changing sources resets it. Each source has its own limits. Set a limit to 0 for unlimited.");
     private readonly MedievalComboBox _mode = Choice("Ability activation mode");
     private readonly NumericUpDown _duration = Number("Ability duration in seconds", 1, 3600, 30);
     private readonly TextBox _caption = new() { MaxLength = 40, AccessibleName = "In-game button caption" };
     private readonly MedievalComboBox _icon = Choice("In-game button appearance");
     private readonly MedievalComboBox _slot = Choice("In-game button position");
+    private readonly NumericUpDown _foodCost = Number("Ability food cost", 0, 100000, 0);
+    private readonly NumericUpDown _woodCost = Number("Ability wood cost", 0, 100000, 0);
+    private readonly NumericUpDown _goldCost = Number("Ability gold cost", 0, 100000, 0);
+    private readonly NumericUpDown _stoneCost = Number("Ability stone cost", 0, 100000, 0);
     private readonly PictureBox _targetPreview = new() { SizeMode = PictureBoxSizeMode.Zoom, AccessibleName = "Selected target game icon" };
     private readonly PictureBox _buttonPreview = new() { SizeMode = PictureBoxSizeMode.Zoom, AccessibleName = "Selected in-game button icon" };
     private readonly Label _statHelp = Hint("");
     private readonly Label _behavior = Hint("");
     private readonly Label _summary = Hint("");
     private readonly Label _status = new() { Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft, AutoEllipsis = true, ForeColor = MedievalTheme.TextSecondary, AccessibleName = "Effect editor status" };
-    private readonly Label _empty = new() { Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleCenter, Text = "Create your first effect\n\nChoose Add effect, then select what triggers it and which stat changes.", ForeColor = MedievalTheme.TextSecondary };
+    private readonly Label _empty = new() { Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleCenter, Text = "Create your first effect\n\nChoose Add effect, then select when it happens and what it does.", ForeColor = MedievalTheme.TextSecondary };
     private readonly ErrorProvider _errors;
     private readonly Dictionary<Control, Label> _labels = [];
     private readonly Dictionary<Control, Control> _fieldHosts = [];
@@ -51,6 +58,7 @@ internal sealed class CivilizationUnitEffectsDialog : Form
     private readonly Label _self = Hint("Affects each selected unit or building of this type.");
     private readonly Button _remove;
     private bool _updating;
+    private int _lastTriggerIndex;
     private string? _selectedId;
 
     internal IReadOnlyList<CivilizationUnitEffect>? EditedEffects { get; private set; }
@@ -158,7 +166,7 @@ internal sealed class CivilizationUnitEffectsDialog : Form
         var grid = Columns(50, 50);
         var triggerCard = Card("Effect trigger card", "01  WHEN IT HAPPENS");
         triggerCard.Margin = new Padding(0, 0, 6, 12);
-        _trigger.Items.AddRange(["Proximity aura", "Activated ability"]);
+        _trigger.Items.AddRange(["Proximity aura", "Activated ability", "Proximity-granted ability"]);
         AddField(triggerCard, "Trigger", _trigger);
         MedievalTheme.StyleSecondaryButton(_target);
         _target.Click += (_, _) => OpenTargetPicker();
@@ -174,7 +182,13 @@ internal sealed class CivilizationUnitEffectsDialog : Form
             if (args.KeyCode is Keys.Enter or Keys.Space) { OpenTargetOverview(); args.SuppressKeyPress = true; }
         };
         AddField(triggerCard, "Radius (tiles)", _radius);
-        _mode.Items.AddRange(["Toggle on / off", "Timed duration"]);
+        AddField(triggerCard, "Proximity delay (seconds)", _proximityDelay);
+        AddField(triggerCard, "Maximum recipients at once", _maxConcurrent);
+        AddField(triggerCard, "Total recipient limit", _maxAffected);
+        AddRow(triggerCard, _proximityConditions);
+        _targetPlayers.Items.AddRange(["Your units / buildings", "Other players' units / buildings", "Any player"]);
+        AddField(triggerCard, "Target players", _targetPlayers);
+        _mode.Items.AddRange(["Toggle on / off", "Timed duration", "Instant action"]);
         AddField(triggerCard, "Activation", _mode);
         AddField(triggerCard, "Duration (seconds)", _duration);
         AddRow(triggerCard, _self);
@@ -200,6 +214,15 @@ internal sealed class CivilizationUnitEffectsDialog : Form
         _icon.Items.AddRange(buttonChoices.OrderBy(choice => choice.Name, StringComparer.CurrentCultureIgnoreCase)
             .Select(choice => (object)new NamedChoice(choice.Id, choice.Name)).ToArray());
         AddField(_buttonCard, "Existing button appearance", _icon, _buttonPreview);
+        AddRow(_buttonCard, Hint("Cost per activation"));
+        var resourceGrid = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 4, RowCount = 1, Margin = Padding.Empty };
+        for (var index = 0; index < 4; index++) resourceGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 25));
+        resourceGrid.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        AddField(resourceGrid, 0, "Food", _foodCost);
+        AddField(resourceGrid, 1, "Wood", _woodCost);
+        AddField(resourceGrid, 2, "Gold", _goldCost);
+        AddField(resourceGrid, 3, "Stone", _stoneCost);
+        AddRow(_buttonCard, resourceGrid);
         AddRow(_fields, _buttonCard);
 
         var previewCard = Card("Effect preview card", "PREVIEW");
@@ -231,18 +254,22 @@ internal sealed class CivilizationUnitEffectsDialog : Form
         _trigger.SelectedIndexChanged += (_, _) =>
         {
             if (_updating) return;
+            var previousTrigger = _lastTriggerIndex;
+            _lastTriggerIndex = _trigger.SelectedIndex;
             if (_selectedId is string effectId)
             {
-                if (_trigger.SelectedIndex == 1) _proximityTargets[effectId] = _targetIds.ToArray();
-                else if (_proximityTargets.TryGetValue(effectId, out var targets)) SelectTargets(targets);
+                if (_trigger.SelectedIndex == 1 && previousTrigger != 1) _proximityTargets[effectId] = _targetIds.ToArray();
+                else if (previousTrigger == 1 && _trigger.SelectedIndex != 1 && _proximityTargets.TryGetValue(effectId, out var targets)) SelectTargets(targets);
             }
             UpdateTriggerFields();
         };
         _mode.SelectedIndexChanged += (_, _) => { if (!_updating) UpdateTriggerFields(); };
+        _targetPlayers.SelectedIndexChanged += (_, _) => UpdatePreview();
         _icon.SelectedIndexChanged += (_, _) => _buttonPreview.Image = _icon.SelectedItem is NamedChoice button ? _gameIcons?.ForButton(button.Id) : null;
         _name.TextChanged += (_, _) => UpdatePreview();
         _enabled.CheckedChanged += (_, _) => UpdatePreview();
-        foreach (var number in new[] { _radius, _duration }) number.ValueChanged += (_, _) => UpdatePreview();
+        foreach (var number in new[] { _radius, _duration, _proximityDelay, _maxAffected, _maxConcurrent, _foodCost, _woodCost, _goldCost, _stoneCost })
+            number.ValueChanged += (_, _) => UpdatePreview();
         BindList(_effects.FirstOrDefault()?.Id);
     }
 
@@ -348,7 +375,7 @@ internal sealed class CivilizationUnitEffectsDialog : Form
         _cards.RowCount = 0;
         foreach (var effect in _effects)
         {
-            var card = new EffectCard(effect, () => SelectEffect(effect.Id)) { Selected = effect.Id == selectedId };
+            var card = new EffectCard(effect, () => SelectEffect(effect.Id), TargetName) { Selected = effect.Id == selectedId };
             _effectCards.Add(effect.Id, card);
             AddRow(_cards, card);
         }
@@ -380,21 +407,24 @@ internal sealed class CivilizationUnitEffectsDialog : Form
         _updating = true;
         _name.Text = effect.Name;
         _enabled.Checked = effect.Enabled;
-        _trigger.SelectedIndex = effect.Trigger == CivilizationUnitEffectTrigger.Proximity ? 0 : 1;
+        _trigger.SelectedIndex = (int)effect.Trigger;
+        _lastTriggerIndex = _trigger.SelectedIndex;
         SelectTargets(CivilizationUnitEffects.GetTargetObjectIds(effect));
         BindOutputs(CivilizationUnitEffects.GetOutputs(effect));
         _radius.Value = effect.RadiusTiles;
-        _mode.SelectedIndex = effect.ActivationMode == CivilizationUnitEffectActivationMode.Toggle ? 0 : 1;
-        _duration.Value = effect.DurationSeconds;
+        _proximityDelay.Value = effect.ProximityDelaySeconds;
+        _maxAffected.Value = effect.MaxAffectedTargets;
+        _maxConcurrent.Value = effect.MaxConcurrentTargets;
+        _foodCost.Value = effect.FoodCost;
+        _woodCost.Value = effect.WoodCost;
+        _goldCost.Value = effect.GoldCost;
+        _stoneCost.Value = effect.StoneCost;
+        _mode.SelectedIndex = (int)effect.ActivationMode;
+        _targetPlayers.SelectedIndex = (int)effect.TargetPlayers;
+        _duration.Value = Math.Clamp(effect.DurationSeconds, _duration.Minimum, _duration.Maximum);
         _caption.Text = effect.ButtonCaption;
         SelectChoice(_icon, effect.ButtonIconId);
-        _slot.Items.Clear();
-        var claimed = _effects.Where(item => item.Id != effect.Id && item.Enabled &&
-            item.Trigger == CivilizationUnitEffectTrigger.Activated).Select(item => item.ButtonSlot).ToHashSet();
-        _slot.Items.AddRange(_availableButtonSlots.Where(slot => !claimed.Contains(slot))
-            .Select(slot => (object)new NamedChoice(slot, $"Position {slot}")).ToArray());
-        SelectChoice(_slot, effect.ButtonSlot);
-        if (_slot.SelectedIndex < 0 && _slot.Items.Count > 0) _slot.SelectedIndex = 0;
+        BindButtonSlots(effect.ButtonSlot);
         _updating = false;
         UpdateTriggerFields();
     }
@@ -424,6 +454,9 @@ internal sealed class CivilizationUnitEffectsDialog : Form
         heading.Controls.Add(title, 0, 0);
         heading.Controls.Add(remove, 1, 0);
         AddRow(host, heading);
+        var kind = Choice("Effect output type");
+        kind.Items.AddRange(["Modify a stat", "Transfer ownership", "Change unit / building", "Spawn unit / building"]);
+        AddField(host, "Output", kind);
         var inputs = Columns(62, 38);
         var stat = Choice("Effect output stat");
         var amount = Number("Effect adjustment", -100000, 100000, 1);
@@ -431,22 +464,53 @@ internal sealed class CivilizationUnitEffectsDialog : Form
         AddField(inputs, 0, "Stat", stat);
         AddField(inputs, 1, "Adjustment", amount);
         AddRow(host, inputs);
-        var row = new OutputFields(host, stat, amount, title, remove);
+        var objectPicker = ActionButton("Choose unit / building…", () => { }, "Effect output object", 220);
+        objectPicker.TextAlign = ContentAlignment.MiddleLeft;
+        objectPicker.AutoEllipsis = true;
+        AddField(host, "Unit / building", objectPicker);
+        var count = Number("Effect spawn count", 1, 64, 1);
+        AddField(host, "Count", count);
+        var owner = Choice("Effect output owner");
+        owner.Items.AddRange(["Effect source's player", "Affected target's player", "Specific player"]);
+        AddField(host, "New owner", owner);
+        var player = Number("Effect output player", 1, 8, 1);
+        AddField(host, "Player", player);
+        var row = new OutputFields(host, kind, stat, amount, objectPicker, count, owner, player, title, remove)
+        { ObjectId = output.ObjectId };
         _outputRows.Add(row);
         AddRow(_outputsHost, host);
-        stat.SelectedIndex = stat.Items.Cast<StatChoice>().ToList().FindIndex(choice => choice.Stat == output.Stat);
+        var selectedStat = output.Kind == CivilizationUnitEffectOutputKind.StatModifier ? output.Stat : CivilizationUnitEffectStat.LineOfSight;
+        stat.SelectedIndex = stat.Items.Cast<StatChoice>().ToList().FindIndex(choice => choice.Stat == selectedStat);
         UpdateStatFields(row, false);
-        amount.Value = output.Amount;
+        amount.Value = output.Kind == CivilizationUnitEffectOutputKind.StatModifier ? output.Amount : 0;
+        kind.SelectedIndex = (int)output.Kind;
+        count.Value = Math.Clamp(output.Count, 1, 64);
+        owner.SelectedIndex = (int)output.Owner;
+        player.Value = Math.Clamp(output.PlayerSlot, 1, 8);
+        UpdateOutputFields(row);
+        kind.SelectedIndexChanged += (_, _) =>
+        {
+            if (_updating) return;
+            if (kind.SelectedIndex == (int)CivilizationUnitEffectOutputKind.StatModifier) UpdateStatFields(row, true);
+            UpdateOutputFields(row);
+            if (_outputRows.All(item => item.Kind.SelectedIndex != (int)CivilizationUnitEffectOutputKind.StatModifier))
+                _mode.SelectedIndex = (int)CivilizationUnitEffectActivationMode.Instant;
+            UpdateTriggerFields();
+        };
         stat.SelectedIndexChanged += (_, _) => { if (!_updating) UpdateStatFields(row, true); };
         stat.Enter += (_, _) => ShowOutputHelp(row);
         amount.Enter += (_, _) => ShowOutputHelp(row);
         amount.ValueChanged += (_, _) => UpdatePreview();
+        owner.SelectedIndexChanged += (_, _) => { if (!_updating) UpdateOutputFields(row); };
+        count.ValueChanged += (_, _) => UpdatePreview();
+        player.ValueChanged += (_, _) => UpdatePreview();
+        objectPicker.Click += (_, _) => OpenOutputObjectPicker(row);
         remove.Click += (_, _) => RemoveOutput(row);
     }
 
     private void DisposeOutput(OutputFields row)
     {
-        foreach (var control in new Control[] { row.Stat, row.Amount })
+        foreach (var control in row.Inputs)
         {
             _labels.Remove(control);
             _fieldHosts.Remove(control);
@@ -460,8 +524,14 @@ internal sealed class CivilizationUnitEffectsDialog : Form
         {
             var row = _outputRows[index];
             row.Title.Text = $"Output {index + 1}";
+            var suffix = index == 0 ? "" : $" {index + 1}";
+            row.Kind.AccessibleName = "Effect output type" + suffix;
             row.Stat.AccessibleName = index == 0 ? "Effect output stat" : $"Effect output stat {index + 1}";
             row.Amount.AccessibleName = index == 0 ? "Effect adjustment" : $"Effect adjustment {index + 1}";
+            row.ObjectPicker.AccessibleName = "Effect output object" + suffix;
+            row.Count.AccessibleName = "Effect spawn count" + suffix;
+            row.Owner.AccessibleName = "Effect output owner" + suffix;
+            row.Player.AccessibleName = "Effect output player" + suffix;
             row.Remove.AccessibleName = $"Remove effect output {index + 1}";
             row.Remove.Enabled = _outputRows.Count > 1;
         }
@@ -471,16 +541,17 @@ internal sealed class CivilizationUnitEffectsDialog : Form
     private void AddOutput()
     {
         if (!CommitSelected()) return;
-        var used = _outputRows.Select(row => ((StatChoice)row.Stat.SelectedItem!).Stat).ToHashSet();
+        if (_outputRows.Count >= CivilizationUnitEffects.MaximumOutputs) return;
+        var used = _outputRows.Where(row => row.Kind.SelectedIndex == 0).Select(row => ((StatChoice)row.Stat.SelectedItem!).Stat).ToHashSet();
         var next = CivilizationUnitEffects.StatChoices.FirstOrDefault(choice => !used.Contains(choice.Stat));
-        if (next is null) return;
         _updating = true;
-        CreateOutput(new(next.Stat, next.DefaultAmount));
+        CreateOutput(next is null ? new(CivilizationUnitEffectStat.LineOfSight, 0) { Kind = CivilizationUnitEffectOutputKind.Spawn } : new(next.Stat, next.DefaultAmount));
         UpdateOutputActions();
         _updating = false;
         ShowOutputHelp(_outputRows[^1]);
         UpdatePreview();
-        _outputRows[^1].Stat.Focus();
+        UpdateTriggerFields();
+        _outputRows[^1].Kind.Focus();
     }
 
     private void RemoveOutput(OutputFields row)
@@ -499,11 +570,22 @@ internal sealed class CivilizationUnitEffectsDialog : Form
         }
         UpdateOutputActions();
         ShowOutputHelp(_outputRows[Math.Min(index, _outputRows.Count - 1)]);
-        UpdatePreview();
+        UpdateTriggerFields();
     }
 
     private void ShowOutputHelp(OutputFields row)
     {
+        if (row.Kind.SelectedIndex != 0)
+        {
+            _statHelp.Text = row.Kind.SelectedIndex switch
+            {
+                1 => "Permanently transfers the affected unit or building to the chosen player.",
+                2 => "Permanently changes the affected unit or building into your chosen type, keeping its owner.",
+                _ => "Creates the chosen units or buildings beside each affected target. Spawned objects remain after the effect ends. An effect can spawn up to 64 objects per activation."
+            };
+            _statHelp.ForeColor = MedievalTheme.TextSecondary;
+            return;
+        }
         if (row.Stat.SelectedItem is not StatChoice choice) return;
         var definition = CivilizationUnitEffects.GetStatDefinition(choice.Stat);
         _statHelp.Text = $"Units: {definition.Unit}. " + definition.Help + (definition.RuntimeSupported ? "" : " Draft only · runtime support pending; enabled exports are blocked.");
@@ -533,20 +615,97 @@ internal sealed class CivilizationUnitEffectsDialog : Form
         UpdatePreview();
     }
 
+    private void UpdateOutputFields(OutputFields row)
+    {
+        var kind = (CivilizationUnitEffectOutputKind)row.Kind.SelectedIndex;
+        ShowField(row.Stat, kind == CivilizationUnitEffectOutputKind.StatModifier);
+        ShowField(row.Amount, kind == CivilizationUnitEffectOutputKind.StatModifier);
+        ShowField(row.ObjectPicker, kind is CivilizationUnitEffectOutputKind.Transform or CivilizationUnitEffectOutputKind.Spawn);
+        ShowField(row.Count, kind == CivilizationUnitEffectOutputKind.Spawn);
+        var hasOwner = kind is CivilizationUnitEffectOutputKind.OwnershipTransfer or CivilizationUnitEffectOutputKind.Spawn;
+        ShowField(row.Owner, hasOwner);
+        ShowField(row.Player, hasOwner && row.Owner.SelectedIndex == (int)CivilizationUnitEffectOwner.SpecificPlayer);
+        _labels[row.ObjectPicker].Text = kind == CivilizationUnitEffectOutputKind.Transform ? "Change into" : "Spawn";
+        _labels[row.Owner].Text = kind == CivilizationUnitEffectOutputKind.Spawn ? "Owner" : "New owner";
+        row.ObjectPicker.Text = row.ObjectId is int id ? TargetName(id) + "  ·  Choose…" : "Choose unit / building…";
+        ShowOutputHelp(row);
+        UpdatePreview();
+    }
+
+    internal CivilizationEffectTargetPickerDialog CreateOutputObjectPickerForVerification(int outputIndex) =>
+        CreateOutputObjectPicker(_outputRows[outputIndex]);
+
+    private CivilizationEffectTargetPickerDialog CreateOutputObjectPicker(OutputFields row) =>
+        new(_objects.Values.ToArray(), row.ObjectId is int id ? [id] : [], _gameIcons, _gameData,
+            singleSelection: true, title: row.Kind.SelectedIndex == (int)CivilizationUnitEffectOutputKind.Transform ? "Choose what to change into" : "Choose what to spawn");
+
+    internal void SelectOutputObjectForVerification(int outputIndex, int objectId)
+    {
+        _outputRows[outputIndex].ObjectId = objectId;
+        UpdateOutputFields(_outputRows[outputIndex]);
+    }
+
+    private void OpenOutputObjectPicker(OutputFields row)
+    {
+        try
+        {
+            using var picker = CreateOutputObjectPicker(row);
+            if (picker.ShowDialog(this) != DialogResult.OK) return;
+            row.ObjectId = picker.SelectedObjectIds.Single();
+            UpdateOutputFields(row);
+        }
+        catch (Exception error) when (error is IOException or InvalidOperationException or UnauthorizedAccessException)
+        {
+            _status.Text = error.Message;
+        }
+    }
+
     private void UpdateTriggerFields()
     {
         _fields.SuspendLayout();
-        var proximity = _trigger.SelectedIndex == 0;
-        ShowField(_target, proximity);
-        ShowField(_radius, proximity);
-        ShowField(_mode, !proximity);
-        ShowField(_duration, !proximity && _mode.SelectedIndex == 1);
-        foreach (var control in new Control[] { _caption, _icon, _slot }) control.Enabled = !proximity;
-        _buttonCard.Visible = !proximity;
-        _self.Visible = !proximity;
-        if (!proximity && _source.SourceObjectId is int sourceId) SelectTargets([sourceId]);
+        var activated = _trigger.SelectedIndex == 1;
+        var granted = _trigger.SelectedIndex == 2;
+        var updating = _updating;
+        _updating = true;
+        var hasStats = _outputRows.Any(row => row.Kind.SelectedIndex == (int)CivilizationUnitEffectOutputKind.StatModifier);
+        if (granted && _mode.SelectedIndex == (int)CivilizationUnitEffectActivationMode.Timed ||
+            hasStats && _mode.SelectedIndex == (int)CivilizationUnitEffectActivationMode.Instant)
+            _mode.SelectedIndex = (int)CivilizationUnitEffectActivationMode.Toggle;
+        if (_mode.SelectedIndex < 0) _mode.SelectedIndex = hasStats ? 0 : 2;
+        ShowField(_target, !activated);
+        ShowField(_radius, !activated);
+        ShowField(_proximityDelay, !activated);
+        ShowField(_maxAffected, !activated);
+        ShowField(_maxConcurrent, !activated);
+        _proximityConditions.Visible = !activated;
+        ShowField(_targetPlayers, !activated && !granted);
+        ShowField(_mode, activated || granted && !hasStats);
+        ShowField(_duration, activated && _mode.SelectedIndex == 1);
+        foreach (var control in new Control[] { _caption, _icon, _slot }) control.Enabled = activated || granted;
+        _buttonCard.Visible = activated || granted;
+        _self.Visible = activated;
+        if (activated && _source.SourceObjectId is int sourceId) SelectTargets([sourceId]);
+        BindButtonSlots((_slot.SelectedItem as NamedChoice)?.Id ??
+            _effects.FirstOrDefault(effect => effect.Id == _selectedId)?.ButtonSlot ?? CivilizationUnitEffectBindings.CustomAbilityButtonSlots[0]);
+        _labels[_slot].Text = granted ? "Preferred button position" : "Button position";
+        _slot.AccessibleDescription = granted
+            ? "Preferred position for the granted ability. Export chooses a free position for each target type if this position is occupied."
+            : "A free button position on the source unit or building.";
+        _updating = updating;
         _fields.ResumeLayout(true);
         UpdatePreview();
+    }
+
+    private void BindButtonSlots(int preferred)
+    {
+        var granted = _trigger.SelectedIndex == 2;
+        var claimed = _effects.Where(item => item.Id != _selectedId && item.Enabled &&
+            item.Trigger == CivilizationUnitEffectTrigger.Activated).Select(item => item.ButtonSlot).ToHashSet();
+        var candidates = granted ? CivilizationUnitEffectBindings.CustomAbilityButtonSlots : _availableButtonSlots.Where(slot => !claimed.Contains(slot));
+        _slot.Items.Clear();
+        _slot.Items.AddRange(candidates.Select(slot => (object)new NamedChoice(slot, $"Position {slot}")).ToArray());
+        SelectChoice(_slot, preferred);
+        if (_slot.SelectedIndex < 0 && _slot.Items.Count > 0) _slot.SelectedIndex = 0;
     }
 
     private void ShowField(Control control, bool visible)
@@ -598,7 +757,7 @@ internal sealed class CivilizationUnitEffectsDialog : Form
 
     private void OpenTargetPicker()
     {
-        if (_trigger.SelectedIndex != 0) return;
+        if (_trigger.SelectedIndex == 1) return;
         try
         {
             using var picker = CreateTargetPickerForVerification();
@@ -624,35 +783,101 @@ internal sealed class CivilizationUnitEffectsDialog : Form
         }
     }
 
-    private CivilizationUnitEffect Draft(CivilizationUnitEffect previous) => previous with
+    private CivilizationUnitEffectOutput OutputDraft(OutputFields row)
     {
+        var kind = (CivilizationUnitEffectOutputKind)row.Kind.SelectedIndex;
+        if (kind == CivilizationUnitEffectOutputKind.StatModifier)
+            return new(((StatChoice)row.Stat.SelectedItem!).Stat, row.Amount.Value);
+        var hasOwner = kind is CivilizationUnitEffectOutputKind.OwnershipTransfer or CivilizationUnitEffectOutputKind.Spawn;
+        var owner = hasOwner ? (CivilizationUnitEffectOwner)row.Owner.SelectedIndex : CivilizationUnitEffectOwner.SourcePlayer;
+        return new(CivilizationUnitEffectStat.LineOfSight, 0)
+        {
+            Kind = kind,
+            ObjectId = kind is CivilizationUnitEffectOutputKind.Transform or CivilizationUnitEffectOutputKind.Spawn ? row.ObjectId : null,
+            Count = kind == CivilizationUnitEffectOutputKind.Spawn ? (int)row.Count.Value : 1,
+            Owner = owner,
+            PlayerSlot = hasOwner && owner == CivilizationUnitEffectOwner.SpecificPlayer ? (int)row.Player.Value : 1
+        };
+    }
+
+    private CivilizationUnitEffect Draft(CivilizationUnitEffect previous)
+    {
+        var outputs = _outputRows.Select(OutputDraft).ToArray();
+        var firstStat = outputs.FirstOrDefault(output => output.Kind == CivilizationUnitEffectOutputKind.StatModifier);
+        var mode = (CivilizationUnitEffectActivationMode)_mode.SelectedIndex;
+        return previous with
+        {
         Name = _name.Text.Trim(), Enabled = _enabled.Checked,
-        Trigger = _trigger.SelectedIndex == 0 ? CivilizationUnitEffectTrigger.Proximity : CivilizationUnitEffectTrigger.Activated,
-        Stat = (FirstStat.SelectedItem as StatChoice)?.Stat ?? previous.Stat,
+        Trigger = (CivilizationUnitEffectTrigger)_trigger.SelectedIndex,
+        Stat = firstStat?.Stat ?? CivilizationUnitEffectStat.LineOfSight,
         TargetObjectId = _targetIds.Count > 0 ? _targetIds[0] : previous.TargetObjectId,
         TargetObjectIds = _targetIds.ToArray(),
-        Amount = FirstAmount.Value,
-        Outputs = _outputRows.Select(row => new CivilizationUnitEffectOutput(((StatChoice)row.Stat.SelectedItem!).Stat, row.Amount.Value)).ToArray(),
+        TargetPlayers = _trigger.SelectedIndex == 0 ? (CivilizationUnitEffectTargetPlayers)Math.Max(0, _targetPlayers.SelectedIndex) : CivilizationUnitEffectTargetPlayers.Own,
+        Amount = firstStat?.Amount ?? 0,
+        Outputs = outputs,
         RadiusTiles = (int)_radius.Value,
-        ActivationMode = _mode.SelectedIndex == 0 ? CivilizationUnitEffectActivationMode.Toggle : CivilizationUnitEffectActivationMode.Timed,
-        DurationSeconds = (int)_duration.Value, ButtonCaption = _caption.Text.Trim(),
+        ProximityDelaySeconds = _trigger.SelectedIndex != 1 ? (int)_proximityDelay.Value : 0,
+        MaxAffectedTargets = _trigger.SelectedIndex != 1 ? (int)_maxAffected.Value : 0,
+        MaxConcurrentTargets = _trigger.SelectedIndex != 1 ? (int)_maxConcurrent.Value : 0,
+        FoodCost = _trigger.SelectedIndex != 0 ? (int)_foodCost.Value : 0,
+        WoodCost = _trigger.SelectedIndex != 0 ? (int)_woodCost.Value : 0,
+        GoldCost = _trigger.SelectedIndex != 0 ? (int)_goldCost.Value : 0,
+        StoneCost = _trigger.SelectedIndex != 0 ? (int)_stoneCost.Value : 0,
+        ActivationMode = mode,
+        DurationSeconds = _trigger.SelectedIndex == 2 || mode == CivilizationUnitEffectActivationMode.Instant ? 0 : (int)_duration.Value,
+        ButtonCaption = _caption.Text.Trim(),
         ButtonIconId = (_icon.SelectedItem as NamedChoice)?.Id ?? previous.ButtonIconId,
-        ButtonSlot = (_slot.SelectedItem as NamedChoice)?.Id ?? previous.ButtonSlot
-    };
+        ButtonSlot = (_slot.SelectedItem as NamedChoice)?.Id ?? previous.ButtonSlot,
+        NativeTechnologyId = _trigger.SelectedIndex == 2 || previous.Trigger == CivilizationUnitEffectTrigger.ProximityAbility ? null : previous.NativeTechnologyId,
+        NativeTargetTechnologyIds = null
+        };
+    }
 
     private void UpdatePreview()
     {
         if (_updating || _effects.FirstOrDefault(item => item.Id == _selectedId) is not { } previous) return;
         var effect = Draft(previous);
-        var proximity = effect.Trigger == CivilizationUnitEffectTrigger.Proximity;
-        _summary.Text = string.Join("\n", CivilizationUnitEffects.GetOutputs(effect).Select(output =>
-            FormatOutputAmount(output) + " " + CivilizationUnitEffects.GetStatDefinition(output.Stat).Name.ToLowerInvariant()));
+        var outputs = CivilizationUnitEffects.GetOutputs(effect);
+        var hasStats = outputs.Any(output => output.Kind == CivilizationUnitEffectOutputKind.StatModifier);
+        var hasActions = outputs.Any(output => output.Kind != CivilizationUnitEffectOutputKind.StatModifier);
+        _summary.Text = string.Join("\n", outputs.Select(output => CivilizationUnitEffects.DescribeOutput(output, TargetName)));
         var target = _targetIds.Count == 1 ? TargetName(_targetIds[0]) : $"targets of {_targetIds.Count} selected types";
-        _behavior.Text = proximity
-            ? $"Affects other nearby {target} within {effect.RadiusTiles} tiles. Same-player targets only; sources of this effect do not stack. Ends on leaving the radius or when the source dies."
-            : "Affects each selected unit or building of this type. " + (effect.ActivationMode == CivilizationUnitEffectActivationMode.Toggle
+        var playerScope = effect.TargetPlayers switch
+        {
+            CivilizationUnitEffectTargetPlayers.Other => "Other players' targets only.",
+            CivilizationUnitEffectTargetPlayers.Any => "Targets from any player.",
+            _ => "Your targets only."
+        };
+        _behavior.Text = effect.Trigger switch
+        {
+            CivilizationUnitEffectTrigger.Proximity => $"Affects nearby {target} within {effect.RadiusTiles} tiles, excluding the source. {playerScope}" +
+                (hasStats ? " Stat bonuses do not stack and end on leaving the radius or when the source dies." : "") +
+                (hasActions ? " Actions happen once when a target enters range and are permanent." : ""),
+            CivilizationUnitEffectTrigger.ProximityAbility => $"Other nearby {target} within {effect.RadiusTiles} tiles gain an ability button. Click it for one or more selected targets." +
+                (effect.ActivationMode == CivilizationUnitEffectActivationMode.Instant ? " Each click performs the actions." : " Click again to turn it off.") +
+                " Leaving all sources' range removes the button" + (hasStats ? " and stat bonuses; re-entering starts off." : ".") +
+                (hasActions ? " Actions are permanent." : ""),
+            _ => "Affects each selected unit or building of this type. " + (effect.ActivationMode == CivilizationUnitEffectActivationMode.Toggle
                 ? "Press the ability button again to turn it off."
-                : $"Lasts {effect.DurationSeconds} seconds; activating again restarts the timer.") + " Activation resets when loading a save.";
+                : effect.ActivationMode == CivilizationUnitEffectActivationMode.Instant ? "Each click performs the actions."
+                : $"Stat bonuses last {effect.DurationSeconds} seconds; activating again restarts the timer.") +
+                (hasActions ? " Actions are permanent." : "")
+        };
+        if (effect.Trigger != CivilizationUnitEffectTrigger.Activated)
+        {
+            if (effect.ProximityDelaySeconds > 0)
+                _behavior.Text += $" Stay nearby for {effect.ProximityDelaySeconds} continuous seconds first; leaving range or changing sources resets the wait.";
+            if (effect.MaxConcurrentTargets > 0)
+                _behavior.Text += $" Each source can affect up to {effect.MaxConcurrentTargets} recipients at once.";
+            if (effect.MaxAffectedTargets > 0)
+                _behavior.Text += $" Each source can affect up to {effect.MaxAffectedTargets} recipients in total.";
+        }
+        if (effect.Trigger != CivilizationUnitEffectTrigger.Proximity)
+        {
+            var costs = new[] { (effect.FoodCost, "food"), (effect.WoodCost, "wood"), (effect.GoldCost, "gold"), (effect.StoneCost, "stone") }
+                .Where(cost => cost.Item1 > 0).Select(cost => $"{cost.Item1} {cost.Item2}");
+            if (costs.Any()) _behavior.Text += " Costs " + string.Join(", ", costs) + " per activation.";
+        }
         if (!effect.Enabled) _summary.Text += "  ·  Disabled";
         if (_effectCards.TryGetValue(effect.Id, out var card)) card.UpdateEffect(effect);
     }
@@ -669,10 +894,13 @@ internal sealed class CivilizationUnitEffectsDialog : Form
             var unavailable = _targetIds.Where(id => !_objects.ContainsKey(id)).ToArray();
             if (unavailable.Length > 0) throw new InvalidDataException("Some selected targets are unavailable: " +
                 string.Join(", ", unavailable.Select(TargetName)) + ". Choose affected targets and clear the unavailable selections before applying.");
-            if (_outputRows.Count == 0 || _outputRows.Any(row => row.Stat.SelectedItem is not StatChoice)) throw new InvalidDataException("Select an output stat.");
-            if (_trigger.SelectedIndex == 1 && _icon.SelectedItem is not NamedChoice)
+            if (_outputRows.Count == 0 || _outputRows.Any(row => row.Kind.SelectedIndex < 0 || row.Kind.SelectedIndex == 0 && row.Stat.SelectedItem is not StatChoice))
+                throw new InvalidDataException("Choose an output for this effect.");
+            if (_outputRows.Any(row => row.Kind.SelectedIndex is 2 or 3 && (row.ObjectId is not int id || !_objects.ContainsKey(id))))
+                throw new InvalidDataException("Choose an available unit or building for each change or spawn output.");
+            if (_trigger.SelectedIndex != 0 && _icon.SelectedItem is not NamedChoice)
                 throw new InvalidDataException("Select an existing in-game button appearance.");
-            if (_enabled.Checked && _trigger.SelectedIndex == 1 && _slot.SelectedItem is not NamedChoice)
+            if (_enabled.Checked && _trigger.SelectedIndex != 0 && _slot.SelectedItem is not NamedChoice)
                 throw new InvalidDataException("No free button positions remain on this unit or building. Remove another activated ability or use a proximity effect.");
             var effect = Draft(_effects[index]);
             var candidate = _effects.ToArray();
@@ -685,8 +913,9 @@ internal sealed class CivilizationUnitEffectsDialog : Form
         catch (InvalidDataException error)
         {
             _status.Text = error.Message;
-            var invalid = _outputRows.FirstOrDefault(row => row.Amount.Value == 0);
-            var field = invalid is not null ? (Control)invalid.Amount : _name;
+            var invalid = _outputRows.FirstOrDefault(row => row.Kind.SelectedIndex == 0 && row.Amount.Value == 0);
+            var missingObject = _outputRows.FirstOrDefault(row => row.Kind.SelectedIndex is 2 or 3 && (row.ObjectId is not int id || !_objects.ContainsKey(id)));
+            var field = missingObject is not null ? (Control)missingObject.ObjectPicker : invalid is not null ? invalid.Amount : _name;
             _errors.SetError(field, error.Message);
             field.Focus();
             return false;
@@ -787,18 +1016,36 @@ internal sealed class CivilizationUnitEffectsDialog : Form
             ? "Limit " + output.Amount.ToString("0", CultureInfo.CurrentCulture)
             : output.Amount.ToString("+0.####;-0.####;0", CultureInfo.CurrentCulture);
     private sealed record StatChoice(CivilizationUnitEffectStat Stat, string Name) { public override string ToString() => Name; }
-    private sealed record OutputFields(TableLayoutPanel Host, MedievalComboBox Stat, NumericUpDown Amount, Label Title, Button Remove);
+    private sealed class OutputFields(TableLayoutPanel host, MedievalComboBox kind, MedievalComboBox stat,
+        NumericUpDown amount, Button objectPicker, NumericUpDown count, MedievalComboBox owner,
+        NumericUpDown player, Label title, Button remove)
+    {
+        internal TableLayoutPanel Host { get; } = host;
+        internal MedievalComboBox Kind { get; } = kind;
+        internal MedievalComboBox Stat { get; } = stat;
+        internal NumericUpDown Amount { get; } = amount;
+        internal Button ObjectPicker { get; } = objectPicker;
+        internal NumericUpDown Count { get; } = count;
+        internal MedievalComboBox Owner { get; } = owner;
+        internal NumericUpDown Player { get; } = player;
+        internal Label Title { get; } = title;
+        internal Button Remove { get; } = remove;
+        internal int? ObjectId { get; set; }
+        internal Control[] Inputs => [Kind, Stat, Amount, ObjectPicker, Count, Owner, Player];
+    }
 
     private sealed class EffectCard : Control
     {
         private CivilizationUnitEffect _effect;
+        private readonly Func<int, string> _objectName;
         private bool _selected;
         [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
         public bool Selected { get => _selected; set { _selected = value; Invalidate(); } }
 
-        public EffectCard(CivilizationUnitEffect effect, Action select)
+        public EffectCard(CivilizationUnitEffect effect, Action select, Func<int, string> objectName)
         {
             _effect = effect;
+            _objectName = objectName;
             Dock = DockStyle.Top;
             Height = 100;
             Margin = new Padding(0, 0, 0, 9);
@@ -838,11 +1085,15 @@ internal sealed class CivilizationUnitEffectsDialog : Form
             TextRenderer.DrawText(graphics, _effect.Name, title, new Rectangle(S(13), S(12), Width - S(26), S(22)), MedievalTheme.Text, flags);
             var outputs = CivilizationUnitEffects.GetOutputs(_effect);
             var first = outputs[0];
-            var stat = CivilizationUnitEffects.GetStatDefinition(first.Stat);
-            var change = FormatOutputAmount(first) + " " + stat.Name +
+            var change = CivilizationUnitEffects.DescribeOutput(first, _objectName) +
                 (outputs.Count > 1 ? $"  +{outputs.Count - 1} more" : "");
             TextRenderer.DrawText(graphics, change, detail, new Rectangle(S(13), S(38), Width - S(26), S(20)), MedievalTheme.GoldBright, flags);
-            var trigger = _effect.Trigger == CivilizationUnitEffectTrigger.Proximity ? "Proximity aura" : "Activated ability";
+            var trigger = _effect.Trigger switch
+            {
+                CivilizationUnitEffectTrigger.Proximity => "Proximity aura",
+                CivilizationUnitEffectTrigger.ProximityAbility => "Proximity-granted ability",
+                _ => "Activated ability"
+            };
             TextRenderer.DrawText(graphics, trigger + "  ·  " + (_effect.Enabled ? "Enabled" : "Disabled"), detail, new Rectangle(S(13), S(65), Width - S(26), S(20)), MedievalTheme.TextSecondary, flags);
             if (Focused) ControlPaint.DrawFocusRectangle(graphics, Rectangle.Inflate(ClientRectangle, -5, -5));
         }

@@ -8,7 +8,8 @@ internal sealed class DashboardInstalledItemRow : DashboardMapRow
 
     internal DashboardInstalledItemRow(string itemName, string metadata, string? warning,
         bool canShare, Action details, Action uninstall, Func<InstalledShareDestination, Task> share,
-        string? shareUnavailableReason = null, string? toggleLabel = null, Action? toggle = null)
+        string? shareUnavailableReason = null, string? toggleLabel = null, Action? toggle = null,
+        Action? merge = null, Action? unmerge = null)
     {
         Height = warning is null ? 64 : 84;
         ColumnCount = 1;
@@ -19,7 +20,8 @@ internal sealed class DashboardInstalledItemRow : DashboardMapRow
         RowStyles.Add(new RowStyle(SizeType.Absolute, 21));
         if (warning is not null) RowStyles.Add(new RowStyle(SizeType.Absolute, 20));
         AccessibleName = itemName;
-        AccessibleDescription = "Right-click or press Shift+F10 for Details, Share, and Uninstall.";
+        AccessibleDescription = "Right-click or press Shift+F10 for Details, " +
+            (merge is not null ? "Merge, " : "") + (unmerge is not null ? "Unmerge, " : "") + "Share, and Uninstall.";
         TabStop = true;
         SetStyle(ControlStyles.Selectable, true);
 
@@ -35,6 +37,8 @@ internal sealed class DashboardInstalledItemRow : DashboardMapRow
         };
         _menu.Items.Add("Details", null, (_, _) => details());
         if (toggle is not null) _menu.Items.Add(toggleLabel, null, (_, _) => toggle());
+        if (merge is not null) _menu.Items.Add("Merge with…", null, (_, _) => merge());
+        if (unmerge is not null) _menu.Items.Add("Unmerge", null, (_, _) => unmerge());
         var shareItem = _menu.Items.Add("Share…");
         shareItem.Enabled = canShare;
         shareItem.ToolTipText = canShare ? "Choose LAN or Friends" : shareUnavailableReason ?? "Reinstall this item to enable sharing.";

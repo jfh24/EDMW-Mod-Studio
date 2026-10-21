@@ -8,9 +8,9 @@
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <AssemblyName>EDMWCivilizationInstaller</AssemblyName>
     <Product>EDMW Mod Studio</Product>
-    <Version>1.2.1</Version>
-    <AssemblyVersion>1.2.1.0</AssemblyVersion>
-    <FileVersion>1.2.1.0</FileVersion>
+    <Version>1.3.0</Version>
+    <AssemblyVersion>1.3.0.0</AssemblyVersion>
+    <FileVersion>1.3.0.0</FileVersion>
     <Title>EDMW Mod Studio Civilization Installer</Title>
     <Description>Standalone civilization mod installer exported by EDMW Mod Studio.</Description>
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
@@ -19,10 +19,15 @@
     <Compile Include="..\EDMWMapDesigner\Civilizations\CivilizationUnitEffects.cs" Link="Domain\CivilizationUnitEffects.cs" />
     <Compile Include="..\EDMWMapDesigner\Civilizations\CivilizationUnitEffectBindings.cs" Link="Domain\CivilizationUnitEffectBindings.cs" />
     <Compile Include="..\EDMWMapDesigner\Civilizations\CivilizationRuntimeConfiguration.cs" Link="Domain\CivilizationRuntimeConfiguration.cs" />
+    <Compile Include="..\EDMWMapDesigner\Civilizations\CivilizationRuntimeDescriptions.cs" Link="Domain\CivilizationRuntimeDescriptions.cs" />
     <Compile Include="..\EDMWMapDesigner\Civilizations\CivilizationRuntimeEffects.cs" Link="Domain\CivilizationRuntimeEffects.cs" />
     <Compile Include="..\EDMWMapDesigner\Civilizations\CivilizationInstallerPackage.cs" Link="Domain\CivilizationInstallerPackage.cs" />
     <Compile Include="..\EDMWMapDesigner\Civilizations\CivilizationPackageManager.cs" Link="Domain\CivilizationPackageManager.cs" />
+    <Compile Include="..\EDMWMapDesigner\Civilizations\CivilizationPackageManager.Merging.cs" Link="Domain\CivilizationPackageManager.Merging.cs" />
+    <Compile Include="..\EDMWMapDesigner\Civilizations\CivilizationAbilityTableComposition.cs" Link="Domain\CivilizationAbilityTableComposition.cs" />
+    <Compile Include="..\EDMWMapDesigner\Civilizations\CivilizationRuntimePackageRebaser.cs" Link="Domain\CivilizationRuntimePackageRebaser.cs" />
     <Compile Include="..\EDMWMapDesigner\Civilizations\CivilizationPackageContentComparer.cs" Link="Domain\CivilizationPackageContentComparer.cs" />
+    <Compile Include="..\EDMWMapDesigner\Civilizations\CivilizationPackageReviewSources.cs" Link="Domain\CivilizationPackageReviewSources.cs" />
     <Compile Include="..\EDMWMapDesigner\Civilizations\CivilizationGameInstaller.cs" Link="Domain\CivilizationGameInstaller.cs" />
     <Compile Include="..\EDMWMapDesigner\Civilizations\CivilizationEditProject.cs" Link="Domain\CivilizationEditProject.cs" />
     <Compile Include="..\EDMWMapDesigner\Civilizations\CivilizationSchema.cs" Link="Domain\CivilizationSchema.cs" />

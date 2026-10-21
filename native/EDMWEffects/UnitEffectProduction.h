@@ -49,5 +49,8 @@ private:
 bool InstallProductionEffects(const std::vector<UnitEffectRule>& rules);
 bool HasProductionEffects(void* unit);
 void UpdateProductionEffects(void* unit, uint32_t id);
+// Restore the native remaining production time before a lifecycle replacement.
+// False retains tracking and means the caller must not replace this actor yet.
+bool SuspendProductionEffects(void* unit);
 void ForgetProductionEffects(void* unit);
 }

@@ -1401,7 +1401,7 @@ public sealed class CivilizationEditorView : UserControl
         // snapshots still preserve their original identities through Clone().
         var effects = CivilizationUnitEffects.Read(entity);
         if (effects.Count > 0)
-            CivilizationUnitEffects.Write(entity, effects.Select(effect => effect with { Id = Guid.NewGuid().ToString("D"), NativeTechnologyId = null }));
+            CivilizationUnitEffects.Write(entity, effects.Select(effect => effect with { Id = Guid.NewGuid().ToString("D"), NativeTechnologyId = null, NativeTargetTechnologyIds = null }));
         _history.Change(project => project.Civilizations.Single(c => c.Id == civilization.Id).Entities.Add(entity));
         _selectedEntityId = entity.Id;
         BindEntities();

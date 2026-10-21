@@ -10,13 +10,14 @@ internal static class CivilizationRuntimeEffectsVerification
     public static void Run(string source, string output)
     {
         VerifyStatCatalog();
+        VerifyNamedRuntimeCodec();
         source = Path.GetFullPath(source);
         output = Path.GetFullPath(output);
         if (output.Equals(source, StringComparison.OrdinalIgnoreCase) || output.StartsWith(source + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException("Use a verification directory outside the installed game.");
         var fixture = Path.Combine(output, "effects-" + Guid.NewGuid().ToString("N"));
         string[] files = ["Empires_DMW.exe", "Data\\db\\dbobjects.dat", "Data\\db\\dbtechtree.dat", "Data\\db\\dbphoenixcivtable.dat",
-            "Data\\db\\dbbuttons.dat", "Data\\db\\dbevents.dat"];
+            "Data\\db\\dbbuttons.dat", "Data\\db\\dbevents.dat", "Data\\db\\dbeffects.dat", "Data\\db\\dbgraphics.dat"];
         var hashes = files.ToDictionary(file => file, file => SHA256.HashData(File.ReadAllBytes(Path.Combine(source, file))));
         foreach (var file in files)
         {
@@ -114,7 +115,8 @@ internal static class CivilizationRuntimeEffectsVerification
         var auraPackage = CivilizationInstallerPackage.Create(auraProject, fixture);
         var auraFile = auraPackage.Files.Single(file => CivilizationRuntimeEffects.IsPath(file.RelativePath));
         var auraRule = CivilizationRuntimeConfiguration.Decode(auraFile.Replacement!).Units.Single();
-        Require(auraRule == new CivilizationRuntimeUnitRule(Guid.Parse(aura.Id), 12, 749, 777, 3, 5), "Aura source/civilization/target/radius/sight mapping");
+        Require(auraRule == new CivilizationRuntimeUnitRule(Guid.Parse(aura.Id), 12, 749, 777, 3, 5, Name: aura.Name) &&
+            auraFile.Replacement!.AsSpan(0, 8).SequenceEqual("EDMWEF07"u8), "Aura name/source/civilization/target/radius/sight mapping");
         Require(auraPackage.Files.All(file => file.Patches.Count == 0), "Proximity-only package changes no native database fields");
         var auraRoundTrip = CivilizationInstallerPackageCodec.Decode(CivilizationInstallerPackageCodec.Encode(auraPackage));
         Require(CivilizationRuntimeConfiguration.Decode(auraRoundTrip.Files.Single(file => CivilizationRuntimeEffects.IsPath(file.RelativePath)).Replacement!).Units.Single() == auraRule,
@@ -127,22 +129,27 @@ internal static class CivilizationRuntimeEffectsVerification
         var nonfinite = auraFile.Replacement!.ToArray();
         BinaryPrimitives.WriteSingleLittleEndian(nonfinite.AsSpan(80), float.NaN);
         Reject(() => CivilizationRuntimeConfiguration.Decode(nonfinite), "Nonfinite effect adjustment");
-        var legacyVersion4 = auraFile.Replacement![..^8].ToArray();
+        var unnamedAura = auraRule with { Name = "" };
+        var legacyVersion5 = CivilizationRuntimeConfiguration.Encode([], [unnamedAura]);
+        Require(legacyVersion5.AsSpan(0, 8).SequenceEqual("EDMWEF05"u8) &&
+            CivilizationRuntimeConfiguration.Equivalent(auraRule, CivilizationRuntimeConfiguration.Decode(legacyVersion5).Units.Single()),
+            "Legacy V5 missing names remain semantically compatible with authored names");
+        var legacyVersion4 = legacyVersion5[..^8].ToArray();
         "EDMWEF04"u8.CopyTo(legacyVersion4);
         BinaryPrimitives.WriteSingleLittleEndian(legacyVersion4.AsSpan(44), 3);
         BinaryPrimitives.WriteInt32LittleEndian(legacyVersion4.AsSpan(72), 0);
-        Require(CivilizationRuntimeConfiguration.Decode(legacyVersion4).Units.Single() == auraRule, "Legacy version 4 single-output import");
+        Require(CivilizationRuntimeConfiguration.Decode(legacyVersion4).Units.Single() == unnamedAura, "Legacy version 4 single-output import");
         var legacyAura = legacyVersion4[..^4].ToArray();
         "EDMWEF03"u8.CopyTo(legacyAura);
         BinaryPrimitives.WriteInt32LittleEndian(legacyAura.AsSpan(44), 3);
-        Require(CivilizationRuntimeConfiguration.Decode(legacyAura).Units.Single() == auraRule, "Legacy version 3 sight rule import");
+        Require(CivilizationRuntimeConfiguration.Decode(legacyAura).Units.Single() == unnamedAura, "Legacy version 3 sight rule import");
         var legacyProximity = legacyAura[..52].ToArray();
         "EDMWEF02"u8.CopyTo(legacyProximity);
-        Require(CivilizationRuntimeConfiguration.Decode(legacyProximity).Units.Single() == auraRule, "Legacy version 2 proximity rule import");
+        Require(CivilizationRuntimeConfiguration.Decode(legacyProximity).Units.Single() == unnamedAura, "Legacy version 2 proximity rule import");
         var legacyPackage = CivilizationInstallerPackageCodec.Decode(CivilizationInstallerPackageCodec.Encode(auraPackage));
         legacyPackage.Files.Single(file => CivilizationRuntimeEffects.IsPath(file.RelativePath)).Replacement = legacyAura;
         legacyPackage = CivilizationInstallerPackageCodec.Decode(CivilizationInstallerPackageCodec.Encode(legacyPackage));
-        Require(CivilizationRuntimeConfiguration.Decode(legacyPackage.Files.Single(file => CivilizationRuntimeEffects.IsPath(file.RelativePath)).Replacement!).Units.Single() == auraRule,
+        Require(CivilizationRuntimeConfiguration.Decode(legacyPackage.Files.Single(file => CivilizationRuntimeEffects.IsPath(file.RelativePath)).Replacement!).Units.Single() == unnamedAura,
             "Legacy version 3 exported package remains readable");
         var speed = auraRule with { Id = Guid.NewGuid(), Stat = CivilizationUnitEffectStat.MovementSpeed, Amount = 0.125f };
         Require(CivilizationRuntimeConfiguration.Decode(CivilizationRuntimeConfiguration.Encode([], [speed])).Units.Single() == speed,
@@ -186,6 +193,8 @@ internal static class CivilizationRuntimeEffectsVerification
         Success(CivilizationPackageManager.Uninstall(fixture, movementPackage.PackageId));
         Require(Configuration().Count == 0, "Movement uninstall removes its runtime output");
         VerifyMultipleTargets(auraProject, aura, fixture, output);
+        VerifyProximityGrantedAbilities(auraProject, aura, fixture, output);
+        CivilizationUnitActionVerification.Verify(fixture, output);
         {
             var allStatsProject = auraProject.Clone();
             allStatsProject.Name = "All stat output integration";
@@ -293,22 +302,23 @@ internal static class CivilizationRuntimeEffectsVerification
         File.WriteAllBytes(Path.Combine(output, "disabled-abilities.edmwe"), CivilizationRuntimeConfiguration.Encode(disabled.Research, disabled.Units));
         CivilizationPackageManager.SetRuntimeEffectsEnabled(fixture, abilityPackage.PackageId, true);
         Require(Configuration().Units.Count == 3, "Re-enabled abilities retain their command identities");
-        Require(!CivilizationPackageManager.Install(auraPackage, fixture).Success, "Conflicting complete-table ownership is refused");
+        Require(!CivilizationPackageManager.Install(auraPackage, fixture).Success, "Duplicate authored effects are refused");
         var activeAbilityFiles = abilityPackage.Files.Where(file => file.WholeFile || file.Patches.Count > 0)
             .ToDictionary(file => file.RelativePath, file => SHA256.HashData(File.ReadAllBytes(Path.Combine(fixture, file.RelativePath))));
-        Require(!CivilizationPackageManager.Install(packageA, fixture).Success,
-            "Exclusive ability tables reject another package that depends on those tables");
+        Success(CivilizationPackageManager.Install(packageA, fixture));
         foreach (var file in activeAbilityFiles)
             Require(SHA256.HashData(File.ReadAllBytes(Path.Combine(fixture, file.Key))).AsSpan().SequenceEqual(file.Value),
-                "Rejected conflicting install preserves the existing ability package byte for byte");
-        Require(Configuration().Research.Count == 0 && Configuration().Units.Count == 3 &&
-            CivilizationPackageManager.ReadInstalled(fixture).Single().PackageId == abilityPackage.PackageId,
-            "Rejected conflicting install preserves the installed ability configuration and inventory");
+                "Independent research install preserves existing ability files byte for byte");
+        Require(Configuration().Research.Count == 1 && Configuration().Units.Count == 3 &&
+            CivilizationPackageManager.ReadInstalled(fixture).Count == 2,
+            "Research and ability packages contribute to the same launch configuration");
+        Success(CivilizationPackageManager.Uninstall(fixture, packageA.PackageId));
         Success(CivilizationPackageManager.Uninstall(fixture, abilityPackage.PackageId));
         foreach (var file in files)
             Require(SHA256.HashData(File.ReadAllBytes(Path.Combine(fixture, file))).AsSpan().SequenceEqual(hashes[file]),
                 "Ability uninstall restores all six original game files");
         Require(Configuration().Count == 0, "Last mod uninstall leaves an empty configuration for the plain game launch path");
+        CivilizationRuntimeCoexistenceVerification.Run(fixture);
         foreach (var file in files)
         {
             Require(SHA256.HashData(File.ReadAllBytes(Path.Combine(fixture, file))).AsSpan().SequenceEqual(hashes[file]), "Fixture database/executable unchanged");
@@ -316,12 +326,13 @@ internal static class CivilizationRuntimeEffectsVerification
         }
         Directory.CreateDirectory(output);
         File.WriteAllText(Path.Combine(output, "runtime-effects-result.txt"),
-            "PASS: all 51 stat outputs author/save/describe and package/install/launch aggregation/uninstall as one effect; range and precision validation; multiple outputs share one effect identity, trigger, timer and command; multiple targets preserve project/history/codec/install/share/launch/uninstall, canonical deduplication, stable per-target identities and aggregate capacity; v2/v3/v4 compatibility; v5 output-list codec; project/history, research/proximity/toggle/timed package codec, command registration, concurrent mods, persisted toggles, sharing, tamper detection; selective uninstall preserves other supported mods byte for byte; rejected conflicting installs preserve ability files and inventory; final uninstall restores all six original game files and leaves an empty plain-launch configuration.\n" +
+            "PASS: all 51 stat outputs author/save/describe and package/install/launch aggregation/uninstall as one effect; range and precision validation; multiple outputs share one effect identity, trigger, timer and command; multiple targets preserve project/history/codec/install/share/launch/uninstall, canonical deduplication, stable per-target identities and aggregate capacity; V1–V6 compatibility; V7 authored UTF-8 names; project/history, research/proximity/toggle/timed package codec, command registration, concurrent mods, persisted toggles, sharing, tamper detection; selective uninstall preserves other supported mods byte for byte; rejected conflicting installs preserve ability files and inventory; final uninstall restores all six original game files and leaves an empty plain-launch configuration.\n" +
             string.Join("\n", nativeButtonChecks) + "\n" +
             nativeSlotChecks + "\n" +
             "PASS: retained slot-1 ability package codec, install, launch configuration and sharing preserve original on-disk records; uninstall restores all six original files and removes its runtime configuration.\n" +
-            "UNVERIFIED: live buttons/effects, fog refresh, save/load, two-player match. Activated state is session-only; ability tables require exclusive package ownership.\n");
-        Console.WriteLine("RUNTIME EFFECTS PASS: 51 stat outputs, multiple outputs per effect, v5 output-list codec, v2/v3/v4 compatibility, multi-output package/install/launch/uninstall, research/proximity/activated authoring, native button registration, toggle, share, tamper detection, unchanged source files.");
+            "PASS: independent runtime ability packages rebase command collisions, coexist with research, auras and mapped fields, retain disabled bindings, share their original portable exports, and uninstall in either order.\n" +
+            "UNVERIFIED: live buttons/effects, fog refresh, save/load, two-player match. Activated state is session-only.\n");
+        Console.WriteLine("RUNTIME EFFECTS PASS: 51 stat outputs, multiple outputs, V7 authored UTF-8 names, V1–V6 compatibility, package/install/launch/uninstall, research/proximity/activated authoring, native buttons, toggle, share, tamper detection, unchanged source files.");
 
         CivilizationRuntimeConfiguration Configuration()
         {
@@ -336,6 +347,77 @@ internal static class CivilizationRuntimeEffectsVerification
             CivilizationPackageManager.WithRuntimeEffectsForLaunch(fixture, bytes => snapshot = CivilizationRuntimeEffects.Decode(bytes));
             return snapshot!;
         }
+    }
+
+    private static void VerifyNamedRuntimeCodec()
+    {
+        var aura = new CivilizationRuntimeUnitRule(Guid.Parse("1bf0e378-54c0-4bd0-a377-bd4c45e44c01"), 12, 749, 777, 3, 5,
+            Name: "Sherman support");
+        foreach (var name in new[] { aura.Name, "Réserve", "守护", string.Concat(Enumerable.Repeat("🛡", 50)), new string('X', 100) })
+        {
+            var rule = aura with { Name = name, TargetName = name };
+            var bytes = CivilizationRuntimeConfiguration.Encode([], [rule]);
+            Require(bytes.AsSpan(0, 8).SequenceEqual("EDMWEF07"u8) && CivilizationRuntimeConfiguration.Decode(bytes).Units.Single() == rule,
+                "V7 preserves exact authored ASCII and Unicode names");
+            for (var length = 0; length < bytes.Length; length++)
+                Reject(() => CivilizationRuntimeConfiguration.Decode(bytes[..length]), "V7 rejects every truncated name record");
+        }
+        var mixed = CivilizationRuntimeConfiguration.Encode([], [aura, aura with { Id = Guid.NewGuid(), Name = "" }]);
+        Require(CivilizationRuntimeConfiguration.Decode(mixed).Units.Any(rule => rule.Name.Length == 0),
+            "V7 configurations can retain unnamed legacy rules alongside named rules");
+        const int nameOffset = 84; // Header16 + record60 + one output8; no ability caption.
+        var named = CivilizationRuntimeConfiguration.Encode([], [aura with { TargetName = "Sherman V" }]);
+        var targetNameOffset = nameOffset + 4 + System.Text.Encoding.UTF8.GetByteCount(aura.Name);
+        foreach (var nameLength in new[] { -1, CivilizationRuntimeConfiguration.MaximumNameBytes + 1, int.MaxValue })
+        {
+            foreach (var fieldOffset in new[] { nameOffset, targetNameOffset })
+            {
+                var malformed = named.ToArray(); BinaryPrimitives.WriteInt32LittleEndian(malformed.AsSpan(fieldOffset), nameLength);
+                Reject(() => CivilizationRuntimeConfiguration.Decode(malformed), "V7 rejects invalid display-name byte lengths");
+            }
+        }
+        foreach (var invalid in new[] { "Broken\nheading", "Broken\0heading", " Leading", "Trailing ", new string('X', 101), "\u0085", "\u2028", "\ud800" })
+        {
+            Reject(() => CivilizationRuntimeConfiguration.Encode([], [aura with { Name = invalid }]), "V7 rejects control, untrimmed, oversized and invalid Unicode names");
+            Reject(() => CivilizationRuntimeConfiguration.Encode([], [aura with { TargetName = invalid }]), "V7 rejects malformed target names too");
+        }
+        foreach (var invalidByte in new byte[] { 0, 10, 0xC0, 0xFF })
+        {
+            foreach (var fieldOffset in new[] { nameOffset, targetNameOffset })
+            {
+                var malformed = named.ToArray(); malformed[fieldOffset + 4] = invalidByte;
+                Reject(() => CivilizationRuntimeConfiguration.Decode(malformed), "V7 rejects malformed UTF-8 and control bytes");
+            }
+        }
+        Reject(() => CivilizationRuntimeConfiguration.Decode([.. named, 0]), "V7 rejects trailing metadata bytes");
+        Require(!CivilizationRuntimeConfiguration.Equivalent(aura, aura with { Name = "Different support" }) &&
+            CivilizationRuntimeConfiguration.Equivalent(aura, aura with { Name = "" }) &&
+            CivilizationRuntimeConfiguration.Equivalent(aura, aura with { TargetName = "Sherman V" }),
+            "Provided effect names match strictly, legacy names remain compatible, and localized target names stay cosmetic");
+        var targetOnly = aura with { Name = "", TargetName = "Sherman V" };
+        Require(CivilizationRuntimeConfiguration.Decode(CivilizationRuntimeConfiguration.Encode([], [targetOnly])).Units.Single() == targetOnly,
+            "Target metadata alone can upgrade an unnamed legacy rule to V7");
+        var metadataProject = CivilizationEditProject.CreateDefault();
+        var civilization = metadataProject.Civilizations.Single(civ => civ.SourceRowIndex == 11);
+        var emitter = new CivilizationEntityDraft { Name = "Ranger", Category = CivilizationCategory.Units, SourceObjectId = 749 };
+        CivilizationUnitEffects.Write(emitter, [new CivilizationUnitEffect { Name = " Guard\nformation ", TargetObjectId = 777, TargetObjectIds = [777, 878] }]);
+        civilization.Entities.Add(emitter);
+        var expanded = CivilizationRuntimeConfiguration.UnitRulesFor(civilization, emitter);
+        Require(expanded.Count == 2 && expanded.All(rule => rule.Name == "Guard formation"),
+            "Existing authored heading whitespace becomes safe single-line runtime metadata without changing its saved name");
+        var retainedBytes = CivilizationRuntimeConfiguration.Encode([], expanded.Select(rule => rule with { Name = "" }));
+        var retainedFile = new CivilizationPackageFile { RelativePath = CivilizationRuntimeEffects.PathFor(emitter), Replacement = retainedBytes.ToArray() };
+        var retainedPackage = new CivilizationInstallerPackage { ProjectName = metadataProject.Name, ProjectJson = metadataProject.Serialize(), Files = [retainedFile] };
+        var localized = CivilizationRuntimeDescriptions.ForLaunch(retainedPackage,
+            CivilizationRuntimeConfiguration.Decode(retainedBytes).Units, new Dictionary<int, string> { [777] = "Sherman V", [878] = "Citizen" });
+        var localizedBytes = CivilizationRuntimeConfiguration.Encode([], localized);
+        var localizedRead = CivilizationRuntimeConfiguration.Decode(localizedBytes).Units;
+        Require(localizedRead.Count == 2 && localizedRead.All(rule => rule.Name == "Guard formation") &&
+            localizedRead.Single(rule => rule.TargetObjectId == 777).TargetName == "Sherman V" &&
+            localizedRead.Single(rule => rule.TargetObjectId == 878).TargetName == "Citizen",
+            "Launch metadata recovers one authored name and distinct player-facing names for every expanded target");
+        Require(retainedFile.Replacement!.AsSpan().SequenceEqual(retainedBytes) && retainedPackage.ProjectJson == metadataProject.Serialize(),
+            "Localized launch descriptions never mutate package bytes or its saved source project");
     }
 
     private static void VerifyMultipleTargets(CivilizationEditProject template, CivilizationUnitEffect original,
@@ -418,6 +500,170 @@ internal static class CivilizationRuntimeEffectsVerification
         Success(CivilizationPackageManager.Uninstall(fixture, package.PackageId));
         CivilizationPackageManager.WithRuntimeEffectsForLaunch(fixture, value => launch = value);
         Require(CivilizationRuntimeConfiguration.Decode(launch!).Count == 0, "Multi-target uninstall removes every expanded rule");
+    }
+
+    private static void VerifyProximityGrantedAbilities(CivilizationEditProject template, CivilizationUnitEffect original,
+        string fixture, string output)
+    {
+        var project = template.Clone();
+        project.Name = "Proximity-granted recipient toggles";
+        var civilization = project.Civilizations.Single(civ => civ.SourceRowIndex == 11);
+        var emitter = civilization.Entities.Single();
+        var grant = original with { Id = "df6d3720-d356-4a80-b7c7-fb685e419201", Name = "Nearby recipient boost",
+            Trigger = CivilizationUnitEffectTrigger.ProximityAbility, TargetObjectId = 777, TargetObjectIds = [878, 777, 878],
+            ActivationMode = CivilizationUnitEffectActivationMode.Toggle, DurationSeconds = 30,
+            ButtonCaption = "Nearby boost", ButtonIconId = 1350, ButtonSlot = 13,
+            Outputs = [new(CivilizationUnitEffectStat.Health, 100), new(CivilizationUnitEffectStat.LineOfSight, 3)] };
+        CivilizationUnitEffects.Write(emitter, [grant]);
+        grant = CivilizationUnitEffects.Read(emitter).Single();
+        Require(grant.DurationSeconds == 0 && CivilizationUnitEffects.GetTargetObjectIds(grant).SequenceEqual([777, 878]) &&
+            CivilizationUnitEffects.Describe(grant).Contains("gain a toggle", StringComparison.Ordinal),
+            "Granted toggle draft normalizes duration and retains recipient targets");
+        var document = project.Serialize();
+        Require(CivilizationEditProject.Deserialize(document).Serialize() == document, "Granted toggle project round trip");
+        var history = new CivilizationEditHistory(project);
+        history.Change(next => CivilizationUnitEffects.Write(next.Civilizations.Single(civ => civ.SourceRowIndex == 11).Entities.Single(),
+            [grant with { TargetObjectIds = [777], ButtonCaption = "Changed grant" }]));
+        Require(history.Undo() && history.Current.Serialize() == document && history.Redo(), "Granted target/button edits preserve undo and redo");
+        Reject(() => CivilizationUnitEffects.Write(emitter, [grant with { ActivationMode = CivilizationUnitEffectActivationMode.Timed }]),
+            "Granted abilities are toggle-only");
+        Reject(() => CivilizationRuntimeConfiguration.UnitRulesFor(civilization, emitter), "Granted abilities require generated recipient commands");
+        Reject(() => CivilizationUnitEffects.Write(emitter, [grant with { NativeTargetTechnologyIds = new Dictionary<int, int> { [777] = 10000 } }]),
+            "Granted command map must cover all recipients");
+        Reject(() => CivilizationUnitEffects.Write(emitter, [grant with { NativeTargetTechnologyIds = new Dictionary<int, int> { [777] = 10000, [878] = 10000 } }]),
+            "Granted recipients cannot share a command identity");
+        var objects = File.ReadAllBytes(Path.Combine(fixture, "Data\\db\\dbobjects.dat"));
+        var technologies = File.ReadAllBytes(Path.Combine(fixture, "Data\\db\\dbtechtree.dat"));
+        var buttons = File.ReadAllBytes(Path.Combine(fixture, "Data\\db\\dbbuttons.dat"));
+        var events = File.ReadAllBytes(Path.Combine(fixture, "Data\\db\\dbevents.dat"));
+        var package = CivilizationInstallerPackageCodec.Decode(CivilizationInstallerPackageCodec.Encode(
+            CivilizationInstallerPackage.Create(project, fixture)));
+        Require(project.Serialize() == document, "Recipient command generation does not mutate the authored project");
+        var prepared = CivilizationUnitEffects.Read(CivilizationEditProject.Deserialize(package.ProjectJson).Civilizations
+            .Single(civ => civ.SourceRowIndex == 11).Entities.Single()).Single();
+        Require(prepared.NativeTechnologyId is null && prepared.NativeTargetTechnologyIds is { Count: 2 } &&
+            prepared.NativeTargetTechnologyIds.Keys.Order().SequenceEqual([777, 878]), "Portable exports retain per-recipient command identities");
+        var payload = package.Files.Single(file => CivilizationRuntimeEffects.IsPath(file.RelativePath)).Replacement!;
+        var configuration = CivilizationRuntimeConfiguration.Decode(payload);
+        var research = new CivilizationRuntimeRule(1701, 12, 4, 1);
+        Require(CivilizationRuntimeEffects.Decode(CivilizationRuntimeConfiguration.Encode([research], configuration.Units)).Single() == research,
+            "Research-only callers can read the research section of V6 configurations");
+        Require(payload.AsSpan(0, 8).SequenceEqual("EDMWEF07"u8) && configuration.Units.Count == 2 &&
+            configuration.Units.All(rule => rule.Trigger == CivilizationUnitEffectTrigger.ProximityAbility && rule.SourceObjectId == 749 &&
+                rule.CivilizationId == 12 && rule.RadiusTiles == 5 && rule.ActivationMode == CivilizationUnitEffectActivationMode.Toggle &&
+                rule.DurationMilliseconds == 0 && rule.Caption == "Nearby boost" && rule.Name == grant.Name &&
+                rule.GrantFamilyTechnologyId == prepared.NativeTargetTechnologyIds!.Values.Min() &&
+                rule.TechnologyId == prepared.NativeTargetTechnologyIds![rule.TargetObjectId] &&
+                rule.Id == CivilizationRuntimeConfiguration.RuleIdForTarget(grant, rule.TargetObjectId) &&
+                CivilizationRuntimeConfiguration.GetOutputs(rule).Count == 2), "V6 keeps emitter and recipient identities distinct with one command per recipient");
+        var outputObjects = package.Files.Single(file => CivilizationInstallerPackage.IsObjectPath(file.RelativePath)).Replacement!;
+        var outputTechnologies = package.Files.Single(file => CivilizationInstallerPackage.IsTechnologyPath(file.RelativePath)).Replacement!;
+        var commands = CivilizationTechnologyBindings.ReadRecords(outputTechnologies);
+        foreach (var rule in configuration.Units)
+        {
+            var command = commands.Single(record => record.TechId == rule.TechnologyId);
+            Require(command.ProducerObjectIds.SequenceEqual([rule.TargetObjectId]) &&
+                command.Identifier == "EDMW ability " + rule.Id.ToString("N") &&
+                CivilizationUnitEffectBindings.CustomAbilityButtonSlots.Contains(command.CommonButtonSlot) &&
+                CivilizationObjectDetails.ReadActionTechnologyIds(outputObjects, rule.TargetObjectId,
+                    CivilizationUnitEffectBindings.CommandSourceCategory(outputObjects, rule.TargetObjectId)).Contains((uint)rule.TechnologyId),
+                "Granted buttons are registered on recipient object types instead of the aura emitter");
+        }
+        Require(CivilizationObjectDetails.ReadActionTechnologyIds(objects, 749, emitter.Category).SequenceEqual(
+            CivilizationObjectDetails.ReadActionTechnologyIds(outputObjects, 749, emitter.Category)), "Grant-only export preserves the emitter's action list");
+        File.WriteAllBytes(Path.Combine(output, "proximity-granted-abilities.edmwe"), payload);
+        File.WriteAllBytes(Path.Combine(output, "proximity-granted-abilities-dbobjects.dat"), outputObjects);
+        File.WriteAllBytes(Path.Combine(output, "proximity-granted-abilities-dbtechtree.dat"), outputTechnologies);
+        var reordered = project.Clone();
+        CivilizationUnitEffects.Write(reordered.Civilizations.Single(civ => civ.SourceRowIndex == 11).Entities.Single(),
+            [grant with { TargetObjectIds = [777, 878] }]);
+        Require(CivilizationInstallerPackage.Create(reordered, fixture).Files.Single(file => CivilizationRuntimeEffects.IsPath(file.RelativePath))
+            .Replacement!.AsSpan().SequenceEqual(payload), "Recipient ordering and duplicate selections do not change grant commands or runtime bytes");
+        var oldFraming = payload.ToArray(); "EDMWEF05"u8.CopyTo(oldFraming);
+        Reject(() => CivilizationRuntimeConfiguration.Decode(oldFraming), "V5 cannot reinterpret a granted command as an activated ability");
+        Reject(() => CivilizationRuntimeConfiguration.Encode([], [configuration.Units[0], configuration.Units[1] with { TechnologyId = configuration.Units[0].TechnologyId }]),
+            "Granted rules cannot share a command identity");
+        Reject(() => CivilizationRuntimeConfiguration.Encode([], configuration.Units.Select(rule => rule with { GrantFamilyTechnologyId = 14999 })),
+            "Granted families require an existing member command");
+        Reject(() => CivilizationRuntimeConfiguration.Encode([], [configuration.Units[0], configuration.Units[1] with { TargetObjectId = configuration.Units[0].TargetObjectId }]),
+            "A granted family cannot apply two commands to the same recipient type");
+        foreach (var mismatch in new[] { configuration.Units[1] with { SourceObjectId = 750 },
+            configuration.Units[1] with { Caption = "Other grant" }, configuration.Units[1] with { RadiusTiles = 6 },
+            configuration.Units[1] with { Enabled = false }, configuration.Units[1] with { Outputs = [new(CivilizationUnitEffectStat.Health, 1)] } })
+            Reject(() => CivilizationRuntimeConfiguration.Encode([], [configuration.Units[0], mismatch]), "Grant family members must describe the same authored ability");
+        foreach (var pair in new[] { (Offset: 32, Value: 0), (Offset: 40, Value: 2), (Offset: 44, Value: 1000) })
+        {
+            var malformed = payload.ToArray();
+            BinaryPrimitives.WriteInt32LittleEndian(malformed.AsSpan(16 + pair.Offset), pair.Value);
+            Reject(() => CivilizationRuntimeConfiguration.Decode(malformed), "Granted wire rules require radius, toggle and zero duration");
+        }
+        var legacyVersion6 = CivilizationRuntimeConfiguration.Encode([], configuration.Units.Select(rule => rule with { Name = "" }));
+        Require(legacyVersion6.AsSpan(0, 8).SequenceEqual("EDMWEF06"u8) && CivilizationRuntimeConfiguration.Decode(legacyVersion6).Units
+            .Zip(configuration.Units).All(pair => CivilizationRuntimeConfiguration.Equivalent(pair.First, pair.Second)),
+            "Unnamed legacy V6 grants remain semantically compatible with authored names");
+        var normal = configuration.Units[0] with { Trigger = CivilizationUnitEffectTrigger.Activated, Name = "",
+            SourceObjectId = configuration.Units[0].TargetObjectId, RadiusTiles = 0, GrantFamilyTechnologyId = 0 };
+        Require(CivilizationRuntimeConfiguration.Encode([], [normal]).AsSpan(0, 8).SequenceEqual("EDMWEF05"u8),
+            "Existing activated rules continue to write V5 framing");
+        var recipient = new CivilizationEntityDraft { Name = "Sherman", Category = CivilizationCategory.Units, SourceObjectId = 777 };
+        var preferred = CivilizationUnitEffectBindings.AvailableButtonSlots(objects, technologies, buttons, recipient, 11).First();
+        var personal = grant with { Id = Guid.NewGuid().ToString("D"), Trigger = CivilizationUnitEffectTrigger.Activated,
+            TargetObjectId = 777, TargetObjectIds = [777], DurationSeconds = 1, ButtonSlot = preferred };
+        var collidingGrant = grant with { TargetObjectId = 777, TargetObjectIds = [777], ButtonSlot = preferred };
+        var assigned = CivilizationUnitEffectBindings.BuildAbilityButtons(objects, technologies, buttons, events,
+            [new(11, emitter, collidingGrant), new(11, recipient, personal)]);
+        Require(assigned.Registrations.Count == 2 && assigned.Registrations.Select(item => item.ButtonSlot).Distinct().Count() == 2 &&
+            assigned.Registrations.Single(item => item.AuthoredEffectId == personal.Id).ButtonSlot == preferred,
+            "Recipient grants relocate preferred collisions while preserving ordinary activated positions");
+        var sameRecipient = project.Clone();
+        CivilizationUnitEffects.Write(sameRecipient.Civilizations.Single(civ => civ.SourceRowIndex == 11).Entities.Single(),
+            [collidingGrant, collidingGrant with { Id = Guid.NewGuid().ToString("D") }]);
+        var collisionPackage = CivilizationInstallerPackage.Create(sameRecipient, fixture);
+        var collisionRules = CivilizationRuntimeConfiguration.Decode(collisionPackage.Files.Single(file =>
+            CivilizationRuntimeEffects.IsPath(file.RelativePath)).Replacement!).Units;
+        var collisionTable = collisionPackage.Files.Single(file => CivilizationInstallerPackage.IsTechnologyPath(file.RelativePath)).Replacement!;
+        var collisionCommands = CivilizationTechnologyBindings.ReadRecords(collisionTable);
+        var firstCommand = collisionCommands.Single(record => record.TechId == collisionRules[0].TechnologyId);
+        var secondCommand = collisionCommands.Single(record => record.TechId == collisionRules[1].TechnologyId);
+        Require(firstCommand.CommonButtonSlot != secondCommand.CommonButtonSlot, "Distinct recipient grants may share a preferred authored position");
+        BinaryPrimitives.WriteInt32LittleEndian(collisionTable.AsSpan(secondCommand.Offset + 276), firstCommand.CommonButtonSlot);
+        BinaryPrimitives.WriteInt32LittleEndian(collisionTable.AsSpan(secondCommand.Offset + 324 + 10 * 8), firstCommand.CommonButtonSlot);
+        Reject(() => CivilizationInstallerPackageCodec.Encode(collisionPackage), "Portable grant registrations cannot collide on an actual recipient cell");
+        var crowded = Enumerable.Range(0, CivilizationUnitEffectBindings.AvailableButtonSlots(objects, technologies, buttons, recipient, 11).Count + 1)
+            .Select(_ => new CivilizationActivatedAbilityRequest(11, emitter, collidingGrant with { Id = Guid.NewGuid().ToString("D") })).ToArray();
+        Reject(() => CivilizationUnitEffectBindings.BuildAbilityButtons(objects, technologies, buttons, events, crowded),
+            "Recipient grant exports reject genuine button exhaustion");
+        var singleton = project.Clone();
+        CivilizationUnitEffects.Write(singleton.Civilizations.Single(civ => civ.SourceRowIndex == 11).Entities.Single(), [collidingGrant]);
+        var singletonPackage = CivilizationInstallerPackage.Create(singleton, fixture);
+        var singletonDraft = CivilizationUnitEffects.Read(CivilizationEditProject.Deserialize(singletonPackage.ProjectJson).Civilizations
+            .Single(civ => civ.SourceRowIndex == 11).Entities.Single()).Single();
+        Require(singletonDraft.NativeTechnologyId == singletonDraft.NativeTargetTechnologyIds![777] &&
+            CivilizationRuntimeConfiguration.Decode(singletonPackage.Files.Single(file => CivilizationRuntimeEffects.IsPath(file.RelativePath)).Replacement!)
+                .Units.Single().Id == Guid.Parse(grant.Id), "One grant recipient preserves its original identity and scalar command mirror");
+        var tampered = CivilizationInstallerPackageCodec.Decode(CivilizationInstallerPackageCodec.Encode(package));
+        tampered.Files.Single(file => CivilizationRuntimeEffects.IsPath(file.RelativePath)).Replacement![40] ^= 1;
+        Reject(() => CivilizationInstallerPackageCodec.Encode(tampered), "Grant package sidecar must retain its authored target expansion");
+        Success(CivilizationPackageManager.Install(package, fixture));
+        byte[]? launch = null;
+        CivilizationPackageManager.WithRuntimeEffectsForLaunch(fixture, value => launch = value);
+        Require(launch!.AsSpan().SequenceEqual(payload), "Recipient grants survive installation and launch aggregation");
+        Require(CivilizationPackageManager.ReadInstalledExport(project, fixture)?.PackageId == package.PackageId,
+            "Authored grant draft matches its installed export after clearing generated recipient IDs");
+        CivilizationPackageManager.SetRuntimeEffectsEnabled(fixture, package.PackageId, false);
+        CivilizationPackageManager.WithRuntimeEffectsForLaunch(fixture, value => launch = value);
+        Require(CivilizationRuntimeConfiguration.Decode(launch!).Units.All(rule => !rule.Enabled && rule.Trigger == CivilizationUnitEffectTrigger.ProximityAbility) &&
+            CivilizationRuntimeConfiguration.Decode(launch!).Units.Count == 2, "Disabled grants retain inactive button bindings without granting stat outputs");
+        var shared = CivilizationPackageManager.CreateSharePackage(fixture, package.PackageId);
+        Require(CivilizationInstallerPackageCodec.Encode(shared).AsSpan().SequenceEqual(CivilizationInstallerPackageCodec.Encode(package)),
+            "Sharing a disabled grant preserves its enabled portable rules and recipient command map");
+        CivilizationPackageManager.SetRuntimeEffectsEnabled(fixture, package.PackageId, true);
+        Success(CivilizationPackageManager.Uninstall(fixture, package.PackageId));
+        Require(File.ReadAllBytes(Path.Combine(fixture, "Data\\db\\dbobjects.dat")).AsSpan().SequenceEqual(objects) &&
+            File.ReadAllBytes(Path.Combine(fixture, "Data\\db\\dbtechtree.dat")).AsSpan().SequenceEqual(technologies),
+            "Grant uninstall restores recipient actions and native command tables exactly");
+        CivilizationPackageManager.WithRuntimeEffectsForLaunch(fixture, value => launch = value);
+        Require(CivilizationRuntimeConfiguration.Decode(launch!).Count == 0, "Grant uninstall removes every expanded runtime rule");
     }
 
     private static string VerifyAbilityButtonSlots(byte[] objects, byte[] technologies, byte[] buttons, byte[] events)
@@ -656,9 +902,17 @@ internal static class CivilizationRuntimeEffectsVerification
             BinaryPrimitives.WriteInt32LittleEndian(technologyFile.Replacement.AsSpan(record.Offset + 324 + row * 8), 1);
             BinaryPrimitives.WriteInt32LittleEndian(technologyFile.Replacement.AsSpan(record.Offset + 328 + row * 8), 1);
         }
+        foreach (var file in legacy.Files.Where(file => CivilizationRuntimeEffects.IsPath(file.RelativePath)))
+        {
+            var configuration = CivilizationRuntimeConfiguration.Decode(file.Replacement!);
+            file.Replacement = CivilizationRuntimeConfiguration.Encode(configuration.Research,
+                configuration.Units.Select(rule => rule with { Name = "" }));
+        }
         legacy = CivilizationInstallerPackageCodec.Decode(CivilizationInstallerPackageCodec.Encode(legacy));
         technologyFile = legacy.Files.Single(file => CivilizationInstallerPackage.IsTechnologyPath(file.RelativePath));
         var legacyTable = technologyFile.Replacement!.ToArray();
+        var legacyRuntimeFiles = legacy.Files.Where(file => CivilizationRuntimeEffects.IsPath(file.RelativePath))
+            .ToDictionary(file => file.RelativePath, file => file.Replacement!.ToArray());
         var before = sourceFiles.ToDictionary(path => path, path => SHA256.HashData(File.ReadAllBytes(Path.Combine(fixture, path))));
         Success(CivilizationPackageManager.Install(legacy, fixture));
         Require(File.ReadAllBytes(Path.Combine(fixture, technologyFile.RelativePath)).AsSpan().SequenceEqual(legacyTable),
@@ -670,6 +924,14 @@ internal static class CivilizationRuntimeEffectsVerification
         Require(snapshot is not null && snapshot.Units.Count == expectedRules.Count && snapshot.Units.All(rule =>
             expectedRules.TryGetValue(rule.Id, out var expected) && CivilizationRuntimeConfiguration.Equivalent(rule, expected)),
             "A retained slot-1 export keeps its native command and effect identity in the launch configuration");
+        var authoredNames = project.Civilizations.SelectMany(civilization => civilization.Entities.SelectMany(entity =>
+            CivilizationRuntimeConfiguration.UnitRulesFor(civilization, entity))).ToDictionary(rule => rule.Id, rule => rule.Name);
+        Require(expectedRules.Values.All(rule => rule.Name.Length == 0) && snapshot!.Units.All(rule =>
+            authoredNames.TryGetValue(rule.Id, out var name) && name.Length != 0 && rule.Name == name),
+            "Legacy installed V5 effects receive authored names in the launch snapshot without re-export");
+        foreach (var file in legacyRuntimeFiles)
+            Require(File.ReadAllBytes(Path.Combine(fixture, file.Key)).AsSpan().SequenceEqual(file.Value),
+                "Legacy name enrichment never rewrites installed runtime files");
         Require(CivilizationInstallerPackageCodec.Encode(CivilizationPackageManager.CreateSharePackage(fixture, legacy.PackageId)).AsSpan()
             .SequenceEqual(CivilizationInstallerPackageCodec.Encode(legacy)), "Sharing retains the old slot-1 export byte for byte");
         Require(File.ReadAllBytes(Path.Combine(fixture, technologyFile.RelativePath)).AsSpan().SequenceEqual(legacyTable),
@@ -722,6 +984,7 @@ internal static class CivilizationRuntimeEffectsVerification
         var storage = Path.Combine(fixture, ".edmw-civilization-packages");
         var manifestPath = Path.Combine(storage, "installed", legacy.PackageId + ".json");
         var manifest = JsonNode.Parse(File.ReadAllText(manifestPath))!.AsObject();
+        manifest.Remove("exportPackage"); // Earlier installations had no installation-local ID mapping.
         manifest["package"] = System.Text.Json.JsonSerializer.SerializeToNode(legacy, CivilizationInstallerPackageCodec.JsonOptions);
         File.WriteAllText(manifestPath, manifest.ToJsonString());
         var badTable = legacy.Files.Single(file => CivilizationInstallerPackage.IsTechnologyPath(file.RelativePath)).Replacement!;

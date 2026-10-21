@@ -244,6 +244,16 @@ internal static class Program
             try { Civilizations.CivilizationRuntimeEffectsVerification.Run(args[1], args[2]); return 0; }
             catch (Exception exception) { Console.Error.WriteLine("RUNTIME EFFECTS FAIL: " + exception); return 1; }
         }
+        if (args.Length == 3 && args[0].Equals("--verify-civilization-merges", StringComparison.OrdinalIgnoreCase))
+        {
+            try { Civilizations.CivilizationMergeVerification.RunIsolated(args[1], args[2]); return 0; }
+            catch (Exception exception) { Console.Error.WriteLine("CIVILIZATION MERGES FAIL: " + exception); return 1; }
+        }
+        if (args.Length == 3 && args[0].Equals("--verify-runtime-coexistence", StringComparison.OrdinalIgnoreCase))
+        {
+            try { Civilizations.CivilizationMergeVerification.RunIsolated(args[1], args[2], runtimeOnly: true); return 0; }
+            catch (Exception exception) { Console.Error.WriteLine("RUNTIME COEXISTENCE FAIL: " + exception); return 1; }
+        }
         if (args.Length == 3 && args[0].Equals("--verify-civilization-repaint", StringComparison.OrdinalIgnoreCase))
         {
             Application.SetUnhandledExceptionMode(UnhandledExceptionMode.ThrowException);

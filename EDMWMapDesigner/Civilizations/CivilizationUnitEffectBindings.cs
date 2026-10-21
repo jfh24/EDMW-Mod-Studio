@@ -11,7 +11,8 @@ public sealed record CivilizationAbilityButtonChoice(int Id, string Name, int Sl
 public sealed record CivilizationActivatedAbilityRequest(int CivilizationRow,
     CivilizationEntityDraft Source, CivilizationUnitEffect Effect);
 public sealed record CivilizationActivatedAbilityRegistration(string EffectId, int CivilizationId,
-    int SourceObjectId, int TechnologyId, string Caption, string Tooltip);
+    int SourceObjectId, int TechnologyId, string Caption, string Tooltip,
+    string AuthoredEffectId = "", int TargetObjectId = -1, int ButtonSlot = -1);
 public sealed record CivilizationAbilityButtonBuild(byte[] Objects, byte[] Technologies,
     IReadOnlyList<CivilizationActivatedAbilityRegistration> Registrations);
 
@@ -28,13 +29,38 @@ public static class CivilizationUnitEffectBindings
     public static CivilizationAbilityButtonBuild BuildAbilityButtons(byte[] objects, byte[] technologies,
         byte[] buttons, byte[] events, IReadOnlyList<CivilizationActivatedAbilityRequest> requests)
     {
-        var active = requests.Where(request => request.Effect.Enabled &&
-            request.Effect.Trigger == CivilizationUnitEffectTrigger.Activated)
+        var authored = requests.Where(request => request.Effect.Enabled &&
+            request.Effect.Trigger != CivilizationUnitEffectTrigger.Proximity)
             .OrderBy(request => request.Effect.Id, StringComparer.Ordinal).ToArray();
-        if (active.Length == 0) return new(objects, technologies, []);
-        foreach (var request in active) CivilizationUnitEffects.Validate(request.Source, [request.Effect]);
-        if (active.Length > 1024 || active.Select(request => Guid.Parse(request.Effect.Id)).Distinct().Count() != active.Length)
+        if (authored.Length == 0) return new(objects, technologies, []);
+        foreach (var request in authored)
+        {
+            CivilizationUnitEffects.Validate(request.Source, [request.Effect]);
+            var offset = CivilizationObjectBindings.ValidateRecord(objects, request.Source.SourceObjectId!.Value, request.Source.Category);
+            if (request.Source.SourceTechnologyId is int identity && identity != BinaryPrimitives.ReadInt32LittleEndian(
+                objects.AsSpan(offset + CivilizationObjectBindings.TechnologyIdOffset, 4)))
+                throw new InvalidDataException("The ability's source technology does not match its unit or building.");
+        }
+        if (authored.Sum(request => (long)CivilizationUnitEffects.GetTargetObjectIds(request.Effect).Count) > 1024 ||
+            authored.Select(request => Guid.Parse(request.Effect.Id)).Distinct().Count() != authored.Length)
             throw new InvalidDataException("Activated ability identifiers must be unique and within the 1,024-rule limit.");
+        var active = authored.SelectMany(request =>
+        {
+            if (request.Effect.Trigger == CivilizationUnitEffectTrigger.Activated)
+                return new[] { (Request: request, AuthoredId: request.Effect.Id, Target: request.Source.SourceObjectId!.Value, Granted: false) };
+            _ = CivilizationObjectBindings.ValidateRecord(objects, request.Source.SourceObjectId!.Value, request.Source.Category);
+            return CivilizationUnitEffects.GetTargetObjectIds(request.Effect).Select(target =>
+            {
+                var recipient = new CivilizationEntityDraft { Name = $"Object {target}", SourceObjectId = target, Category = CommandSourceCategory(objects, target) };
+                var command = request.Effect with { Id = CivilizationRuntimeConfiguration.RuleIdForTarget(request.Effect, target).ToString("D"),
+                    Trigger = CivilizationUnitEffectTrigger.Activated, TargetObjectId = target, TargetObjectIds = [target],
+                    ProximityDelaySeconds = 0, MaxAffectedTargets = 0, MaxConcurrentTargets = 0, TargetPlayers = CivilizationUnitEffectTargetPlayers.Own,
+                    DurationSeconds = 1, NativeTechnologyId = request.Effect.NativeTargetTechnologyIds?.GetValueOrDefault(target),
+                    NativeTargetTechnologyIds = null };
+                return (Request: new CivilizationActivatedAbilityRequest(request.CivilizationRow, recipient, command),
+                    AuthoredId: request.Effect.Id, Target: target, Granted: true);
+            });
+        }).OrderBy(item => item.Granted).ThenBy(item => item.Request.Effect.Id, StringComparer.Ordinal).ToArray();
         // Custom commands are consumed by the runtime. If launched without it,
         // the native fallback must remain an empty, zero-cost event.
         if (CivilizationAbilityData.ReadEvents(events)[0].EffectIds.Count != 0)
@@ -53,8 +79,9 @@ public static class CivilizationUnitEffectBindings
         var registrations = new List<CivilizationActivatedAbilityRegistration>();
         var nextStoredId = checked(records.Max(record => BinaryPrimitives.ReadInt32LittleEndian(
             technologies.AsSpan(record.Offset + 100, 4))) + 1);
-        foreach (var request in active)
+        foreach (var item in active)
         {
+            var request = item.Request;
             CivilizationUnitEffects.Validate(request.Source, [request.Effect]);
             var effect = request.Effect;
             var sourceId = request.Source.SourceObjectId!.Value;
@@ -70,14 +97,21 @@ public static class CivilizationUnitEffectBindings
                 throw new InvalidDataException($"{effect.Name}: this runtime prototype supports printable English button captions.");
             if (!CustomAbilityButtonSlots.Contains(effect.ButtonSlot))
                 throw new InvalidDataException($"{effect.Name}: button slot {effect.ButtonSlot} overlaps the game's standard action controls. Open Custom effects and choose a free button position.");
-            if (!claimedSlots.Add((sourceId, request.CivilizationRow, effect.ButtonSlot)))
-                throw new InvalidDataException($"{effect.Name}: another custom ability already occupies button slot {effect.ButtonSlot}.");
             var existing = CivilizationObjectDetails.ReadActionTechnologyIds(objects, sourceId, request.Source.Category).Select(id => checked((int)id))
                 .Concat(records.Where(record => record.ProducerObjectIds.Contains(sourceId)).Select(record => record.TechId)).Distinct();
+            var occupied = new HashSet<int>();
             foreach (var id in existing)
-                if (byId.TryGetValue(id, out var other) && other.AllowsCivilizationRow(request.CivilizationRow) && !other.EditorOnly &&
-                    CivilizationTechnologyBindings.ReadProgressionButtonSlot(other, request.CivilizationRow, buttons) == effect.ButtonSlot)
-                    throw new InvalidDataException($"{effect.Name}: button slot {effect.ButtonSlot} is occupied by {other.Identifier}. Choose a free slot.");
+                if (byId.TryGetValue(id, out var other) && other.AllowsCivilizationRow(request.CivilizationRow) && !other.EditorOnly)
+                    occupied.Add(CivilizationTechnologyBindings.ReadProgressionButtonSlot(other, request.CivilizationRow, buttons));
+            if (item.Granted)
+            {
+                var slot = CustomAbilityButtonSlots.OrderBy(slot => slot == effect.ButtonSlot ? 0 : 1)
+                    .FirstOrDefault(slot => !occupied.Contains(slot) && !claimedSlots.Contains((sourceId, request.CivilizationRow, slot)), -1);
+                if (slot < 0) throw new InvalidDataException($"{effect.Name}: recipient object {sourceId} has no free custom ability button position.");
+                effect = effect with { ButtonSlot = slot };
+            }
+            if (occupied.Contains(effect.ButtonSlot) || !claimedSlots.Add((sourceId, request.CivilizationRow, effect.ButtonSlot)))
+                throw new InvalidDataException($"{effect.Name}: button slot {effect.ButtonSlot} is occupied. Choose a free slot.");
             var technologyId = effect.NativeTechnologyId ?? Enumerable.Range(10000, 5000).FirstOrDefault(id => !usedTechnologyIds.Contains(id), -1);
             if (technologyId is < 10000 or > 14999 || !usedTechnologyIds.Add(technologyId))
                 throw new InvalidDataException($"{effect.Name}: its native technology ID is unavailable. Remove the prior installed version before rebuilding it.");
@@ -114,12 +148,13 @@ public static class CivilizationUnitEffectBindings
             CivilizationTechnologyBindings.WriteProgressionProducerAction(resultObjects, sourceId, technologyId);
             additions.Add((technologyId, recordBytes));
             var adjustments = string.Join(", ", CivilizationUnitEffects.GetOutputs(effect).Select(output =>
-                CivilizationUnitEffects.DescribeOutput(output) + " (" +
-                CivilizationUnitEffects.GetStatDefinition(output.Stat).Unit + ")"));
-            var ending = effect.ActivationMode == CivilizationUnitEffectActivationMode.Toggle
+                CivilizationUnitEffects.DescribeOutput(output) + (output.Kind == CivilizationUnitEffectOutputKind.StatModifier ? " (" +
+                CivilizationUnitEffects.GetStatDefinition(output.Stat).Unit + ")" : "")));
+            var ending = effect.ActivationMode == CivilizationUnitEffectActivationMode.Instant ? "Applies once per click." : effect.ActivationMode == CivilizationUnitEffectActivationMode.Toggle
                 ? "Click again to turn off." : $"Lasts {effect.DurationSeconds} {(effect.DurationSeconds == 1 ? "second" : "seconds")}.";
             registrations.Add(new(effect.Id, request.CivilizationRow + 1, sourceId, technologyId, effect.ButtonCaption,
-                $"{effect.ButtonCaption}: {adjustments}. {ending}"));
+                $"{effect.ButtonCaption}: {adjustments}. {ending}" + (item.Granted ? " Available near an eligible aura source; leaving its radius turns this ability off." : ""),
+                item.AuthoredId, item.Target, effect.ButtonSlot));
         }
         // Native lookup 0x00401D64 computes the epoch from the technology ID:
         // IDs 10000..14999 belong to existing groups 9..13. Each group's map
@@ -212,6 +247,17 @@ public static class CivilizationUnitEffectBindings
     }
 
     private static void Put(byte[] bytes, int offset, int value) => BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(offset), value);
+
+    internal static CivilizationCategory CommandSourceCategory(byte[] objects, int sourceId)
+    {
+        if (sourceId is < 0 or >= 100_000 || objects.Length < 4L + ((long)sourceId + 1) * CivilizationObjectBindings.RecordSize)
+            throw new InvalidDataException("The ability recipient is outside the object database.");
+        var offset = 4 + sourceId * CivilizationObjectBindings.RecordSize;
+        var category = (objects[offset] is (byte)'b' or (byte)'B') && objects[offset + 1] == (byte)' '
+            ? CivilizationCategory.Buildings : CivilizationCategory.Units;
+        _ = CivilizationObjectBindings.ValidateRecord(objects, sourceId, category);
+        return category;
+    }
 
     /// <summary>Free native HUD slots, before accounting for the editor's other custom attachments.</summary>
     public static IReadOnlyList<int> AvailableButtonSlots(byte[] objects, byte[] technologies,

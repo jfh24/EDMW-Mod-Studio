@@ -81,7 +81,13 @@ std::vector<void*> AbilityActors(const edmw::NativeAbilityBinding& binding, void
         }
     }
     std::vector<void*> actors;
-    for (const auto id : edmw::NativeAbilityActivationTargets(binding, anchorSnapshot, selected))
+    std::vector<uint32_t> recipients;
+    if (binding.proximityGranted) for (const auto& entry : abilities) {
+        const auto& member = entry.second;
+        if (member.enabled && member.proximityGranted && member.civilization == binding.civilization &&
+            member.grantFamilyTechnology == binding.grantFamilyTechnology) recipients.push_back(member.sourceObject);
+    }
+    for (const auto id : edmw::NativeAbilityActivationTargets(binding, anchorSnapshot, selected, recipients))
         actors.push_back(pointers.at(id));
     edmw::TraceEffect("Ability targets: technology=%u anchor=%u synchronized-selection=%u eligible=%u",
         binding.technology, anchorSnapshot.id, count, static_cast<uint32_t>(actors.size()));
@@ -337,7 +343,16 @@ void __fastcall ExecuteAbility(void* command, void*) {
         edmw::TraceEffect("Ability command rejected: technology=%u reason=registered-node-identity-mismatch", technology); return;
     }
     const auto actors = AbilityActors(found->second, player, actor, playerIndex, civilization);
-    const auto activated = edmw::ActivateUnitEffects(found->second.effect, actors, playerIndex);
+    std::vector<edmw::UnitEffectId> effects{ found->second.effect };
+    if (found->second.proximityGranted) {
+        effects.clear();
+        for (const auto& entry : abilities) {
+            const auto& member = entry.second;
+            if (member.enabled && member.proximityGranted && member.civilization == civilization &&
+                member.grantFamilyTechnology == found->second.grantFamilyTechnology) effects.push_back(member.effect);
+        }
+    }
+    const auto activated = edmw::ActivateUnitEffectGroup(effects, actors, playerIndex, found->second.resourceCosts);
     edmw::TraceEffect("Ability activation %s: technology=%u playerIndex=%u actor=%u civilization=%u targets=%u",
         activated ? "accepted" : "rejected", technology, playerIndex, Read<uint32_t>(actor, 0x24), civilization,
         static_cast<uint32_t>(actors.size()));
@@ -383,39 +398,90 @@ bool Printable(const std::string& value, size_t limit) {
         [](unsigned char character) { return character >= 32 && character <= 126; }) &&
         std::any_of(value.begin(), value.end(), [](unsigned char character) { return character != ' '; });
 }
+std::string NativeHelpText(const std::string& utf8) {
+    if (utf8.empty() || utf8.size() > 32768) return {};
+    const auto count = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, utf8.data(), static_cast<int>(utf8.size()), nullptr, 0);
+    if (count <= 0) return {};
+    std::wstring wide(static_cast<size_t>(count), L'\0');
+    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, utf8.data(), static_cast<int>(utf8.size()), wide.data(), count) != count) return {};
+    const auto flags = GetACP() == CP_UTF8 ? 0u : WC_NO_BEST_FIT_CHARS;
+    const auto bytes = WideCharToMultiByte(CP_ACP, flags, wide.data(), count, nullptr, 0, nullptr, nullptr);
+    if (bytes <= 0 || bytes > 32768) return {};
+    std::string text(static_cast<size_t>(bytes), '\0');
+    if (WideCharToMultiByte(CP_ACP, flags, wide.data(), count, text.data(), bytes, nullptr, nullptr) != bytes) return {};
+    return text;
+}
 }
 
 bool edmw::InstallNativeAbilities(const std::vector<NativeAbilityBinding>& bindings) {
-    if (bindings.empty()) return true;
-    if (!abilities.empty() || bindings.size() > 1024 || originalFindTechnology || originalInitializeTree || originalActionKey ||
-        memcmp(reinterpret_cast<const void*>(findTechnologyAddress), findTechnologyBytes, sizeof(findTechnologyBytes)) ||
-        memcmp(reinterpret_cast<const void*>(initializeTreeAddress), initializeTreeBytes, sizeof(initializeTreeBytes)) ||
-        memcmp(reinterpret_cast<const void*>(actionKeyAddress), actionKeyBytes, sizeof(actionKeyBytes)) ||
-        memcmp(reinterpret_cast<const void*>(groupHudKeyReturn - 5), groupHudKeyCallBytes, sizeof(groupHudKeyCallBytes)) ||
-        *reinterpret_cast<const uintptr_t*>(commandSlot) != commandFunction) return false;
+    TraceEffect("ability-install begin count=%u", static_cast<uint32_t>(bindings.size()));
+    if (bindings.empty()) { TraceEffect("ability-install ready=empty"); return true; }
+    if (!abilities.empty() || bindings.size() > 1024 || originalFindTechnology || originalInitializeTree || originalActionKey) {
+        TraceEffect("ability-install reject=state-or-count"); return false;
+    }
+    const struct { uintptr_t address; const uint8_t* bytes; size_t size; const char* role; } signatures[]{
+        { findTechnologyAddress, findTechnologyBytes, sizeof(findTechnologyBytes), "find-technology" },
+        { initializeTreeAddress, initializeTreeBytes, sizeof(initializeTreeBytes), "initialize-tree" },
+        { actionKeyAddress, actionKeyBytes, sizeof(actionKeyBytes), "action-key" },
+        { groupHudKeyReturn - 5, groupHudKeyCallBytes, sizeof(groupHudKeyCallBytes), "group-action-key-call" }
+    };
+    for (const auto& signature : signatures)
+        if (memcmp(reinterpret_cast<const void*>(signature.address), signature.bytes, signature.size)) {
+            TraceEffect("ability-install reject=signature role=%s", signature.role); return false;
+        }
+    if (*reinterpret_cast<const uintptr_t*>(commandSlot) != commandFunction) {
+        TraceEffect("ability-install reject=command-slot"); return false;
+    }
     const auto engine = GetModuleHandleW(L"Low-Level Engine.dll");
-    if (!engine) return false;
+    if (!engine) { TraceEffect("ability-install reject=engine-module win32=%lu", GetLastError()); return false; }
     originalResourceString = reinterpret_cast<ResourceString>(GetProcAddress(engine, "?GetString@UResourceFile@@QAEJJAAVUWideString@@@Z"));
     assignString = reinterpret_cast<AssignString>(GetProcAddress(engine, "??4UWideString@@QAEAAV0@PBD@Z"));
-    if (!originalResourceString || !assignString ||
-        *reinterpret_cast<const ResourceString*>(resourceStringSlot) != originalResourceString ||
-        *reinterpret_cast<const AssignString*>(assignStringSlot) != assignString) return false;
+    if (!originalResourceString) { TraceEffect("ability-install reject=engine-export role=resource-string"); return false; }
+    if (!assignString) { TraceEffect("ability-install reject=engine-export role=string-assignment"); return false; }
+    if (*reinterpret_cast<const ResourceString*>(resourceStringSlot) != originalResourceString) {
+        TraceEffect("ability-install reject=import-slot role=resource-string"); return false;
+    }
+    if (*reinterpret_cast<const AssignString*>(assignStringSlot) != assignString) {
+        TraceEffect("ability-install reject=import-slot role=string-assignment"); return false;
+    }
     std::map<uint32_t, NativeAbilityBinding> checked;
     for (const auto& binding : bindings) {
         if (binding.technology < 10000 || binding.technology > 14999 || binding.civilization < 4 ||
             binding.civilization > 12 || binding.sourceObject >= 100000 || !Printable(binding.caption, 40) ||
-            !Printable(binding.tooltip, 8192) || !checked.emplace(binding.technology, binding).second) return false;
+            binding.tooltip.empty() || binding.tooltip.size() > 32768) {
+            TraceEffect("ability-install reject=binding technology=%u", binding.technology); return false;
+        }
+        auto native = binding;
+        native.tooltip = NativeHelpText(binding.tooltip);
+        if (native.tooltip.empty()) { TraceEffect("ability-install reject=tooltip-encoding technology=%u", binding.technology); return false; }
+        if (!checked.emplace(binding.technology, std::move(native)).second) {
+            TraceEffect("ability-install reject=duplicate-technology technology=%u", binding.technology); return false;
+        }
     }
+    for (const auto& binding : bindings)
+        if (binding.proximityGranted && binding.enabled && !RegisterGrantedUnitAbility(binding.effect, binding.technology, binding.caption)) {
+            TraceEffect("ability-install reject=grant-registration technology=%u", binding.technology);
+            return false;
+        }
     abilities.swap(checked);
     originalFindTechnology = reinterpret_cast<FindTechnology>(InstallFunction(findTechnologyAddress,
         findTechnologyBytes, sizeof(findTechnologyBytes), reinterpret_cast<const void*>(&FindAbilityTechnology)));
+    if (!originalFindTechnology) TraceEffect("ability-install reject=hook role=find-technology win32=%lu", GetLastError());
     originalInitializeTree = reinterpret_cast<InitializeTree>(InstallFunction(initializeTreeAddress,
         initializeTreeBytes, sizeof(initializeTreeBytes), reinterpret_cast<const void*>(&InitializeAbilityTree)));
+    if (!originalInitializeTree) TraceEffect("ability-install reject=hook role=initialize-tree win32=%lu", GetLastError());
     originalActionKey = reinterpret_cast<ReadActionKey>(InstallFunction(actionKeyAddress,
         actionKeyBytes, sizeof(actionKeyBytes), reinterpret_cast<const void*>(&ReadAbilityGroupKey)));
+    if (!originalActionKey) TraceEffect("ability-install reject=hook role=action-key win32=%lu", GetLastError());
     if (!originalFindTechnology || !originalInitializeTree || !originalActionKey) return false;
     // The launcher terminates the still-suspended owned process if either
     // protected write fails, so a partial binding can never enter gameplay.
-    return WritePointer(resourceStringSlot, reinterpret_cast<const void*>(&GetResourceString)) &&
-        WritePointer(commandSlot, reinterpret_cast<const void*>(&ExecuteAbility));
+    if (!WritePointer(resourceStringSlot, reinterpret_cast<const void*>(&GetResourceString))) {
+        TraceEffect("ability-install reject=write-import role=resource-string win32=%lu", GetLastError()); return false;
+    }
+    if (!WritePointer(commandSlot, reinterpret_cast<const void*>(&ExecuteAbility))) {
+        TraceEffect("ability-install reject=write-command-slot win32=%lu", GetLastError()); return false;
+    }
+    TraceEffect("ability-install ready count=%u", static_cast<uint32_t>(abilities.size()));
+    return true;
 }

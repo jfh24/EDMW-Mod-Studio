@@ -29,6 +29,10 @@ internal static class CivilizationUnitEffectsVerification
         civilization.Entities.Add(sourceEntity);
         var baseline = project.Serialize();
         var statChecks = VerifyStatOutputs(sourceEntity, catalog.Items, buttons, output);
+        VerifyProximityGrantedControls(sourceEntity, catalog.Items, buttons);
+        VerifyActionOutputs(sourceEntity, catalog.Items, buttons, output);
+        VerifyIgnoredActionStatFields(sourceEntity, catalog.Items, buttons);
+        VerifyProximityConditionsAndCosts(sourceEntity, catalog.Items, buttons);
 
         using var editor = new CivilizationEditorView(() => source);
         using var host = new Form { ClientSize = new Size(1400, 850) };
@@ -218,6 +222,239 @@ internal static class CivilizationUnitEffectsVerification
             string.Join("\n", statChecks) + "\n" +
             string.Join("\n", nativeButtonChecks) + "\nUNVERIFIED: live gameplay, button activation in EDMW, save/load and multiplayer.\nActivated ability state is session-only and resets when loading a save.\n");
         Console.WriteLine("UNIT EFFECT AUTHORING PASS: all stat outputs, multiple outputs per trigger, output add/remove and minimum, fractional adjustments, cards at default/minimum sizes, preset, toggle/timed, enable/remove, duplicate identities, history, save/reopen, buildings, native button registration, validation, unchanged game files.");
+    }
+
+    private static void VerifyProximityGrantedControls(CivilizationEntityDraft source,
+        IReadOnlyList<CivilizationCatalogItem> objects, IReadOnlyList<(int Id, string Name)> buttons)
+    {
+        var draft = source.Clone();
+        draft.Properties.Remove(CivilizationUnitEffects.PropertyKey);
+        using var dialog = new CivilizationUnitEffectsDialog(draft, objects, buttons, availableButtonSlots: []);
+        Prepare(dialog);
+        dialog.AddForVerification();
+        dialog.SelectTargetsForVerification([777, 878]);
+        var trigger = Control<ComboBox>(dialog, "Effect trigger");
+        Require(trigger.Items.Count == 3 && trigger.Items[2]?.ToString() == "Proximity-granted ability", "The third trigger clearly describes a granted ability");
+        trigger.SelectedIndex = 2;
+        var mode = Control<ComboBox>(dialog, "Ability activation mode");
+        mode.SelectedIndex = 1;
+        Require(mode.SelectedIndex == 0 && !mode.Visible && !Control<NumericUpDown>(dialog, "Ability duration in seconds").Visible &&
+            Control<Button>(dialog, "Effect target").Enabled && Control<NumericUpDown>(dialog, "Proximity radius in tiles").Enabled &&
+            Control<Control>(dialog, "Ability button card").Visible, "A granted ability has targets, radius and button controls, with forced toggle and no timer");
+        Require(Control<ComboBox>(dialog, "In-game button position").Items.Count == CivilizationUnitEffectBindings.CustomAbilityButtonSlots.Count,
+            "Grant preferences include generic safe positions even when the emitter's own command bar is full");
+        trigger.SelectedIndex = 1;
+        Require(dialog.SelectedTargetIdsForVerification.SequenceEqual([source.SourceObjectId!.Value]), "Ordinary activated abilities remain source-only");
+        trigger.SelectedIndex = 2;
+        Require(dialog.SelectedTargetIdsForVerification.SequenceEqual([777, 878]), "Returning from an activated ability restores grant recipient types");
+        dialog.SelectTargetForVerification(777);
+        trigger.SelectedIndex = 0;
+        Require(dialog.SelectedTargetIdsForVerification.SequenceEqual([777]), "Switching between proximity modes retains the current targets rather than restoring an older selection");
+        trigger.SelectedIndex = 2;
+        dialog.SelectTargetsForVerification([777, 878]);
+        Control<TextBox>(dialog, "In-game button caption").Text = "Borrowed courage";
+        Require(dialog.ApplyForVerification(), "A valid proximity-granted ability can be staged without an emitter command slot");
+        var grant = dialog.EditedEffects!.Single();
+        Require(grant.Trigger == CivilizationUnitEffectTrigger.ProximityAbility && grant.ActivationMode == CivilizationUnitEffectActivationMode.Toggle && grant.DurationSeconds == 0 &&
+            CivilizationUnitEffects.GetTargetObjectIds(grant).SequenceEqual([777, 878]) && grant.NativeTechnologyId is null && grant.NativeTargetTechnologyIds is null,
+            "The staged grant preserves recipients, forces toggle, and carries no stale export command identities");
+        CivilizationUnitEffects.Write(draft, [grant]);
+        using var reopened = new CivilizationUnitEffectsDialog(draft, objects, buttons, availableButtonSlots: []);
+        Require(Control<NumericUpDown>(reopened, "Ability duration in seconds").Value == 1 &&
+            reopened.SnapshotForVerification.Single().DurationSeconds == 0 && reopened.ApplyForVerification() && reopened.EditedEffects!.Single().DurationSeconds == 0,
+            "A normalized zero-duration grant reopens with a valid hidden numeric control and retains zero authored duration");
+    }
+
+    private static void VerifyIgnoredActionStatFields(CivilizationEntityDraft source,
+        IReadOnlyList<CivilizationCatalogItem> objects, IReadOnlyList<(int Id, string Name)> buttons)
+    {
+        var draft = source.Clone();
+        draft.Properties.Remove(CivilizationUnitEffects.PropertyKey);
+        var result = objects.First(item => item.Category == CivilizationCategory.Buildings);
+        CivilizationUnitEffects.Write(draft, [new CivilizationUnitEffect
+        {
+            TargetObjectId = source.SourceObjectId!.Value,
+            Trigger = CivilizationUnitEffectTrigger.Activated,
+            ActivationMode = CivilizationUnitEffectActivationMode.Instant,
+            DurationSeconds = 0,
+            Outputs = [
+                new(CivilizationUnitEffectStat.BuildLimit, 0) { Kind = CivilizationUnitEffectOutputKind.OwnershipTransfer },
+                new((CivilizationUnitEffectStat)int.MaxValue, decimal.MaxValue)
+                {
+                    Kind = CivilizationUnitEffectOutputKind.Transform, ObjectId = result.SourceId,
+                    Owner = CivilizationUnitEffectOwner.SpecificPlayer, PlayerSlot = 8
+                }
+            ]
+        }]);
+        using var dialog = new CivilizationUnitEffectsDialog(draft, objects, buttons);
+        Prepare(dialog);
+        Require(Control<ComboBox>(dialog, "Effect output stat").SelectedIndex == StatIndex(CivilizationUnitEffectStat.LineOfSight) &&
+            Control<NumericUpDown>(dialog, "Effect adjustment").Value == 0 &&
+            Control<ComboBox>(dialog, "Effect output stat 2").SelectedIndex == StatIndex(CivilizationUnitEffectStat.LineOfSight) &&
+            Control<NumericUpDown>(dialog, "Effect adjustment 2").Value == 0,
+            "Ignored action stat metadata cannot overflow or select an invalid hidden numeric field when reopening");
+        Require(dialog.ApplyForVerification() && CivilizationUnitEffects.GetOutputs(dialog.EditedEffects!.Single())
+            .All(output => output.Stat == CivilizationUnitEffectStat.LineOfSight && output.Amount == 0 &&
+                output.Owner == CivilizationUnitEffectOwner.SourcePlayer && output.PlayerSlot == 1),
+            "Saving action rows canonicalizes ignored stat metadata and the transformation's ignored owner");
+    }
+
+    private static void VerifyProximityConditionsAndCosts(CivilizationEntityDraft source,
+        IReadOnlyList<CivilizationCatalogItem> objects, IReadOnlyList<(int Id, string Name)> buttons)
+    {
+        var draft = source.Clone();
+        draft.Properties.Remove(CivilizationUnitEffects.PropertyKey);
+        var result = objects.First(item => item.Category == CivilizationCategory.Units);
+        using var dialog = new CivilizationUnitEffectsDialog(draft, objects, buttons);
+        Prepare(dialog);
+        dialog.AddForVerification();
+        Control<ComboBox>(dialog, "Effect output type").SelectedIndex = (int)CivilizationUnitEffectOutputKind.Transform;
+        dialog.SelectOutputObjectForVerification(0, result.SourceId);
+        Control<ComboBox>(dialog, "Effect trigger").SelectedIndex = (int)CivilizationUnitEffectTrigger.ProximityAbility;
+        Control<NumericUpDown>(dialog, "Required nearby time in seconds").Value = 60;
+        Control<NumericUpDown>(dialog, "Total affected recipient limit").Value = 5;
+        Control<NumericUpDown>(dialog, "Concurrent affected recipient limit").Value = 2;
+        Control<NumericUpDown>(dialog, "Ability gold cost").Value = 50;
+        Require(Control<NumericUpDown>(dialog, "Required nearby time in seconds").Visible &&
+            Control<NumericUpDown>(dialog, "Total affected recipient limit").Visible &&
+            Control<NumericUpDown>(dialog, "Concurrent affected recipient limit").Visible &&
+            Control<NumericUpDown>(dialog, "Ability gold cost").Visible &&
+            !Control<NumericUpDown>(dialog, "Ability duration in seconds").Visible,
+            "A proximity-granted instant transformation has separate nearby wait, recipient limit and resource costs");
+        Require(Descendants(dialog).OfType<Label>().Any(label => label.Text.Contains("60 continuous seconds", StringComparison.Ordinal)) &&
+            Descendants(dialog).OfType<Label>().Any(label => label.Text.Contains("50 gold", StringComparison.Ordinal)),
+            "The preview explains the continuous wait and resource cost using player-facing language");
+        Require(dialog.ApplyForVerification(), "A delayed, limited and paid transformation ability can be saved");
+        var granted = dialog.EditedEffects!.Single();
+        Require(granted.ProximityDelaySeconds == 60 && granted.MaxAffectedTargets == 5 && granted.MaxConcurrentTargets == 2 && granted.GoldCost == 50 &&
+            granted.FoodCost == 0 && granted.WoodCost == 0 && granted.StoneCost == 0 &&
+            granted.ActivationMode == CivilizationUnitEffectActivationMode.Instant && granted.DurationSeconds == 0,
+            "Nearby wait, recipient total and per-click resource costs persist independently of effect duration");
+        CivilizationUnitEffects.Write(draft, [granted]);
+        using (var reopened = new CivilizationUnitEffectsDialog(draft, objects, buttons))
+        {
+            Prepare(reopened);
+            Require(Control<NumericUpDown>(reopened, "Required nearby time in seconds").Value == 60 &&
+                Control<NumericUpDown>(reopened, "Total affected recipient limit").Value == 5 &&
+                Control<NumericUpDown>(reopened, "Concurrent affected recipient limit").Value == 2 &&
+                Control<NumericUpDown>(reopened, "Ability gold cost").Value == 50,
+                "Reopening preserves all nearby conditions and resource costs");
+            Control<ComboBox>(reopened, "Effect trigger").SelectedIndex = (int)CivilizationUnitEffectTrigger.Activated;
+            Require(!Control<NumericUpDown>(reopened, "Required nearby time in seconds").Visible &&
+                !Control<NumericUpDown>(reopened, "Total affected recipient limit").Visible &&
+                !Control<NumericUpDown>(reopened, "Concurrent affected recipient limit").Visible &&
+                Control<NumericUpDown>(reopened, "Ability gold cost").Visible && reopened.ApplyForVerification() &&
+                reopened.EditedEffects!.Single().ProximityDelaySeconds == 0 && reopened.EditedEffects!.Single().MaxAffectedTargets == 0 &&
+                reopened.EditedEffects!.Single().MaxConcurrentTargets == 0 && reopened.EditedEffects!.Single().GoldCost == 50,
+                "Direct activation clears irrelevant proximity conditions while retaining its button cost");
+        }
+        using (var passive = new CivilizationUnitEffectsDialog(draft, objects, buttons))
+        {
+            Prepare(passive);
+            Control<ComboBox>(passive, "Effect trigger").SelectedIndex = (int)CivilizationUnitEffectTrigger.Proximity;
+            Require(!Control<NumericUpDown>(passive, "Ability gold cost").Visible && passive.ApplyForVerification() &&
+                passive.EditedEffects!.Single().GoldCost == 0 && passive.EditedEffects!.Single().ProximityDelaySeconds == 60 &&
+                passive.EditedEffects!.Single().MaxAffectedTargets == 5 && passive.EditedEffects!.Single().MaxConcurrentTargets == 2,
+                "Automatic proximity outputs retain nearby conditions and clear button costs");
+        }
+    }
+
+    private static void VerifyActionOutputs(CivilizationEntityDraft source,
+        IReadOnlyList<CivilizationCatalogItem> objects, IReadOnlyList<(int Id, string Name)> buttons, string output)
+    {
+        var draft = source.Clone();
+        draft.Properties.Remove(CivilizationUnitEffects.PropertyKey);
+        var unit = objects.First(item => item.Category == CivilizationCategory.Units);
+        var building = objects.First(item => item.Category == CivilizationCategory.Buildings);
+        using var dialog = new CivilizationUnitEffectsDialog(draft, objects, buttons);
+        Prepare(dialog);
+        dialog.AddForVerification();
+        var type = Control<ComboBox>(dialog, "Effect output type");
+        Require(type.Items.Count == 4, "Each output row offers stat changes, ownership transfer, transformation and spawning");
+        type.SelectedIndex = (int)CivilizationUnitEffectOutputKind.OwnershipTransfer;
+        Control<ComboBox>(dialog, "Affected target players").SelectedIndex = (int)CivilizationUnitEffectTargetPlayers.Other;
+        var owner = Control<ComboBox>(dialog, "Effect output owner");
+        owner.SelectedIndex = (int)CivilizationUnitEffectOwner.SpecificPlayer;
+        var player = Control<NumericUpDown>(dialog, "Effect output player");
+        Require(owner.Visible && player.Visible && player.Minimum == 1 && player.Maximum == 8 &&
+            !Control<ComboBox>(dialog, "Effect output stat").Visible && !Control<NumericUpDown>(dialog, "Effect adjustment").Visible &&
+            !Control<Button>(dialog, "Effect output object").Visible,
+            "Ownership transfer shows player controls without unrelated stat or object fields");
+        player.Value = 3;
+        dialog.AddOutputForVerification();
+        Control<ComboBox>(dialog, "Effect output type 2").SelectedIndex = (int)CivilizationUnitEffectOutputKind.Spawn;
+        dialog.SelectOutputObjectForVerification(1, building.SourceId);
+        Control<NumericUpDown>(dialog, "Effect spawn count 2").Value = 4;
+        Control<ComboBox>(dialog, "Effect output owner 2").SelectedIndex = (int)CivilizationUnitEffectOwner.AffectedPlayer;
+        Require(Control<Button>(dialog, "Effect output object 2").Text.StartsWith(building.Name, StringComparison.Ordinal) &&
+            Control<NumericUpDown>(dialog, "Effect spawn count 2").Visible && !Control<NumericUpDown>(dialog, "Effect output player 2").Visible,
+            "Spawn outputs display the player-facing object name, count and owner controls");
+        dialog.AddOutputForVerification();
+        Control<ComboBox>(dialog, "Effect output type 3").SelectedIndex = (int)CivilizationUnitEffectOutputKind.Transform;
+        Require(!dialog.ApplyForVerification(), "A transformation must choose an object before it can be saved");
+        dialog.SelectOutputObjectForVerification(2, unit.SourceId);
+        Require(Control<Button>(dialog, "Effect output object 3").Visible && !Control<ComboBox>(dialog, "Effect output owner 3").Visible &&
+            !Control<NumericUpDown>(dialog, "Effect spawn count 3").Visible,
+            "Transformation has one object picker and keeps its target's owner");
+        using (var picker = dialog.CreateOutputObjectPickerForVerification(2))
+        {
+            Prepare(picker);
+            var cards = Descendants(picker).OfType<Button>().Where(button => button.AccessibleName?.StartsWith("Select target ", StringComparison.Ordinal) == true).Take(2).ToArray();
+            Require(cards.Length == 2, "The object picker has unit and building catalog choices");
+            cards[0].PerformClick();
+            cards[1].PerformClick();
+            Require(picker.SelectedObjectIds.Count == 1 && picker.SelectedObjectIds.Single() == (int)cards[1].Tag!,
+                "An output object picker replaces its selection instead of selecting multiple result types");
+            Require(Control<ComboBox>(picker, "Target type filter").Enabled && Control<TextBox>(picker, "Search affected targets").Enabled,
+                "Spawn and transform reuse the searchable, filtered object catalog");
+        }
+        Require(Control<ComboBox>(dialog, "Ability activation mode").SelectedIndex == (int)CivilizationUnitEffectActivationMode.Instant,
+            "An action-only effect defaults to instant activation");
+        var preview = Control<Label>(dialog, "Effect preview");
+        Require(preview.Text.Contains(building.Name, StringComparison.Ordinal) && preview.Text.Contains(unit.Name, StringComparison.Ordinal),
+            "Action previews use player-facing object names");
+        dialog.Size = dialog.MinimumSize;
+        Snapshot(dialog, Path.Combine(output, "action-outputs-minimum.png"));
+        foreach (var input in Descendants(dialog).Where(control => control.Visible &&
+            (control.AccessibleName?.StartsWith("Effect output ", StringComparison.Ordinal) == true ||
+             control.AccessibleName?.StartsWith("Effect spawn count", StringComparison.Ordinal) == true)))
+            Require(input.Width >= 70 && input.Left >= 0 && input.Right <= input.Parent!.ClientSize.Width,
+                $"{input.AccessibleName} fits within an action output card at minimum size");
+        Require(dialog.ApplyForVerification(), "All three permanent actions can share one proximity trigger");
+        var effect = dialog.EditedEffects!.Single();
+        var actions = CivilizationUnitEffects.GetOutputs(effect);
+        Require(effect.TargetPlayers == CivilizationUnitEffectTargetPlayers.Other && effect.Amount == 0 &&
+            effect.ActivationMode == CivilizationUnitEffectActivationMode.Instant && effect.DurationSeconds == 0 &&
+            actions.Count == 3 && actions[0].Kind == CivilizationUnitEffectOutputKind.OwnershipTransfer &&
+            actions[0].Owner == CivilizationUnitEffectOwner.SpecificPlayer && actions[0].PlayerSlot == 3 &&
+            actions[1].Kind == CivilizationUnitEffectOutputKind.Spawn && actions[1].ObjectId == building.SourceId && actions[1].Count == 4 &&
+            actions[1].Owner == CivilizationUnitEffectOwner.AffectedPlayer && actions[2].Kind == CivilizationUnitEffectOutputKind.Transform &&
+            actions[2].ObjectId == unit.SourceId,
+            "Permanent action fields and proximity player filters are saved without synthetic stat modifiers");
+        CivilizationUnitEffects.Write(draft, [effect]);
+        using var reopened = new CivilizationUnitEffectsDialog(draft, objects, buttons);
+        Prepare(reopened);
+        Require(Control<ComboBox>(reopened, "Effect output type").SelectedIndex == 1 &&
+            Control<ComboBox>(reopened, "Effect output type 2").SelectedIndex == 3 &&
+            Control<ComboBox>(reopened, "Effect output type 3").SelectedIndex == 2 &&
+            Control<NumericUpDown>(reopened, "Effect output player").Value == 3 &&
+            Control<NumericUpDown>(reopened, "Effect spawn count 2").Value == 4,
+            "Reopening preserves action kinds, player and count fields");
+        Control<ComboBox>(reopened, "Effect trigger").SelectedIndex = 1;
+        Require(Control<ComboBox>(reopened, "Ability activation mode").SelectedIndex == (int)CivilizationUnitEffectActivationMode.Instant &&
+            !Control<NumericUpDown>(reopened, "Ability duration in seconds").Visible &&
+            !Control<ComboBox>(reopened, "Affected target players").Visible,
+            "Activated action-only effects have an instant button without irrelevant timing or proximity owner filters");
+        reopened.AddOutputForVerification();
+        Require(Control<ComboBox>(reopened, "Effect output type 4").SelectedIndex == 0 &&
+            Control<ComboBox>(reopened, "Ability activation mode").SelectedIndex == (int)CivilizationUnitEffectActivationMode.Toggle,
+            "Adding a stat modifier selects an activation mode that can maintain the stat bonus");
+        Control<ComboBox>(reopened, "Ability activation mode").SelectedIndex = (int)CivilizationUnitEffectActivationMode.Instant;
+        Require(Control<ComboBox>(reopened, "Ability activation mode").SelectedIndex == (int)CivilizationUnitEffectActivationMode.Toggle,
+            "Instant mode cannot silently discard mixed stat outputs");
+        Require(reopened.ApplyForVerification() && reopened.EditedEffects!.Single().TargetPlayers == CivilizationUnitEffectTargetPlayers.Own &&
+            CivilizationUnitEffects.GetOutputs(reopened.EditedEffects!.Single()).Count == 4,
+            "Mixed actions and stat changes persist with source-only activation");
     }
 
     private static IReadOnlyList<string> VerifyStatOutputs(CivilizationEntityDraft source,
