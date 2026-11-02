@@ -46,6 +46,7 @@ export async function createRelay(options = {}) {
   const maxRoomCells = 8 * 512 * 512;
   let queuedMessageBytes = 0;
   const connections = new Map(), sessions = new Map(), userSessions = new Map(), offers = new Map();
+  const gameSessions = new Map(), userGameSessions = new Map();
   const registrationRates = new Map();
   let commandQueue = Promise.resolve(), stopping = false;
   await mkdir(exportDir, { recursive: true });
@@ -120,6 +121,15 @@ export async function createRelay(options = {}) {
     }
     socket.send(payload, error => { if (error) socket.terminate(); });
   }
+  function wireSendBinary(socket, payload) {
+    if (!socket || socket.readyState !== WebSocket.OPEN) return;
+    const buffered = [...wss.clients].reduce((sum, client) => sum + client.bufferedAmount, 0);
+    if (socket.bufferedAmount > 8 * MiB || buffered + payload.length > 32 * MiB) {
+      socket.close(4008, 'Relay game traffic backpressure limit reached; reconnect and rejoin.');
+      const timeout = setTimeout(() => socket.terminate(), 1000); timeout.unref(); return;
+    }
+    socket.send(payload, { binary: true }, error => { if (error) socket.terminate(); });
+  }
   function send(socket, type, data) { wireSend(socket, { type, data }); }
   function reply(socket, requestId, data, error) {
     wireSend(socket, error ? { type: 'response', requestId, ok: false, error } : { type: 'response', requestId, ok: true, data });
@@ -130,6 +140,86 @@ export async function createRelay(options = {}) {
   }
   function sessionSnapshot(room) {
     return { sessionId: room.id, revision: room.revision, project: room.project, members: [...room.members].map(profile) };
+  }
+  function gameRoomSnapshot(room, viewerId) {
+    const member = room.members.get(viewerId);
+    return {
+      roomId: room.id, name: room.name, host: profile(room.hostId), visibility: room.visibility,
+      maxPlayers: room.maxPlayers, members: [...room.members.entries()].map(([id, member]) => ({ profile: profile(id), relayPort: member.relayPort })),
+      relayPort: member?.relayPort ?? 0,
+    };
+  }
+  function gameRoomList(userId) {
+    return [...gameSessions.values()]
+      .filter(room => room.visibility === 'public' || room.hostId === userId || areFriends(userId, room.hostId) || room.invites.has(userId))
+      .filter(room => room.members.has(userId) || room.invites.has(userId) || room.members.size + room.invites.size < room.maxPlayers)
+      .map(room => gameRoomSnapshot(room, userId));
+  }
+  function notifyGameRooms() {
+    for (const [userId, socket] of connections) send(socket, 'game.rooms.changed', { rooms: gameRoomList(userId) });
+  }
+  function leaveGameRoom(userId, message = 'The game host left the room.') {
+    const room = gameSessions.get(userGameSessions.get(userId));
+    if (!room) return;
+    if (room.hostId === userId) {
+      for (const id of room.members.keys()) {
+        userGameSessions.delete(id);
+        if (id !== userId) send(connections.get(id), 'game.ended', { roomId: room.id, message });
+      }
+      for (const id of room.invites) send(connections.get(id), 'game.invite.cancelled', { roomId: room.id });
+      gameSessions.delete(room.id);
+    } else {
+      room.members.delete(userId);
+      userGameSessions.delete(userId);
+      send(connections.get(userId), 'game.ended', { roomId: room.id, message: 'You left the game room.' });
+      for (const id of room.members.keys()) send(connections.get(id), 'game.members', {
+        roomId: room.id, members: [...room.members.entries()].map(([memberId, member]) => ({ profile: profile(memberId), relayPort: member.relayPort })),
+      });
+    }
+    notifyGameRooms();
+  }
+  function clearGameInvitations(userId) {
+    let changed = false;
+    for (const room of gameSessions.values()) {
+      if (room.invites.delete(userId)) {
+        changed = true;
+        send(connections.get(userId), 'game.invite.cancelled', { roomId: room.id });
+      }
+    }
+    if (changed) notifyGameRooms();
+  }
+  function sendGamePacket(socket, raw) {
+    check(socket.userId && connections.get(socket.userId) === socket, 'Authenticate first.', 401);
+    check(raw.length >= 47 && raw.length <= 46 + 1200 && raw.subarray(0, 4).toString('ascii') === 'EDWG', 'Invalid game packet.');
+    const roomId = raw.subarray(4, 40).toString('ascii');
+    check(validId(roomId), 'Invalid game room ID.');
+    const room = gameSessions.get(roomId), sender = room?.members.get(socket.userId);
+    check(room && sender && userGameSessions.get(socket.userId) === roomId, 'You are not a member of this game room.', 403);
+    const targetPort = raw.readUInt16BE(40);
+    const sourceGamePort = raw.readUInt16BE(42), destinationGamePort = raw.readUInt16BE(44);
+    check(sourceGamePort > 0 && destinationGamePort > 0, 'Invalid game datagram ports.');
+    const rate = socket.gameTraffic ??= { start: now(), count: 0, bytes: 0 };
+    if (now() - rate.start >= 1000) { rate.start = now(); rate.count = 0; rate.bytes = 0; }
+    rate.count++;
+    rate.bytes += raw.length - 46;
+    check(rate.count <= 240 && rate.bytes <= 512 * 1024, 'Game traffic rate limit reached.', 429);
+    const recipients = targetPort === 0
+      ? [...room.members.entries()].filter(([id]) => id !== socket.userId)
+      : [...room.members.entries()].filter(([id, member]) => id !== socket.userId && member.relayPort === targetPort);
+    check(targetPort === 0 || recipients.length === 1, 'Game packet destination is not a room member.', 403);
+    if (!recipients.length) return;
+    const header = Buffer.allocUnsafe(84);
+    header.write('EDWG', 0, 'ascii');
+    header.write(room.id, 4, 36, 'ascii');
+    header.write(socket.userId, 40, 36, 'ascii');
+    header.writeUInt16BE(sender.relayPort, 76);
+    header.writeUInt16BE(targetPort, 78);
+    header.writeUInt16BE(sourceGamePort, 80);
+    header.writeUInt16BE(destinationGamePort, 82);
+    const payload = Buffer.concat([header, raw.subarray(46)]);
+    for (const [id] of recipients) {
+      wireSendBinary(connections.get(id), payload);
+    }
   }
   function roomFor(userId, sessionId) {
     check(validId(sessionId), 'Invalid session ID.');
@@ -179,6 +269,14 @@ export async function createRelay(options = {}) {
     for (const offer of [...offers.values()])
       if ([offer.senderId, offer.recipientId].includes(a) && [offer.senderId, offer.recipientId].includes(b))
         await removeOffer(offer, 'failed', 'Friendship removed; export revoked.');
+    let gameInvitesChanged = false;
+    for (const room of [...gameSessions.values()]) {
+      if (room.invites.delete(a)) { gameInvitesChanged = true; send(connections.get(a), 'game.invite.cancelled', { roomId: room.id }); }
+      if (room.invites.delete(b)) { gameInvitesChanged = true; send(connections.get(b), 'game.invite.cancelled', { roomId: room.id }); }
+      if (room.hostId === a && room.members.has(b)) leaveGameRoom(b, 'Friendship removed; game room access revoked.');
+      if (room.hostId === b && room.members.has(a)) leaveGameRoom(a, 'Friendship removed; game room access revoked.');
+    }
+    if (gameInvitesChanged) notifyGameRooms();
   }
   function authenticate(userId, token, recover = false) {
     check(validId(userId) && typeof token === 'string' && token.length <= 512, 'Invalid credentials.', 401);
@@ -292,6 +390,8 @@ export async function createRelay(options = {}) {
       // Tear down the old room before transferring a device identity to a new socket.
       if (previous) {
         leave(id, 'The host reconnected. Start a new collaboration session.');
+        leaveGameRoom(id, 'The host reconnected. Start a new game room.');
+        clearGameInvitations(id);
         await revokeUserExports(id, 'Device reconnected; export cancelled.');
         previous.close(4001, 'Device connected elsewhere.');
       }
@@ -411,6 +511,53 @@ export async function createRelay(options = {}) {
       }
       return {};
     }
+    if (type === 'game.rooms.list') return { rooms: gameRoomList(userId) };
+    if (type === 'game.create') {
+      check(gameSessions.size < 128, 'The relay has reached its game room limit.');
+      check(['friends', 'public'].includes(message.visibility), 'Choose friends-only or public visibility.');
+      check(Number.isInteger(message.maxPlayers) && message.maxPlayers >= 2 && message.maxPlayers <= 8, 'Game rooms support 2 to 8 players.');
+      const gameName = name(message.name, 80);
+      leaveGameRoom(userId);
+      const room = {
+        id: randomUUID(), hostId: userId, name: gameName, visibility: message.visibility,
+        maxPlayers: message.maxPlayers, members: new Map(), invites: new Set(),
+      };
+      room.members.set(userId, { relayPort: 40000 });
+      gameSessions.set(room.id, room); userGameSessions.set(userId, room.id);
+      notifyGameRooms();
+      return gameRoomSnapshot(room, userId);
+    }
+    if (type === 'game.invite') {
+      const room = gameSessions.get(message.roomId), other = message.userId;
+      check(room && room.hostId === userId, 'Only the game room host can invite friends.', 403);
+      check(validId(other) && areFriends(userId, other), 'Only accepted friends can be invited.', 403);
+      check(isOnline(other), 'The friend is offline.');
+      check(!room.members.has(other), 'The friend is already in this game room.');
+      check(room.members.size + room.invites.size < room.maxPlayers, 'The game room is full.');
+      room.invites.add(other);
+      send(connections.get(other), 'game.invite', { roomId: room.id, from: profile(userId), name: room.name });
+      notifyGameRooms();
+      return { roomId: room.id };
+    }
+    if (type === 'game.join') {
+      check(validId(message.roomId), 'Invalid game room ID.');
+      const room = gameSessions.get(message.roomId);
+      check(room && (room.visibility === 'public' || room.invites.has(userId) && areFriends(userId, room.hostId)), 'A public room or invitation from an accepted friend is required.', 403);
+      const otherInvites = room.invites.size - (room.invites.has(userId) ? 1 : 0);
+      check(room.members.size + otherInvites < room.maxPlayers, 'The game room has no unreserved player slots.');
+      leaveGameRoom(userId);
+      room.invites.delete(userId);
+      const usedRelayPorts = new Set([...room.members.values()].map(member => member.relayPort));
+      let relayPort = 40000;
+      while (usedRelayPorts.has(relayPort)) relayPort++;
+      room.members.set(userId, { relayPort }); userGameSessions.set(userId, room.id);
+      for (const id of room.members.keys()) send(connections.get(id), 'game.members', {
+        roomId: room.id, members: [...room.members.entries()].map(([memberId, member]) => ({ profile: profile(memberId), relayPort: member.relayPort })),
+      });
+      notifyGameRooms();
+      return gameRoomSnapshot(room, userId);
+    }
+    if (type === 'game.leave') { leaveGameRoom(userId, 'The game room host left.'); return {}; }
     if (type === 'export.offer') {
       const other = message.userId;
       check(validId(other) && areFriends(userId, other), 'Exports require an accepted friend.', 403);
@@ -540,7 +687,14 @@ export async function createRelay(options = {}) {
     socket.on('pong', () => { socket.alive = true; });
     socket.on('error', () => {});
     socket.on('message', (raw, binary) => {
-      if (binary) { socket.close(1003, 'JSON messages are required.'); return; }
+      if (binary) {
+        try { sendGamePacket(socket, Buffer.from(raw)); }
+        catch (error) {
+          if (error instanceof PublicError && error.status === 429) socket.close(4008, error.message);
+          else socket.close(1008, error instanceof PublicError ? error.message : 'Game packet rejected.');
+        }
+        return;
+      }
       if (socket.pendingBytes + raw.length > 32 * MiB || queuedMessageBytes + raw.length > 64 * MiB) {
         socket.close(4008, 'Relay message queue is full; reconnect and synchronize.'); return;
       }
@@ -567,6 +721,8 @@ export async function createRelay(options = {}) {
       enqueue(async () => {
         if (socket.userId && connections.get(socket.userId) === socket) {
           connections.delete(socket.userId); leave(socket.userId, 'The host disconnected.');
+          leaveGameRoom(socket.userId, 'The game host disconnected.');
+          clearGameInvitations(socket.userId);
           await revokeUserExports(socket.userId, 'A participant disconnected; export cancelled.');
           notifyFriends(socket.userId);
         }

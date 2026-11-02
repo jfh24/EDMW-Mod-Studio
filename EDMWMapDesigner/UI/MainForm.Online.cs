@@ -11,6 +11,7 @@ public sealed partial class MainForm
     private readonly OnlinePreferences _onlinePreferences = OnlinePreferences.Load();
     private readonly OnlineRelayClient _online;
     private readonly OnlineCollaborationSession _onlineCollaboration;
+    private OnlineGameTrafficBridge? _onlineGameTrafficBridge;
     private readonly CancellationTokenSource _onlineLifetime = new();
     private readonly Dictionary<Guid, OnlineCollaborationInvite> _onlineInvitations = [];
     private ToolStripButton? _friendsButton;
@@ -51,6 +52,7 @@ public sealed partial class MainForm
                 _onlineInvitations.Remove(invitation.SessionId);
             UpdateFriendsButton();
         });
+        _online.GameInvitationsChanged += (_, _) => PostOnlineUi(UpdateFriendsButton);
         _online.StatusChanged += (_, message) => PostOnlineUi(() =>
         {
             if (!_online.IsConnected)
@@ -67,6 +69,21 @@ public sealed partial class MainForm
             _onlineInvitations[invitation.SessionId] = invitation;
             UpdateFriendsButton();
             _status.Text = $"{invitation.From.DisplayName} invited you to {invitation.MapName}. Open Friends to join.";
+        });
+        _online.GameInviteReceived += (_, invitation) => PostOnlineUi(() =>
+        {
+            UpdateFriendsButton();
+            _status.Text = $"{invitation.From.DisplayName} invited you to {invitation.Name}. Open Friends > Matchmaking to join.";
+        });
+        _online.GameRoomEnded += (_, message) => PostOnlineUi(() =>
+        {
+            UpdateFriendsButton();
+            _status.Text = message;
+        });
+        _online.GameRoomChanged += (_, room) => PostOnlineUi(() =>
+        {
+            UpdateFriendsButton();
+            if (room is null) StopOnlineGameTrafficBridge();
         });
         _online.ExportOfferReceived += (_, offer) => _ = ReviewOnlineExportAsync(offer);
     }
@@ -186,10 +203,10 @@ public sealed partial class MainForm
     private void UpdateFriendsButton()
     {
         if (_friendsButton is null) return;
-        var pending = _onlineInvitations.Count + (_online.IsConnected ? _online.Friends.Incoming.Length : 0);
+        var pending = _onlineInvitations.Count + _online.GameInvitations.Length + (_online.IsConnected ? _online.Friends.Incoming.Length : 0);
         _friendsButton.Text = pending > 0 ? $"Friends ({pending})" : "Friends";
         _friendsButton.ToolTipText = _online.IsConnected
-            ? $"Online as {_online.User?.DisplayName}. {pending} pending friend requests or map invitations. Manage friends and exports."
+            ? $"Online as {_online.User?.DisplayName}. {pending} pending requests or game/map invitations. Manage friends, matchmaking, and exports."
             : "Connect to your online friends, share a map, and manage requests";
         _centerToolbarActions?.Invoke();
     }
@@ -203,8 +220,63 @@ public sealed partial class MainForm
             () => _onlineCollaboration.IsConnected,
             InviteFriendToMapAsync, JoinOnlineMapAsync, LeaveOnlineMapAsync,
             () => _collaboration.IsConnected ? "Leave the LAN session before inviting friends."
-                : _onlineCollaboration.IsConnected && !_onlineCollaboration.IsHosting ? "Only the map host can invite friends." : null);
+                : _onlineCollaboration.IsConnected && !_onlineCollaboration.IsHosting ? "Only the map host can invite friends." : null,
+            LaunchOnlineGameAsync);
         dialog.ShowDialog(this);
+    }
+
+    private async Task LaunchOnlineGameAsync()
+    {
+        if (_onlineGameTrafficBridge is not null)
+            throw new InvalidOperationException("EDMW already has an active relay gameplay bridge.");
+        var roomId = _online.CurrentGameRoom?.RoomId ?? throw new InvalidOperationException("Join a relay game room first.");
+        var gamePath = FindGamePath();
+        if (gamePath is null && !SelectGameInstallPath())
+            throw new InvalidOperationException("Select the EDMW game folder before launching an online game.");
+        gamePath = FindGamePath() ?? throw new InvalidOperationException("The selected EDMW folder is unavailable.");
+        if (IsEdmwRunning()) throw new InvalidOperationException("Close EDMW before launching it through the relay bridge.");
+
+        var bridge = await OnlineGameTrafficBridge.LaunchAsync(_online, gamePath, _onlineLifetime.Token);
+        if (_closingDesigner || IsDisposed || _online.CurrentGameRoom?.RoomId != roomId)
+        {
+            await bridge.DisposeAsync();
+            throw new InvalidOperationException("The relay room ended before EDMW finished launching.");
+        }
+        _onlineGameTrafficBridge = bridge;
+        bridge.StatusChanged += OnlineGameBridgeStatusChanged;
+        bridge.Exited += OnlineGameBridgeExited;
+        if (bridge.IsFaulted)
+        {
+            var message = bridge.ProviderStatusMessage ?? "The relay gameplay bridge stopped.";
+            StopOnlineGameTrafficBridge();
+            throw new InvalidOperationException(message);
+        }
+        _status.Text = bridge.ProviderStatusMessage ?? "EDMW launched. Select TCP/IP, then host or join a LAN game; relay hookup will be confirmed when the provider loads.";
+        if (bridge.LauncherHasExited) OnlineGameBridgeExited(bridge, EventArgs.Empty);
+    }
+
+    private void OnlineGameBridgeStatusChanged(object? sender, string message) => PostOnlineUi(() => _status.Text = message);
+
+    private void OnlineGameBridgeExited(object? sender, EventArgs e)
+    {
+        if (sender is not OnlineGameTrafficBridge bridge) return;
+        PostOnlineUi(() =>
+        {
+            if (_onlineGameTrafficBridge != bridge) return;
+            var faulted = bridge.IsFaulted;
+            StopOnlineGameTrafficBridge();
+            if (!faulted) _status.Text = "EDMW closed. The relay game room is still available.";
+        });
+    }
+
+    private void StopOnlineGameTrafficBridge()
+    {
+        var bridge = _onlineGameTrafficBridge;
+        if (bridge is null) return;
+        _onlineGameTrafficBridge = null;
+        bridge.StatusChanged -= OnlineGameBridgeStatusChanged;
+        bridge.Exited -= OnlineGameBridgeExited;
+        _ = bridge.DisposeAsync();
     }
 
     private async Task InviteFriendToMapAsync(Guid friendId)

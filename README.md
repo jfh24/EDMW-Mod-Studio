@@ -2,7 +2,7 @@
 
 **EDMW Mod Studio** is a Windows modding workspace for **Empires: Dawn of the Modern World**. It combines a visual Map Designer, a Civilization Editor, and tracked installation and sharing over LAN or online with friends.
 
-The application is version **1.3.0**. It is built with C#/.NET Windows Forms and includes a native, 32-bit map generator for the game.
+The source is being prepared as version **1.4.0**; the latest packaged release remains **1.3.0**. It is built with C#/.NET Windows Forms and includes a native, 32-bit map generator for the game.
 
 **[Download v1.3.0 for Windows](https://github.com/jfh24/EDMW-Mod-Studio/releases/download/v1.3.0/EDMW.Mod.Studio.exe)** · [Release notes and assets](https://github.com/jfh24/EDMW-Mod-Studio/releases/tag/v1.3.0) · [Changelog](CHANGELOG.md)
 
@@ -20,6 +20,7 @@ The source repository does not include the compiled executable. Download it from
 - **LAN collaboration:** host or join a shared map with synchronized paint strokes and named live cursors.
 - **LAN export:** install an export on the sender and offer it to other running instances for recipient approval.
 - **Online friends:** exchange friend codes, accept requests, and see online presence through the prefilled EDMW Mod Studio relay or a relay you choose.
+- **Online game matchmaking (1.4.0 source):** create public or friends-only rooms, invite accepted friends, and launch the supported game with a temporary native bridge that carries its TCP/IP provider traffic through the relay. Players host or join from the game's LAN screen after joining the Mod Studio room. The hosted relay must be updated to the 1.4.0 server source before room creation works there; live cross-internet session validation remains pending.
 - **Online collaboration and export:** invite accepted friends to edit maps, or send map and civilization exports for recipient approval. Includes a Render deployment blueprint.
 - **Installed content:** run independent civilization edits together, merge them under a custom name, or unmerge them. Review, uninstall, or share installed maps and edits directly from Home through **LAN** or **Friends**.
 
@@ -152,6 +153,7 @@ EDMWMapDesigner/              Main application; legacy source directory/namespac
 EDMWMultiplayerInstaller/    Embedded map installer template and standalone package UI
 EDMWCivilizationInstaller/   Civilization installer template; shares package domain code
 native/EDMWAnchored/         Production x86 map generator and resource-alignment checks
+native/EDMWRelayBridge/      x86 Winsock bridge and guarded game launcher for relay gameplay
 native/EDMWResourceSnapshot/ Optional diagnostic resource probe
 native/EDMWStringProbe/      Optional diagnostic string probe
 tools/                      Geography generators and native diagnostic tools

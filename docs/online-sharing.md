@@ -6,6 +6,8 @@ Open **Friends**, enter a display name, then choose **Connect**. Expand **Relay 
 
 The [user guide](user-guide.md#friends-and-online-sharing) describes the controls. [The protocol](online-protocol.md) specifies the desktop/server contract.
 
+The 1.4.0 source adds a **Matchmaking** dialog under **Friends**, public and friends-only relay rooms, friend invitations, and bounded binary datagram forwarding. The relay service must run this 1.4.0 server source before rooms can be created; older relays reject matchmaking commands. After joining a room, choose **Launch EDMW**; the guarded x86 bridge connects the supported TCP/IP provider to the relay for that game process. Use the game's normal TCP/IP LAN screen to host or join the match. Live cross-internet session validation remains pending.
+
 New profiles and older saved profiles with a blank relay URL use the built-in default. Existing custom URLs are preserved. Disconnect before editing the URL; connecting successfully saves the selected relay for later use.
 
 ## Run the relay locally

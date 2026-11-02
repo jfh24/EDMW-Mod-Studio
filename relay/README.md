@@ -2,7 +2,15 @@
 
 Node.js 24 HTTP/WebSocket relay for EDMW Mod Studio. It provides device
 identities, accepted friendships and online presence, invitation-only map
-collaboration, and map/civilization package delivery with recipient decisions.
+collaboration, public and friends-only game rooms, bounded binary game
+datagram forwarding for the supported game's native bridge, and map/civilization
+package delivery with recipient decisions.
+
+The desktop matchmaking UI launches the supported game build with the x86
+provider hook. Players host or join through the game's TCP/IP LAN flow while
+the hook carries UDP traffic over the relay's WebSocket channel. Live
+cross-internet session validation remains pending. See the
+[wire protocol](../docs/online-protocol.md) for room permissions and packet limits.
 
 ## Run locally
 

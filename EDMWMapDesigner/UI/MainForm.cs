@@ -3309,6 +3309,7 @@ public sealed partial class MainForm : Form
         _mapLanTransfer?.Dispose();
         _collaboration.Dispose();
         _onlineLifetime.Cancel();
+        StopOnlineGameTrafficBridge();
         _onlineCollaboration.Dispose();
         _online.Dispose();
     }

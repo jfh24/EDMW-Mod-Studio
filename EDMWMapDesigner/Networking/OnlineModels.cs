@@ -10,6 +10,12 @@ public sealed record OnlineFriendsSnapshot(OnlineProfile User, OnlineProfile[] F
     public string[] FriendReceipts { get; init; } = [];
 }
 public sealed record OnlineCollaborationInvite(Guid SessionId, OnlineProfile From, string MapName);
+public sealed record OnlineGameMember(OnlineProfile Profile, int RelayPort);
+public sealed record OnlineGameRoom(Guid RoomId, string Name, OnlineProfile Host, string Visibility,
+    int MaxPlayers, OnlineGameMember[] Members, int RelayPort = 0);
+public sealed record OnlineGameInvite(Guid RoomId, OnlineProfile From, string Name);
+public sealed record OnlineGamePacket(Guid RoomId, Guid FromUserId, int RelaySourcePort, int RelayTargetPort,
+    int SourcePort, int TargetPort, byte[] Payload);
 public sealed record OnlineExportOffer(Guid ExportId, OnlineProfile From, string Kind, string Name, int Size, string Sha256)
 {
     // Installation must remain cancellable when a friendship or connection ends.

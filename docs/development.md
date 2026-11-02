@@ -1,6 +1,6 @@
 # Development and verification
 
-EDMW Mod Studio version 1.3.0 consists of a Windows Forms editor, two installer templates, a native map generator, a prototype effect runtime, and a separate online relay. This document describes the source as shipped; it does not claim that every verification has been run on every game installation. See the [v1.3.0 release notes](releases/v1.3.0.md) and [changelog](../CHANGELOG.md) for release changes.
+The source in progress for EDMW Mod Studio 1.4.0 consists of a Windows Forms editor, installer templates, native game components, and a separate online relay. The latest packaged release is v1.3.0. Matchmaking rooms, binary datagram forwarding, and a guarded x86 hook for the supported TCP/IP provider are implemented; live cross-internet session validation remains pending. This document does not claim that every verification has been run on every game installation. See the [v1.3.0 release notes](releases/v1.3.0.md) and [changelog](../CHANGELOG.md) for packaged release changes.
 
 ## Build pipeline
 
@@ -17,9 +17,10 @@ The production build follows these dependencies:
 1. `native/EDMWAnchored/build-native.cmd` discovers Visual Studio through `vswhere` and initializes the x86 compiler environment.
 2. It compiles `ResourceAlignment.cpp`, builds and runs `ResourceAlignmentTests.exe`, then produces `EDMWAnchored.dll`. MSVC warnings are treated as errors.
 3. `native/EDMWEffects/build-native.cmd` builds and runs the native effect regression suites, then produces `EDMWEffects.dll` and `EDMWEffectsLauncher.exe` with the x86 compiler and warnings treated as errors. The installation-rule test declares `asInvoker` to avoid Windows installer detection requesting elevation during unattended builds.
-4. The map and civilization installer projects are published as self-contained, single-file Windows executables. Their generated templates are copied into the editor's assets for embedding.
-5. The editor embeds the native generator, effect runtime and launcher, installer templates, and UI artwork.
-6. The editor is published for `win-x64` and the deliverable is copied to `dist/EDMW Mod Studio.exe`.
+4. `native/EDMWRelayBridge/build-native.cmd` compiles the x86 provider hook and guarded launcher; run it before building Mod Studio so both native files can be embedded.
+5. The map and civilization installer projects are published as self-contained, single-file Windows executables. Their generated templates are copied into the editor's assets for embedding.
+6. The editor embeds the native generator, effect runtime, game relay hook and launcher, installer templates, and UI artwork.
+7. The editor is published for `win-x64` and the deliverable is copied to `dist/EDMW Mod Studio.exe`.
 
 The .NET projects target `net9.0-windows`, enable nullable analysis, and treat warnings as errors. The editor assembly name is `EDMW Mod Studio`. The native generator is a 32-bit DLL because the game loads it into an x86 process.
 
@@ -42,7 +43,7 @@ Use the full build after native or shared installer-domain changes. A standalone
 | `EDMWMultiplayerInstaller` | Map package executable template, package integrity checks, and installation UI. |
 | `EDMWCivilizationInstaller` | Civilization package executable template and UI; links the editor's package and game-installation domain code. |
 | `native/EDMWAnchored` | Game-facing generator exports, stock generator integration, authored terrain/elevation/marker behavior, and resource alignment. |
-| `relay` | Node.js HTTP/WebSocket service for authenticated identities, accepted friendships, map sessions, and temporary export delivery. |
+| `relay` | Node.js HTTP/WebSocket service for authenticated identities, accepted friendships, map sessions, game rooms and bounded packet forwarding, and temporary export delivery. |
 | `render.yaml` | Free Render Node service, ephemeral working directory, and generated stable signing secret; no disk or database. |
 
 The legacy `EDMWMapDesigner` directory and namespace are intentional. The rebrand changes the public product and executable name while retaining resource identities, persisted formats, and existing project paths.

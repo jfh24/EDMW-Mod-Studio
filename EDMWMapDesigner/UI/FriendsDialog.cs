@@ -14,6 +14,7 @@ internal sealed class FriendsDialog : Form
     private readonly Func<Guid, Task> _join;
     private readonly Func<Task> _leave;
     private readonly Func<string?> _inviteUnavailableReason;
+    private readonly Func<Task>? _launchGameplay;
     private readonly CancellationTokenSource _lifetime = new();
     private readonly ToolTip _tips = new() { AutoPopDelay = 15000 };
     private readonly TextBox _endpoint;
@@ -37,6 +38,7 @@ internal sealed class FriendsDialog : Form
     private readonly Button _accept;
     private readonly Button _remove;
     private readonly Button _inviteButton;
+    private readonly Button _matchmakingButton;
     private readonly Button _leaveButton;
     private readonly Button _joinButton;
     private readonly Button _copy;
@@ -46,7 +48,7 @@ internal sealed class FriendsDialog : Form
     public FriendsDialog(OnlineRelayClient client, OnlinePreferences preferences,
         Func<OnlineCollaborationInvite[]> invitations, Func<bool> mapWorkspace, Func<bool> mapSession,
         Func<Guid, Task> invite, Func<Guid, Task> join, Func<Task> leave,
-        Func<string?>? inviteUnavailableReason = null)
+        Func<string?>? inviteUnavailableReason = null, Func<Task>? launchGameplay = null)
     {
         _client = client;
         _invitations = invitations;
@@ -56,6 +58,7 @@ internal sealed class FriendsDialog : Form
         _join = join;
         _leave = leave;
         _inviteUnavailableReason = inviteUnavailableReason ?? (() => null);
+        _launchGameplay = launchGameplay;
         Text = "Online friends";
         ClientSize = new Size(800, 560);
         MinimumSize = new Size(680, 500);
@@ -199,11 +202,18 @@ internal sealed class FriendsDialog : Form
             await _invite(row.Profile.UserId);
             SetStatus("Map invitation sent. Your friend can join from Friends.");
         }));
+        _matchmakingButton = MakeButton("Matchmaking", () =>
+        {
+            using var dialog = new OnlineGameDialog(_client, _launchGameplay);
+            _ = dialog.ShowDialog(this);
+            RefreshLists();
+            return Task.CompletedTask;
+        });
         var friendsCard = Stack(28, -1, 34);
         friendsCard.Controls.Add(Heading("Friends", _friendCount, 200), 0, 0);
         _friendsEmpty = EmptyState(_friendsEmptyTitle);
         friendsCard.Controls.Add(ListHost(_friends, _friendsEmpty), 0, 1);
-        friendsCard.Controls.Add(Actions(_accept, _remove, _inviteButton), 0, 2);
+        friendsCard.Controls.Add(Actions(_accept, _remove, _inviteButton, _matchmakingButton), 0, 2);
         _layout.Controls.Add(Card(friendsCard), 0, 2);
 
         _inviteList.Columns.Add("Map", 250);
@@ -237,6 +247,9 @@ internal sealed class FriendsDialog : Form
         _requestCode.Leave += (_, _) => AcceptButton = _client.IsConnected ? null : _connect;
         _client.FriendsChanged += FriendsChanged;
         _client.CollaborationInviteReceived += InvitationReceived;
+        _client.GameInviteReceived += GameInvitationReceived;
+        _client.GameInvitationsChanged += GameInvitationsChanged;
+        _client.GameRoomChanged += GameRoomChanged;
         _client.StatusChanged += StatusChanged;
         Shown += (_, _) =>
         {
@@ -255,6 +268,9 @@ internal sealed class FriendsDialog : Form
             _lifetime.Cancel();
             _client.FriendsChanged -= FriendsChanged;
             _client.CollaborationInviteReceived -= InvitationReceived;
+            _client.GameInviteReceived -= GameInvitationReceived;
+            _client.GameInvitationsChanged -= GameInvitationsChanged;
+            _client.GameRoomChanged -= GameRoomChanged;
             _client.StatusChanged -= StatusChanged;
             _tips.Dispose();
         };
@@ -273,6 +289,9 @@ internal sealed class FriendsDialog : Form
     }
     private void FriendsChanged(object? sender, OnlineFriendsSnapshot snapshot) => OnUi(RefreshLists);
     private void InvitationReceived(object? sender, OnlineCollaborationInvite invitation) => OnUi(RefreshLists);
+    private void GameInvitationReceived(object? sender, OnlineGameInvite invitation) => OnUi(RefreshLists);
+    private void GameInvitationsChanged(object? sender, OnlineGameInvite[] invitations) => OnUi(RefreshLists);
+    private void GameRoomChanged(object? sender, OnlineGameRoom? room) => OnUi(RefreshLists);
     private void StatusChanged(object? sender, string message) => OnUi(() => { SetStatus(message); RefreshLists(); });
 
     private void SetRelaySettingsVisible(bool visible)
@@ -371,6 +390,7 @@ internal sealed class FriendsDialog : Form
         _remove.AccessibleName = _remove.Text;
         _remove.Enabled = ready && selected is not null;
         _inviteButton.Enabled = ready && _mapWorkspace() && inviteUnavailable is null && selected is { Relationship: "Friend", Profile.Online: true };
+        _matchmakingButton.Enabled = ready;
         _leaveButton.Visible = _mapSession();
         _leaveButton.Enabled = ready && _mapSession();
         _joinButton.Enabled = ready && !_mapSession() && _inviteList.SelectedItems.Count > 0;
@@ -385,6 +405,8 @@ internal sealed class FriendsDialog : Form
             _ => "Select a friend or request to see available actions."
         };
         _tips.SetToolTip(_inviteButton, selectionHint);
+        _tips.SetToolTip(_matchmakingButton, !connected ? "Connect to find or host online game rooms." :
+            _client.CurrentGameRoom is { } gameRoom ? $"In {gameRoom.Name}. Open the relay matchmaking room." : "Find public rooms or invite accepted friends to play online.");
         _tips.SetToolTip(_joinButton, _mapSession() ? "Leave the current map session before joining another." : "Select an invitation to join.");
         UpdateDefaultAction();
     }

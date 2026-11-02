@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.4.0 — in progress
+
+- Added public and friends-only relay game rooms, online friend invitations, room discovery, and a Matchmaking dialog inside Friends.
+- Added a bounded binary datagram channel and an x86 native bridge for the supported game's TCP/IP provider. Matchmaking can launch the game with a process-local hook so the game's LAN host/join flow carries traffic through the relay room.
+- Added a guarded launcher that checks the supported game and provider hashes before injecting the bridge; it does not replace game files. Live cross-internet session validation remains pending.
+- Updated application and installer template version metadata to 1.4.0.
+
 ## 1.3.0 — 2026-10-21
 
 See the [release notes](docs/releases/v1.3.0.md) for compatibility and verification scope.
