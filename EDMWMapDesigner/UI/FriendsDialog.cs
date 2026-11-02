@@ -381,6 +381,9 @@ internal sealed class FriendsDialog : Form
     private void UpdateScrollLayout()
     {
         _scrollContent.AutoScrollMinSize = _layout.MinimumSize;
+        var scrollBarWidth = _layout.MinimumSize.Height > _scrollContent.ClientSize.Height
+            ? SystemInformation.VerticalScrollBarWidth : 0;
+        _layout.Width = Math.Max(1, _scrollContent.ClientSize.Width - scrollBarWidth);
         _layout.Height = Math.Max(_layout.MinimumSize.Height, _scrollContent.ClientSize.Height);
     }
 
