@@ -5,15 +5,18 @@
 #include <array>
 #include <atomic>
 #include <cstdint>
+#include <deque>
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace {
 constexpr uint16_t RelayPortBase = 40000;
 constexpr uint32_t VirtualNetwork = 0x0AFEFF00; // 10.254.255.0/24
 constexpr size_t PipeFrameLimit = 2048;
+constexpr size_t MaximumQueuedPipeBytes = 512 * 1024;
 constexpr size_t TunnelHeaderSize = 14;
 using SocketFn = SOCKET(WSAAPI*)(int, int, int);
 using BindFn = int(WSAAPI*)(SOCKET, const sockaddr*, int);
@@ -33,7 +36,11 @@ SendToFn realSendTo = ::sendto;
 RecvFn realRecv = ::recv;
 RecvFromFn realRecvFrom = ::recvfrom;
 HANDLE pipeHandle = INVALID_HANDLE_VALUE;
-std::mutex stateLock, pipeWriteLock;
+HANDLE pipeWriteEvent = nullptr;
+std::mutex stateLock, pipeQueueLock;
+std::deque<std::vector<uint8_t>> pipeQueue;
+size_t pipeQueueBytes = 0;
+std::atomic<bool> pipeConnected{ false };
 std::unordered_map<SOCKET, sockaddr_in> virtualPeers;
 std::atomic<uint16_t> ownRelayPort{ 0 };
 
@@ -58,10 +65,15 @@ bool WriteExact(HANDLE pipe, const void* buffer, DWORD bytes) {
     return true;
 }
 bool WritePipeFrame(const std::vector<uint8_t>& body) {
-    if (pipeHandle == INVALID_HANDLE_VALUE || body.empty() || body.size() > PipeFrameLimit) return false;
-    const uint32_t length = static_cast<uint32_t>(body.size());
-    std::lock_guard<std::mutex> lock(pipeWriteLock);
-    return WriteExact(pipeHandle, &length, sizeof(length)) && WriteExact(pipeHandle, body.data(), length);
+    if (!pipeConnected.load() || pipeWriteEvent == nullptr || body.empty() || body.size() > PipeFrameLimit) return false;
+    const size_t frameBytes = sizeof(uint32_t) + body.size();
+    {
+        std::lock_guard<std::mutex> lock(pipeQueueLock);
+        if (!pipeConnected.load() || pipeQueueBytes + frameBytes > MaximumQueuedPipeBytes) return false;
+        pipeQueue.push_back(body);
+        pipeQueueBytes += frameBytes;
+    }
+    return SetEvent(pipeWriteEvent) != FALSE;
 }
 bool IsDatagram(SOCKET socket) {
     int type = 0, size = sizeof(type);
@@ -83,10 +95,27 @@ bool LocalEndpoint(SOCKET socket, sockaddr_in& local) {
     local.sin_family = AF_INET;
     return ::getsockname(socket, reinterpret_cast<sockaddr*>(&local), &size) == 0 && local.sin_port != 0;
 }
+bool NotifyBoundSocket(SOCKET socket) {
+    sockaddr_in local{};
+    if (!LocalEndpoint(socket, local)) return false;
+    std::vector<uint8_t> body(7);
+    body[0] = 4; WriteU16(body.data() + 1, ntohs(local.sin_port));
+    memcpy(body.data() + 3, &local.sin_addr.s_addr, sizeof(local.sin_addr.s_addr));
+    return WritePipeFrame(body);
+}
 int RelaySend(SOCKET socket, const char* bytes, int length, const sockaddr_in& target) {
     if (length <= 0 || length > 1200 || target.sin_port == 0) { WSASetLastError(WSAEMSGSIZE); return SOCKET_ERROR; }
     sockaddr_in local{};
-    if (!LocalEndpoint(socket, local)) return SOCKET_ERROR;
+    if (!LocalEndpoint(socket, local)) {
+        // The real UDP send/sendto APIs implicitly bind an unbound socket to an
+        // ephemeral port. This hook replaces that send, so recreate that OS step.
+        sockaddr_in automaticBind{};
+        automaticBind.sin_family = AF_INET;
+        automaticBind.sin_addr.s_addr = htonl(INADDR_ANY);
+        if (realBind(socket, reinterpret_cast<const sockaddr*>(&automaticBind), sizeof(automaticBind)) == SOCKET_ERROR) return SOCKET_ERROR;
+        if (!LocalEndpoint(socket, local)) { WSASetLastError(WSAEINVAL); return SOCKET_ERROR; }
+        if (!NotifyBoundSocket(socket)) { WSASetLastError(WSAENOBUFS); return SOCKET_ERROR; }
+    }
     std::vector<uint8_t> body(9 + static_cast<size_t>(length));
     body[0] = 1;
     WriteU16(body.data() + 1, RouteFor(target));
@@ -134,15 +163,7 @@ SOCKET WSAAPI HookSocket(int af, int type, int protocol) {
 }
 int WSAAPI HookBind(SOCKET socket, const sockaddr* address, int length) {
     const int result = realBind(socket, address, length);
-    if (result == 0 && IsDatagram(socket)) {
-        sockaddr_in local{};
-        if (LocalEndpoint(socket, local)) {
-            std::vector<uint8_t> body(7);
-            body[0] = 4; WriteU16(body.data() + 1, ntohs(local.sin_port));
-            memcpy(body.data() + 3, &local.sin_addr.s_addr, sizeof(local.sin_addr.s_addr));
-            if (!WritePipeFrame(body)) WSASetLastError(WSAENETDOWN);
-        }
-    }
+    if (result == 0 && IsDatagram(socket) && !NotifyBoundSocket(socket)) WSASetLastError(WSAENOBUFS);
     return result;
 }
 int WSAAPI HookConnect(SOCKET socket, const sockaddr* address, int length) {
@@ -177,18 +198,20 @@ int WSAAPI HookSend(SOCKET socket, const char* bytes, int length, int flags) {
 int WSAAPI HookRecvFrom(SOCKET socket, char* bytes, int length, int flags, sockaddr* from, int* fromLength) {
     if (!IsDatagram(socket) || length < 0) return realRecvFrom(socket, bytes, length, flags, from, fromLength);
     std::vector<char> frame(static_cast<size_t>(length) + 2048);
-    sockaddr_in source{}; int sourceLength = sizeof(source);
-    const int received = realRecvFrom(socket, frame.data(), static_cast<int>(frame.size()), flags,
-        reinterpret_cast<sockaddr*>(&source), &sourceLength);
-    if (received == SOCKET_ERROR) return received;
-    const bool tunnelFrame = received >= static_cast<int>(TunnelHeaderSize) && memcmp(frame.data(), "EDMWRLY1", 8) == 0;
-    const int unwrapped = Unwrap(frame.data(), received, bytes, length, from, fromLength, 0, false);
-    if (unwrapped == -2) { WSASetLastError(WSAEWOULDBLOCK); return SOCKET_ERROR; }
-    if (!tunnelFrame && from && fromLength && *fromLength >= sourceLength) {
-        memcpy(from, &source, sourceLength);
-        *fromLength = sourceLength;
+    for (;;) {
+        sockaddr_in source{}; int sourceLength = sizeof(source);
+        const int received = realRecvFrom(socket, frame.data(), static_cast<int>(frame.size()), flags,
+            reinterpret_cast<sockaddr*>(&source), &sourceLength);
+        if (received == SOCKET_ERROR) return received;
+        const bool tunnelFrame = received >= static_cast<int>(TunnelHeaderSize) && memcmp(frame.data(), "EDMWRLY1", 8) == 0;
+        const int unwrapped = Unwrap(frame.data(), received, bytes, length, from, fromLength, 0, false);
+        if (unwrapped == -2) continue;
+        if (!tunnelFrame && from && fromLength && *fromLength >= sourceLength) {
+            memcpy(from, &source, sourceLength);
+            *fromLength = sourceLength;
+        }
+        return unwrapped;
     }
-    return unwrapped;
 }
 int WSAAPI HookRecv(SOCKET socket, char* bytes, int length, int flags) {
     if (!IsDatagram(socket) || length < 0) return realRecv(socket, bytes, length, flags);
@@ -271,6 +294,32 @@ DWORD WINAPI PatchWorker(void*) {
         Sleep(100);
     }
 }
+DWORD WINAPI PipeWriterWorker(void*) {
+    for (;;) {
+        if (WaitForSingleObject(pipeWriteEvent, INFINITE) != WAIT_OBJECT_0) return 1;
+        if (!pipeConnected.load()) return 0;
+        for (;;) {
+            std::vector<uint8_t> body;
+            {
+                std::lock_guard<std::mutex> lock(pipeQueueLock);
+                if (pipeQueue.empty()) break;
+                body = std::move(pipeQueue.front());
+                pipeQueueBytes -= sizeof(uint32_t) + body.size();
+                pipeQueue.pop_front();
+            }
+            if (!pipeConnected.load()) return 2;
+            const uint32_t length = static_cast<uint32_t>(body.size());
+            if (!WriteExact(pipeHandle, &length, sizeof(length)) ||
+                !WriteExact(pipeHandle, body.data(), length)) {
+                pipeConnected.store(false);
+                std::lock_guard<std::mutex> lock(pipeQueueLock);
+                pipeQueue.clear();
+                pipeQueueBytes = 0;
+                return 3;
+            }
+        }
+    }
+}
 DWORD WINAPI PipeWorker(void*) {
     wchar_t pipeName[256]{};
     if (!GetEnvironmentVariableW(L"EDMW_RELAY_PIPE", pipeName, _countof(pipeName))) return 1;
@@ -281,6 +330,14 @@ DWORD WINAPI PipeWorker(void*) {
         Sleep(100);
     }
     if (pipeHandle == INVALID_HANDLE_VALUE) return 2;
+    pipeWriteEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    if (!pipeWriteEvent) { pipeConnected.store(false); return 3; }
+    pipeConnected.store(true);
+    if (!CreateThread(nullptr, 0, PipeWriterWorker, nullptr, 0, nullptr)) {
+        pipeConnected.store(false);
+        CloseHandle(pipeWriteEvent); pipeWriteEvent = nullptr;
+        return 4;
+    }
     bool patchWorkerStarted = false;
     while (true) {
         uint32_t length = 0;
@@ -301,6 +358,8 @@ DWORD WINAPI PipeWorker(void*) {
             }
         }
     }
+    pipeConnected.store(false);
+    SetEvent(pipeWriteEvent);
     return 0;
 }
 }
