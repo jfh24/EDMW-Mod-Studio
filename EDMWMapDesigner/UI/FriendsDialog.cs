@@ -544,6 +544,7 @@ internal sealed class FriendsDialog : Form
 
     private static Panel CreateSectionPage(string text) => new()
     {
+        Dock = DockStyle.Fill,
         AccessibleName = text,
         BackColor = MedievalTheme.Sidebar,
         ForeColor = MedievalTheme.Text,
