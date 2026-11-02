@@ -38,10 +38,11 @@ internal sealed class FriendsDialog : Form
     private readonly Button _accept;
     private readonly Button _remove;
     private readonly Button _inviteButton;
-    private readonly Button _matchmakingButton;
     private readonly Button _leaveButton;
     private readonly Button _joinButton;
     private readonly Button _copy;
+    private readonly TableLayoutPanel _sections;
+    private readonly OnlineGamePanel _matchmakingPanel;
     private bool _busy;
     private bool _connecting;
 
@@ -59,20 +60,18 @@ internal sealed class FriendsDialog : Form
         _leave = leave;
         _inviteUnavailableReason = inviteUnavailableReason ?? (() => null);
         _launchGameplay = launchGameplay;
-        Text = "Online friends";
-        ClientSize = new Size(800, 560);
-        MinimumSize = new Size(680, 500);
+        Text = "Online friends and matchmaking";
+        ClientSize = new Size(900, 720);
+        MinimumSize = new Size(760, 600);
         StartPosition = FormStartPosition.CenterParent;
         ShowInTaskbar = false;
         Font = MedievalTheme.UiFont();
         ForeColor = MedievalTheme.Text;
         BackColor = MedievalTheme.Sidebar;
 
-        _layout = Stack(110, 100, -1, -1);
+        _layout = Stack(110, 100, -1);
         _layout.Dock = DockStyle.Top;
         _layout.MinimumSize = new Size(0, 512);
-        _layout.RowStyles[2].Height = 55;
-        _layout.RowStyles[3].Height = 45;
         _scrollContent = new MedievalBufferedPanel
         {
             Dock = DockStyle.Fill, AutoScroll = true, Margin = Padding.Empty,
@@ -200,20 +199,13 @@ internal sealed class FriendsDialog : Form
         {
             if (SelectedFriend is not { } row) return;
             await _invite(row.Profile.UserId);
-            SetStatus("Map invitation sent. Your friend can join from Friends.");
+            SetStatus("Map invitation sent. Your friend can join from Map collaboration.");
         }));
-        _matchmakingButton = MakeButton("Matchmaking", () =>
-        {
-            using var dialog = new OnlineGameDialog(_client, _launchGameplay);
-            _ = dialog.ShowDialog(this);
-            RefreshLists();
-            return Task.CompletedTask;
-        });
         var friendsCard = Stack(28, -1, 34);
         friendsCard.Controls.Add(Heading("Friends", _friendCount, 200), 0, 0);
         _friendsEmpty = EmptyState(_friendsEmptyTitle);
         friendsCard.Controls.Add(ListHost(_friends, _friendsEmpty), 0, 1);
-        friendsCard.Controls.Add(Actions(_accept, _remove, _inviteButton, _matchmakingButton), 0, 2);
+        friendsCard.Controls.Add(Actions(_accept, _remove), 0, 2);
         _layout.Controls.Add(Card(friendsCard), 0, 2);
 
         _inviteList.Columns.Add("Map", 250);
@@ -227,16 +219,91 @@ internal sealed class FriendsDialog : Form
             SetStatus(_mapSession() ? "Joined the online map session." : "Map invitation kept.");
         }));
         _leaveButton = MakeButton("Leave session", () => RunAsync(async () => { await _leave(); SetStatus("Left online map session."); }));
-        var invitationCard = Stack(28, -1, 34);
+        var invitationCard = Stack(27, 38, -1, 34);
         invitationCard.Controls.Add(Heading("Map invitations"), 0, 0);
+        invitationCard.Controls.Add(CopyLabel("Select an accepted online friend on the Friends tab, then invite them to collaborate here."), 0, 1);
         _invitationsEmpty = EmptyState(CopyLabel("No map invitations yet", "Map invitations empty state"));
-        invitationCard.Controls.Add(ListHost(_inviteList, _invitationsEmpty), 0, 1);
-        invitationCard.Controls.Add(Actions(_joinButton, _leaveButton), 0, 2);
-        _layout.Controls.Add(Card(invitationCard), 0, 3);
+        invitationCard.Controls.Add(ListHost(_inviteList, _invitationsEmpty), 0, 2);
+        invitationCard.Controls.Add(Actions(_inviteButton, _joinButton, _leaveButton), 0, 3);
+
+        var friendsPage = CreateSectionPage("Friends");
+        friendsPage.Controls.Add(_scrollContent);
+        var collaborationPage = CreateSectionPage("Map collaboration");
+        var collaborationLayout = Stack(-1);
+        collaborationLayout.Padding = new Padding(12);
+        collaborationLayout.Controls.Add(Card(invitationCard), 0, 0);
+        collaborationPage.Controls.Add(collaborationLayout);
+        var matchmakingPage = CreateSectionPage("Matchmaking");
+        _matchmakingPanel = new OnlineGamePanel(_client, _launchGameplay);
+        matchmakingPage.Controls.Add(_matchmakingPanel);
+        var sectionContent = new MedievalBufferedPanel
+        {
+            Dock = DockStyle.Fill,
+            BackColor = MedievalTheme.Sidebar,
+            Margin = Padding.Empty,
+            AccessibleName = "Online collaboration content"
+        };
+        foreach (var page in new[] { friendsPage, collaborationPage, matchmakingPage })
+        {
+            page.Visible = false;
+            sectionContent.Controls.Add(page);
+        }
+        var sectionButtons = new List<(Panel Page, FriendActionButton Button)>();
+        void ActivateSection(Panel page)
+        {
+            foreach (Control child in sectionContent.Controls)
+                child.Visible = ReferenceEquals(child, page);
+            page.BringToFront();
+            foreach (var section in sectionButtons)
+                section.Button.Primary = ReferenceEquals(section.Page, page);
+            if (ReferenceEquals(page, matchmakingPage)) _matchmakingPanel.Activate();
+        }
+        Button SectionButton(string text, Panel page)
+        {
+            var button = (FriendActionButton)MakeButton(text, () =>
+            {
+                ActivateSection(page);
+                return Task.CompletedTask;
+            });
+            button.Size = new Size(160, 34);
+            button.Margin = new Padding(0, 0, 3, 0);
+            button.AccessibleRole = AccessibleRole.PageTab;
+            sectionButtons.Add((page, button));
+            return button;
+        }
+        var sectionHeader = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            WrapContents = false,
+            AutoSize = false,
+            BackColor = MedievalTheme.Sidebar,
+            Margin = Padding.Empty,
+            Padding = Padding.Empty,
+            AccessibleName = "Online collaboration sections"
+        };
+        sectionHeader.Controls.Add(SectionButton("Friends", friendsPage));
+        sectionHeader.Controls.Add(SectionButton("Map collaboration", collaborationPage));
+        sectionHeader.Controls.Add(SectionButton("Matchmaking", matchmakingPage));
+        _sections = new MedievalBufferedTableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 1,
+            RowCount = 2,
+            BackColor = MedievalTheme.Sidebar,
+            Margin = Padding.Empty,
+            Padding = Padding.Empty,
+            AccessibleName = "Online collaboration sections"
+        };
+        _sections.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        _sections.RowStyles.Add(new RowStyle(SizeType.Absolute, 38));
+        _sections.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        _sections.Controls.Add(sectionHeader, 0, 0);
+        _sections.Controls.Add(sectionContent, 0, 1);
+        ActivateSection(friendsPage);
 
         var shell = Stack(-1);
         shell.Padding = new Padding(18);
-        shell.Controls.Add(_scrollContent, 0, 0);
+        shell.Controls.Add(_sections, 0, 0);
         AcceptButton = _connect;
         MedievalDialogFrame.Apply(this, shell);
 
@@ -390,7 +457,6 @@ internal sealed class FriendsDialog : Form
         _remove.AccessibleName = _remove.Text;
         _remove.Enabled = ready && selected is not null;
         _inviteButton.Enabled = ready && _mapWorkspace() && inviteUnavailable is null && selected is { Relationship: "Friend", Profile.Online: true };
-        _matchmakingButton.Enabled = ready;
         _leaveButton.Visible = _mapSession();
         _leaveButton.Enabled = ready && _mapSession();
         _joinButton.Enabled = ready && !_mapSession() && _inviteList.SelectedItems.Count > 0;
@@ -405,8 +471,6 @@ internal sealed class FriendsDialog : Form
             _ => "Select a friend or request to see available actions."
         };
         _tips.SetToolTip(_inviteButton, selectionHint);
-        _tips.SetToolTip(_matchmakingButton, !connected ? "Connect to find or host online game rooms." :
-            _client.CurrentGameRoom is { } gameRoom ? $"In {gameRoom.Name}. Open the relay matchmaking room." : "Find public rooms or invite accepted friends to play online.");
         _tips.SetToolTip(_joinButton, _mapSession() ? "Leave the current map session before joining another." : "Select an invitation to join.");
         UpdateDefaultAction();
     }
@@ -473,6 +537,15 @@ internal sealed class FriendsDialog : Form
         Text = text, AccessibleName = accessibleName ?? text, Dock = DockStyle.Fill,
         Margin = Padding.Empty, TextAlign = ContentAlignment.MiddleLeft, AutoEllipsis = true,
         ForeColor = MedievalTheme.TextSecondary, UseMnemonic = false
+    };
+
+    private static Panel CreateSectionPage(string text) => new()
+    {
+        AccessibleName = text,
+        BackColor = MedievalTheme.Sidebar,
+        ForeColor = MedievalTheme.Text,
+        Padding = Padding.Empty,
+        Margin = Padding.Empty
     };
 
     private static Control Heading(string text, Label? detail = null, int detailWidth = 100)
@@ -547,7 +620,7 @@ internal sealed class FriendsDialog : Form
         return panel;
     }
 
-    private static Button MakeButton(string text, Func<Task> action, bool primary = false)
+    internal static Button MakeButton(string text, Func<Task> action, bool primary = false)
     {
         var button = new FriendActionButton
         {

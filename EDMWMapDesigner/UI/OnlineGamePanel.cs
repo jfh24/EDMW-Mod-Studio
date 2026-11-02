@@ -2,8 +2,8 @@ using EDMWMapDesigner.Networking;
 
 namespace EDMWMapDesigner.UI;
 
-/// <summary>Relay-backed public and friends-only game rooms shown beside the online friends list.</summary>
-internal sealed class OnlineGameDialog : Form
+/// <summary>Relay-backed public and friends-only game rooms embedded in the Matchmaking tab.</summary>
+internal sealed class OnlineGamePanel : UserControl
 {
     private sealed record FriendChoice(OnlineProfile Profile)
     {
@@ -31,16 +31,12 @@ internal sealed class OnlineGameDialog : Form
     private readonly Button _launch;
     private bool _busy;
 
-    public OnlineGameDialog(OnlineRelayClient client, Func<Task>? launchGameplay = null)
+    public OnlineGamePanel(OnlineRelayClient client, Func<Task>? launchGameplay = null)
     {
         _client = client ?? throw new ArgumentNullException(nameof(client));
         _launchGameplay = launchGameplay;
         _name.Text = $"{_client.User?.DisplayName ?? "Player"}'s game";
-        Text = "Online games";
-        ClientSize = new Size(760, 620);
-        MinimumSize = new Size(660, 550);
-        StartPosition = FormStartPosition.CenterParent;
-        ShowInTaskbar = false;
+        Dock = DockStyle.Fill;
         Font = MedievalTheme.UiFont();
         ForeColor = MedievalTheme.Text;
         BackColor = MedievalTheme.Sidebar;
@@ -90,7 +86,7 @@ internal sealed class OnlineGameDialog : Form
         }));
         _launch = Button("Launch EDMW", () => RunAsync(async () =>
         {
-            if (_launchGameplay is null) throw new InvalidOperationException("Launch EDMW from the Mod Studio Friends window.");
+            if (_launchGameplay is null) throw new InvalidOperationException("Launch EDMW from the Matchmaking tab.");
             SetStatus("Starting EDMW with the relay bridge…");
             await _launchGameplay();
             SetStatus("EDMW launched. Choose TCP/IP, then host or join a LAN game. Friends status confirms when relay hookup is active.");
@@ -132,7 +128,7 @@ internal sealed class OnlineGameDialog : Form
         layout.Controls.Add(_roomState, 0, 3);
         layout.Controls.Add(actions, 0, 4);
         layout.Controls.Add(_status, 0, 5);
-        MedievalDialogFrame.Apply(this, layout);
+        Controls.Add(layout);
 
         _client.GameRoomsChanged += GameRoomsChanged;
         _client.FriendsChanged += FriendsChanged;
@@ -140,21 +136,8 @@ internal sealed class OnlineGameDialog : Form
         _client.GameInvitationsChanged += GameInvitationsChanged;
         _client.GameRoomChanged += GameRoomChanged;
         _client.GameRoomEnded += GameRoomEnded;
-        Shown += (_, _) =>
-        {
-            var area = Screen.FromControl(this).WorkingArea;
-            MinimumSize = new Size(MinimumSize.Width, Math.Min(MinimumSize.Height, area.Height));
-            Height = Math.Min(Height, area.Height);
-            RefreshFriendPicker();
-            RefreshLists();
-            SetStatus("Checking relay matchmaking support…");
-            _ = RunAsync(async () =>
-            {
-                await _client.RefreshGameRoomsAsync(_lifetime.Token);
-                SetStatus("Game rooms refreshed.");
-            });
-        };
-        FormClosed += (_, _) =>
+        _client.StatusChanged += StatusChanged;
+        Disposed += (_, _) =>
         {
             _lifetime.Cancel();
             _tips.Dispose();
@@ -164,9 +147,29 @@ internal sealed class OnlineGameDialog : Form
             _client.GameInvitationsChanged -= GameInvitationsChanged;
             _client.GameRoomChanged -= GameRoomChanged;
             _client.GameRoomEnded -= GameRoomEnded;
+            _client.StatusChanged -= StatusChanged;
             _lifetime.Dispose();
         };
         RefreshActions();
+    }
+
+    public void Activate()
+    {
+        if (IsDisposed || Disposing) return;
+        RefreshFriendPicker();
+        RefreshLists();
+        if (!_client.IsConnected)
+        {
+            SetStatus("Connect to the relay from the Friends tab to use matchmaking.");
+            return;
+        }
+        if (_busy) return;
+        SetStatus("Checking relay matchmaking support…");
+        _ = RunAsync(async () =>
+        {
+            await _client.RefreshGameRoomsAsync(_lifetime.Token);
+            SetStatus("Game rooms refreshed.");
+        });
     }
 
     private OnlineGameRoom? SelectedRoom => _rooms.SelectedItems.Count > 0 ? _rooms.SelectedItems[0].Tag as OnlineGameRoom : null;
@@ -314,11 +317,20 @@ internal sealed class OnlineGameDialog : Form
     }
 
     private void GameRoomsChanged(object? sender, OnlineGameRoom[] rooms) => OnUi(RefreshLists);
-    private void FriendsChanged(object? sender, OnlineFriendsSnapshot snapshot) => OnUi(RefreshFriendPicker);
+    private void FriendsChanged(object? sender, OnlineFriendsSnapshot snapshot) => OnUi(() =>
+    {
+        RefreshFriendPicker();
+        RefreshActions();
+    });
     private void GameInviteReceived(object? sender, OnlineGameInvite invitation) => OnUi(() => { RefreshLists(); SetStatus($"{invitation.From.DisplayName} invited you to {invitation.Name}."); });
     private void GameInvitationsChanged(object? sender, OnlineGameInvite[] invitations) => OnUi(RefreshLists);
     private void GameRoomChanged(object? sender, OnlineGameRoom? room) => OnUi(RefreshLists);
     private void GameRoomEnded(object? sender, string message) => OnUi(() => { RefreshLists(); SetStatus(message); });
+    private void StatusChanged(object? sender, string message) => OnUi(() =>
+    {
+        RefreshFriendPicker();
+        RefreshActions();
+    });
 
     private void OnUi(Action action)
     {
@@ -347,16 +359,5 @@ internal sealed class OnlineGameDialog : Form
     }
 
     private static Button Button(string text, Func<Task> action, bool primary = false)
-    {
-        var button = new Button
-        {
-            Text = text, Height = 32,
-            Width = Math.Max(95, TextRenderer.MeasureText(text, MedievalTheme.UiFont(9.25f, FontStyle.Bold)).Width + 24),
-            Margin = new Padding(0, 0, 7, 0), AccessibleName = text
-        };
-        MedievalTheme.StyleSecondaryButton(button);
-        if (primary) { button.BackColor = MedievalTheme.SurfaceRaised; button.ForeColor = MedievalTheme.GoldBright; }
-        button.Click += async (_, _) => await action();
-        return button;
-    }
+        => FriendsDialog.MakeButton(text, action, primary);
 }
