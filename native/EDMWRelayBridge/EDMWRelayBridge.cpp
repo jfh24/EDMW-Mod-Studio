@@ -2,6 +2,8 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
+#include <iphlpapi.h>
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstdint>
@@ -43,6 +45,8 @@ size_t pipeQueueBytes = 0;
 std::atomic<bool> pipeConnected{ false };
 std::unordered_map<SOCKET, sockaddr_in> virtualPeers;
 std::atomic<uint16_t> ownRelayPort{ 0 };
+std::once_flag broadcastAddressInitialization;
+std::vector<uint32_t> directedBroadcastAddresses;
 
 uint16_t ReadU16(const uint8_t* p) { return static_cast<uint16_t>((p[0] << 8) | p[1]); }
 void WriteU16(uint8_t* p, uint16_t value) { p[0] = static_cast<uint8_t>(value >> 8); p[1] = static_cast<uint8_t>(value); }
@@ -79,10 +83,43 @@ bool IsDatagram(SOCKET socket) {
     int type = 0, size = sizeof(type);
     return ::getsockopt(socket, SOL_SOCKET, SO_TYPE, reinterpret_cast<char*>(&type), &size) == 0 && type == SOCK_DGRAM;
 }
+void InitializeDirectedBroadcastAddresses() {
+    ULONG bufferSize = 16 * 1024;
+    std::vector<uint8_t> buffer(bufferSize);
+    constexpr ULONG flags = GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER;
+    auto* adapters = reinterpret_cast<PIP_ADAPTER_ADDRESSES>(buffer.data());
+    ULONG result = GetAdaptersAddresses(AF_INET, flags, nullptr, adapters, &bufferSize);
+    if (result == ERROR_BUFFER_OVERFLOW) {
+        buffer.resize(bufferSize);
+        adapters = reinterpret_cast<PIP_ADAPTER_ADDRESSES>(buffer.data());
+        result = GetAdaptersAddresses(AF_INET, flags, nullptr, adapters, &bufferSize);
+    }
+    if (result != NO_ERROR) return;
+    for (auto* adapter = adapters; adapter; adapter = adapter->Next) {
+        for (auto* address = adapter->FirstUnicastAddress; address; address = address->Next) {
+            if (!address->Address.lpSockaddr || address->Address.lpSockaddr->sa_family != AF_INET) continue;
+            const auto prefix = address->OnLinkPrefixLength;
+            // /31 and /32 links have no directed broadcast address.
+            if (prefix >= 31) continue;
+            const auto* ipv4 = reinterpret_cast<const sockaddr_in*>(address->Address.lpSockaddr);
+            const uint32_t local = ntohl(ipv4->sin_addr.s_addr);
+            const uint32_t mask = prefix == 0 ? 0u : 0xFFFFFFFFu << (32 - prefix);
+            directedBroadcastAddresses.push_back((local & mask) | ~mask);
+        }
+    }
+}
+bool IsDirectedBroadcast(uint32_t address) {
+    std::call_once(broadcastAddressInitialization, InitializeDirectedBroadcastAddresses);
+    return std::find(directedBroadcastAddresses.begin(), directedBroadcastAddresses.end(), address) != directedBroadcastAddresses.end();
+}
+bool IsBroadcastOrMulticast(const sockaddr_in& address) {
+    const uint32_t ip = ntohl(address.sin_addr.s_addr);
+    return ip == INADDR_BROADCAST || (ip >> 28) == 0xE || IsDirectedBroadcast(ip);
+}
 uint16_t RouteFor(const sockaddr_in& address) {
     const uint32_t ip = ntohl(address.sin_addr.s_addr);
     const uint8_t last = static_cast<uint8_t>(ip);
-    if (ip == INADDR_BROADCAST || (ip >> 28) == 0xE) return 0;
+    if (ip == INADDR_BROADCAST || (ip >> 28) == 0xE || IsDirectedBroadcast(ip)) return 0;
     if ((ip & 0xFFFFFF00u) == VirtualNetwork && last >= 1 && last <= 8)
         return static_cast<uint16_t>(RelayPortBase + last - 1);
     // LAN discovery is broadcast from the host. A guest's direct host address
@@ -169,7 +206,7 @@ int WSAAPI HookBind(SOCKET socket, const sockaddr* address, int length) {
 int WSAAPI HookConnect(SOCKET socket, const sockaddr* address, int length) {
     if (address && address->sa_family == AF_INET && length >= static_cast<int>(sizeof(sockaddr_in)) && IsDatagram(socket)) {
         sockaddr_in peer{}; memcpy(&peer, address, sizeof(peer));
-        if (RouteFromVirtualAddress(peer) == 0 && ownRelayPort.load() != RelayPortBase)
+        if (RouteFromVirtualAddress(peer) == 0 && !IsBroadcastOrMulticast(peer) && ownRelayPort.load() != RelayPortBase)
             peer.sin_addr.s_addr = htonl(VirtualNetwork | 1);
         std::lock_guard<std::mutex> lock(stateLock); virtualPeers[socket] = peer;
         return 0;
@@ -348,6 +385,7 @@ DWORD WINAPI PipeWorker(void*) {
             const uint16_t relayPort = ReadU16(body.data() + 1);
             if (relayPort >= RelayPortBase && relayPort <= RelayPortBase + 7) {
                 ownRelayPort.store(relayPort);
+                InitializeDirectedBroadcastAddresses();
                 if (!patchWorkerStarted) {
                     patchWorkerStarted = CreateThread(nullptr, 0, PatchWorker, nullptr, 0, nullptr) != nullptr;
                     if (!patchWorkerStarted) {
