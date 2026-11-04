@@ -59,6 +59,7 @@ if (!(Test-Path -LiteralPath $publishedExecutable -PathType Leaf)) {
 # Keep the tracked distribution README when refreshing the generated executable.
 New-Item -ItemType Directory -Path $resolvedOutput -Force | Out-Null
 Copy-Item -LiteralPath $publishedExecutable -Destination (Join-Path $resolvedOutput 'EDMW Mod Studio.exe') -Force
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'THIRD-PARTY-NOTICES.md') -Destination (Join-Path $resolvedOutput 'THIRD-PARTY-NOTICES.md') -Force
 
 Write-Host "Built EDMW Mod Studio: $publishedExecutable"
 Write-Host "Distribution: $resolvedOutput\EDMW Mod Studio.exe"

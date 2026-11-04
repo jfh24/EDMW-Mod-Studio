@@ -22,6 +22,7 @@
     <EmbeddedResource Include="..\native\EDMWAnchored\build\EDMWAnchored.dll" LogicalName="EDMWMapDesigner.Native.EDMWAnchored.dll" />
     <EmbeddedResource Include="..\native\EDMWRelayBridge\build\EDMWRelayBridge.dll" LogicalName="EDMWMapDesigner.Native.EDMWRelayBridge.dll" />
     <EmbeddedResource Include="..\native\EDMWRelayBridge\build\EDMWRelayLauncher.exe" LogicalName="EDMWMapDesigner.Native.EDMWRelayLauncher.exe" />
+    <EmbeddedResource Include="..\THIRD-PARTY-NOTICES.md" LogicalName="EDMWMapDesigner.Licenses.THIRD-PARTY-NOTICES.md" />
     <EmbeddedResource Include="Assets\medieval-command-banner.png" LogicalName="EDMWMapDesigner.Assets.medieval-command-banner.png" />
     <EmbeddedResource Include="Assets\ornate-panel-frame.png" LogicalName="EDMWMapDesigner.Assets.ornate-panel-frame.png" />
     <EmbeddedResource Include="Assets\medieval-command-rail.png" LogicalName="EDMWMapDesigner.Assets.medieval-command-rail.png" />
@@ -42,5 +43,8 @@
     <EmbeddedResource Include="Assets\Progression\civilization-icons.png" LogicalName="EDMWMapDesigner.Assets.Progression.civilization-icons.png" />
     <EmbeddedResource Include="Assets\EDMWMultiplayerInstaller.exe" LogicalName="EDMWMapDesigner.Tools.EDMWMultiplayerInstaller.exe" />
     <EmbeddedResource Include="Assets\EDMWCivilizationInstaller.exe" LogicalName="EDMWMapDesigner.Tools.EDMWCivilizationInstaller.exe" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="DataChannelDotnet" Version="1.3.1" />
   </ItemGroup>
 </Project>

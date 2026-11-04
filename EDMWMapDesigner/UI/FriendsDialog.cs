@@ -7,13 +7,7 @@ internal sealed class FriendsDialog : Form
 {
     private sealed record FriendRow(OnlineProfile Profile, string Relationship);
     private readonly OnlineRelayClient _client;
-    private readonly Func<OnlineCollaborationInvite[]> _invitations;
-    private readonly Func<bool> _mapWorkspace;
-    private readonly Func<bool> _mapSession;
-    private readonly Func<Guid, Task> _invite;
-    private readonly Func<Guid, Task> _join;
-    private readonly Func<Task> _leave;
-    private readonly Func<string?> _inviteUnavailableReason;
+    private readonly Func<bool> _canDisconnect;
     private readonly Func<Task>? _launchGameplay;
     private readonly Func<string?> _gameTrafficStatus;
     private readonly CancellationTokenSource _lifetime = new();
@@ -26,9 +20,7 @@ internal sealed class FriendsDialog : Form
     private readonly Label _friendCount = CopyLabel("0 friends", "Friend and request count");
     private readonly Label _friendsEmptyTitle = CopyLabel("Your friends will appear here", "Friends empty state");
     private readonly ListView _friends = MakeList("Friends and friend requests");
-    private readonly ListView _inviteList = MakeList("Incoming map invitations");
     private readonly Control _friendsEmpty;
-    private readonly Control _invitationsEmpty;
     private readonly Control _relaySettings;
     private readonly Button _relayToggle;
     private readonly TableLayoutPanel _layout;
@@ -38,9 +30,6 @@ internal sealed class FriendsDialog : Form
     private readonly Button _request;
     private readonly Button _accept;
     private readonly Button _remove;
-    private readonly Button _inviteButton;
-    private readonly Button _leaveButton;
-    private readonly Button _joinButton;
     private readonly Button _copy;
     private readonly TableLayoutPanel _sections;
     private readonly OnlineGamePanel _matchmakingPanel;
@@ -48,19 +37,11 @@ internal sealed class FriendsDialog : Form
     private bool _connecting;
 
     public FriendsDialog(OnlineRelayClient client, OnlinePreferences preferences,
-        Func<OnlineCollaborationInvite[]> invitations, Func<bool> mapWorkspace, Func<bool> mapSession,
-        Func<Guid, Task> invite, Func<Guid, Task> join, Func<Task> leave,
-        Func<string?>? inviteUnavailableReason = null, Func<Task>? launchGameplay = null,
+        Func<bool> canDisconnect, Func<Task>? launchGameplay = null,
         Func<string?>? gameTrafficStatus = null)
     {
         _client = client;
-        _invitations = invitations;
-        _mapWorkspace = mapWorkspace;
-        _mapSession = mapSession;
-        _invite = invite;
-        _join = join;
-        _leave = leave;
-        _inviteUnavailableReason = inviteUnavailableReason ?? (() => null);
+        _canDisconnect = canDisconnect;
         _launchGameplay = launchGameplay;
         _gameTrafficStatus = gameTrafficStatus ?? (() => null);
         Text = "Online friends and matchmaking";
@@ -89,8 +70,7 @@ internal sealed class FriendsDialog : Form
         {
             if (_client.IsConnected)
             {
-                try { if (_mapSession()) await _leave(); }
-                finally { _client.Disconnect(); }
+                _client.Disconnect();
                 SetStatus("Disconnected. Connect again whenever you're ready.");
             }
             else
@@ -198,12 +178,6 @@ internal sealed class FriendsDialog : Form
             SetStatus(row.Relationship == "Friend" ? "Friend removed." : "Friend request removed.");
         }));
         _remove.Width = 136;
-        _inviteButton = MakeButton("Invite to map", () => RunAsync(async () =>
-        {
-            if (SelectedFriend is not { } row) return;
-            await _invite(row.Profile.UserId);
-            SetStatus("Map invitation sent. Your friend can join from Map collaboration.");
-        }));
         var friendsCard = Stack(28, -1, 34);
         friendsCard.Controls.Add(Heading("Friends", _friendCount, 200), 0, 0);
         _friendsEmpty = EmptyState(_friendsEmptyTitle);
@@ -211,31 +185,8 @@ internal sealed class FriendsDialog : Form
         friendsCard.Controls.Add(Actions(_accept, _remove), 0, 2);
         _layout.Controls.Add(Card(friendsCard), 0, 2);
 
-        _inviteList.Columns.Add("Map", 250);
-        _inviteList.Columns.Add("From", 350);
-        _inviteList.SizeChanged += (_, _) => FitColumns(_inviteList, 0.55f);
-        _inviteList.SelectedIndexChanged += (_, _) => RefreshActions();
-        _joinButton = MakeButton("Join map", () => RunAsync(async () =>
-        {
-            if (_inviteList.SelectedItems.Count == 0 || _inviteList.SelectedItems[0].Tag is not OnlineCollaborationInvite invitation) return;
-            await _join(invitation.SessionId);
-            SetStatus(_mapSession() ? "Joined the online map session." : "Map invitation kept.");
-        }));
-        _leaveButton = MakeButton("Leave session", () => RunAsync(async () => { await _leave(); SetStatus("Left online map session."); }));
-        var invitationCard = Stack(27, 38, -1, 34);
-        invitationCard.Controls.Add(Heading("Map invitations"), 0, 0);
-        invitationCard.Controls.Add(CopyLabel("Select an accepted online friend on the Friends tab, then invite them to collaborate here."), 0, 1);
-        _invitationsEmpty = EmptyState(CopyLabel("No map invitations yet", "Map invitations empty state"));
-        invitationCard.Controls.Add(ListHost(_inviteList, _invitationsEmpty), 0, 2);
-        invitationCard.Controls.Add(Actions(_inviteButton, _joinButton, _leaveButton), 0, 3);
-
         var friendsPage = CreateSectionPage("Friends");
         friendsPage.Controls.Add(_scrollContent);
-        var collaborationPage = CreateSectionPage("Map collaboration");
-        var collaborationLayout = Stack(-1);
-        collaborationLayout.Padding = new Padding(12);
-        collaborationLayout.Controls.Add(Card(invitationCard), 0, 0);
-        collaborationPage.Controls.Add(collaborationLayout);
         var matchmakingPage = CreateSectionPage("Matchmaking");
         _matchmakingPanel = new OnlineGamePanel(_client, _launchGameplay, _gameTrafficStatus);
         matchmakingPage.Controls.Add(_matchmakingPanel);
@@ -246,7 +197,7 @@ internal sealed class FriendsDialog : Form
             Margin = Padding.Empty,
             AccessibleName = "Online collaboration content"
         };
-        foreach (var page in new[] { friendsPage, collaborationPage, matchmakingPage })
+        foreach (var page in new[] { friendsPage, matchmakingPage })
         {
             page.Visible = false;
             sectionContent.Controls.Add(page);
@@ -285,7 +236,6 @@ internal sealed class FriendsDialog : Form
             AccessibleName = "Online collaboration sections"
         };
         sectionHeader.Controls.Add(SectionButton("Friends", friendsPage));
-        sectionHeader.Controls.Add(SectionButton("Map collaboration", collaborationPage));
         sectionHeader.Controls.Add(SectionButton("Matchmaking", matchmakingPage));
         _sections = new MedievalBufferedTableLayoutPanel
         {
@@ -316,7 +266,6 @@ internal sealed class FriendsDialog : Form
         _requestCode.Enter += (_, _) => UpdateDefaultAction();
         _requestCode.Leave += (_, _) => AcceptButton = _client.IsConnected ? null : _connect;
         _client.FriendsChanged += FriendsChanged;
-        _client.CollaborationInviteReceived += InvitationReceived;
         _client.GameInviteReceived += GameInvitationReceived;
         _client.GameInvitationsChanged += GameInvitationsChanged;
         _client.GameRoomChanged += GameRoomChanged;
@@ -337,7 +286,6 @@ internal sealed class FriendsDialog : Form
         {
             _lifetime.Cancel();
             _client.FriendsChanged -= FriendsChanged;
-            _client.CollaborationInviteReceived -= InvitationReceived;
             _client.GameInviteReceived -= GameInvitationReceived;
             _client.GameInvitationsChanged -= GameInvitationsChanged;
             _client.GameRoomChanged -= GameRoomChanged;
@@ -358,7 +306,6 @@ internal sealed class FriendsDialog : Form
         return base.ProcessDialogKey(keyData);
     }
     private void FriendsChanged(object? sender, OnlineFriendsSnapshot snapshot) => OnUi(RefreshLists);
-    private void InvitationReceived(object? sender, OnlineCollaborationInvite invitation) => OnUi(RefreshLists);
     private void GameInvitationReceived(object? sender, OnlineGameInvite invitation) => OnUi(RefreshLists);
     private void GameInvitationsChanged(object? sender, OnlineGameInvite[] invitations) => OnUi(RefreshLists);
     private void GameRoomChanged(object? sender, OnlineGameRoom? room) => OnUi(RefreshLists);
@@ -423,19 +370,6 @@ internal sealed class FriendsDialog : Form
         _friends.Visible = _friends.Items.Count > 0;
         _friendsEmpty.Visible = !_friends.Visible;
         _friendsEmptyTitle.Text = "Your friends will appear here";
-        _inviteList.BeginUpdate();
-        var selectedInvite = _inviteList.SelectedItems.Count > 0 ? (_inviteList.SelectedItems[0].Tag as OnlineCollaborationInvite)?.SessionId : null;
-        _inviteList.Items.Clear();
-        foreach (var invitation in _invitations())
-        {
-            var row = new ListViewItem(invitation.MapName) { Tag = invitation };
-            row.SubItems.Add(invitation.From.DisplayName);
-            _inviteList.Items.Add(row);
-            if (selectedInvite == invitation.SessionId) row.Selected = true;
-        }
-        _inviteList.EndUpdate();
-        _inviteList.Visible = _inviteList.Items.Count > 0;
-        _invitationsEmpty.Visible = !_inviteList.Visible;
         _friendCode.Text = _client.IsConnected && _client.User is { } user ? user.FriendCode : "Available after connecting";
         _friendCode.ForeColor = _client.IsConnected ? MedievalTheme.GoldBright : MedievalTheme.TextSecondary;
         _tips.SetToolTip(_friendCode, _friendCode.Text);
@@ -445,15 +379,15 @@ internal sealed class FriendsDialog : Form
     private void RefreshActions()
     {
         var connected = _client.IsConnected;
+        var connecting = _connecting || _client.IsConnecting;
         var ready = !_busy && connected;
         var selected = SelectedFriend;
-        var inviteUnavailable = _inviteUnavailableReason();
-        _connectionState.Text = _connecting ? "●  Connecting…" : connected ? "●  Online" : "●  Offline";
-        _connectionState.ForeColor = connected ? MedievalTheme.Success : MedievalTheme.TextSecondary;
-        _connect.Text = _connecting ? "Connecting…" : connected ? "Disconnect" : "Connect";
+        _connectionState.Text = connecting ? "●  Connecting…" : connected ? "●  Online" : "●  Offline";
+        _connectionState.ForeColor = connecting ? MedievalTheme.GoldBright : connected ? MedievalTheme.Success : MedievalTheme.TextSecondary;
+        _connect.Text = connecting ? "Connecting…" : connected ? "Disconnect" : "Connect";
         _connect.AccessibleName = _connect.Text;
         ((FriendActionButton)_connect).Primary = !connected;
-        _connect.Enabled = !_busy && (connected || (!string.IsNullOrWhiteSpace(_displayName.Text) && !string.IsNullOrWhiteSpace(_endpoint.Text)));
+        _connect.Enabled = !_busy && !connecting && (connected ? _canDisconnect() : (!string.IsNullOrWhiteSpace(_displayName.Text) && !string.IsNullOrWhiteSpace(_endpoint.Text)));
         _endpoint.Enabled = _displayName.Enabled = !_busy && !connected;
         _requestCode.Enabled = ready;
         _request.Enabled = ready && !string.IsNullOrWhiteSpace(_requestCode.Text);
@@ -462,26 +396,12 @@ internal sealed class FriendsDialog : Form
         _remove.Text = selected?.Relationship switch { "Incoming request" => "Decline request", "Sent request" => "Cancel request", _ => "Remove friend" };
         _remove.AccessibleName = _remove.Text;
         _remove.Enabled = ready && selected is not null;
-        _inviteButton.Enabled = ready && _mapWorkspace() && inviteUnavailable is null && selected is { Relationship: "Friend", Profile.Online: true };
-        _leaveButton.Visible = _mapSession();
-        _leaveButton.Enabled = ready && _mapSession();
-        _joinButton.Enabled = ready && !_mapSession() && _inviteList.SelectedItems.Count > 0;
-        var selectionHint = !connected ? "Connect to manage friends and requests." : selected switch
-        {
-            { Relationship: "Incoming request" } => "Accept this request to become friends, or decline it.",
-            { Relationship: "Sent request" } => "Waiting for your friend to accept. You can cancel this request.",
-            { Profile.Online: false } => "This friend is offline. Invite them when they're online.",
-            not null when !_mapWorkspace() => "Open the Map Generator to invite this friend.",
-            not null when inviteUnavailable is not null => inviteUnavailable,
-            not null => "Invite this friend to edit your map together.",
-            _ => "Select a friend or request to see available actions."
-        };
-        _tips.SetToolTip(_inviteButton, selectionHint);
-        _tips.SetToolTip(_joinButton, _mapSession() ? "Leave the current map session before joining another." : "Select an invitation to join.");
+        if (connected && !_canDisconnect()) _tips.SetToolTip(_connect, "Leave the online map session from the map collaboration panel before disconnecting.");
+        else _tips.SetToolTip(_connect, null);
         UpdateDefaultAction();
     }
 
-    private void UpdateDefaultAction() => AcceptButton = _requestCode.ContainsFocus ? _request : _client.IsConnected ? null : _connect;
+    private void UpdateDefaultAction() => AcceptButton = _requestCode.ContainsFocus ? _request : _client.IsConnected || _client.IsConnecting ? null : _connect;
 
     private void SetStatus(string message, bool error = false)
     {

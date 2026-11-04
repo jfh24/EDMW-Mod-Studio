@@ -53,8 +53,7 @@ internal static class OnlineDialogVerification
 
         var preferences = new OnlinePreferences { PersistIdentity = false, DisplayName = "Offline layout check" };
         using var client = new OnlineRelayClient(preferences);
-        using (var friends = new FriendsDialog(client, preferences, () => [], () => true, () => false,
-            _ => Task.CompletedTask, _ => Task.CompletedTask, () => Task.CompletedTask))
+        using (var friends = new FriendsDialog(client, preferences, () => true))
         {
             Prepare(friends);
             var relaySettings = Descendants(friends).OfType<Button>().Single(button => button.AccessibleName == "Relay settings");
@@ -86,8 +85,7 @@ internal static class OnlineDialogVerification
             friends.Hide();
             checks.Add("Friends has readable empty states, hides relay settings until requested, and keeps disconnected controls reachable inside standard and minimum bounds with settings expanded or collapsed.");
         }
-        using (var scaledFriends = new FriendsDialog(client, preferences, () => [], () => true, () => false,
-            _ => Task.CompletedTask, _ => Task.CompletedTask, () => Task.CompletedTask))
+        using (var scaledFriends = new FriendsDialog(client, preferences, () => true))
         {
             Prepare(scaledFriends);
             var scaledMinimum = new Size((int)Math.Ceiling(scaledFriends.MinimumSize.Width * 1.5),
@@ -164,7 +162,7 @@ internal static class OnlineDialogVerification
     {
         try
         {
-            foreach (var text in new[] { "Your friends will appear here", "No map invitations yet" })
+            foreach (var text in new[] { "Your friends will appear here" })
             {
                 var label = Descendants(form).OfType<Label>().Single(label => label.Text == text);
                 var measured = TextRenderer.MeasureText(label.Text, label.Font,

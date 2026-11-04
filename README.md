@@ -20,7 +20,7 @@ The source repository does not include the compiled executable. Download it from
 - **LAN collaboration:** host or join a shared map with synchronized paint strokes and named live cursors.
 - **LAN export:** install an export on the sender and offer it to other running instances for recipient approval.
 - **Online friends:** exchange friend codes, accept requests, and see online presence through the prefilled EDMW Mod Studio relay or a relay you choose.
-- **Online game matchmaking (1.4.0 Beta):** create public or friends-only rooms, invite accepted friends, and launch the supported game with a temporary native bridge that carries its TCP/IP provider traffic through the relay. Players host or join from the game's LAN screen after joining the Mod Studio room. The hosted relay must run the 1.4.0 server source; live cross-internet session validation remains pending.
+- **Online game matchmaking (1.4.0 Beta):** create public or friends-only rooms, invite accepted friends, and launch the supported game with a temporary native bridge. The relay handles sign-in, rooms, and ICE signaling; UDP and TCP gameplay use direct ICE/STUN data channels between players. There is no TURN server or gameplay relay fallback. Live cross-internet session validation remains pending.
 - **Online collaboration and export:** invite accepted friends to edit maps, or send map and civilization exports for recipient approval. Includes a Render deployment blueprint.
 - **Installed content:** run independent civilization edits together, merge them under a custom name, or unmerge them. Review, uninstall, or share installed maps and edits directly from Home through **LAN** or **Friends**.
 
@@ -90,7 +90,7 @@ See [development and verification](docs/development.md) for build details, exist
 
 ## Online sharing
 
-Version 1.1.0 includes online friends, shared map editing, and map/civilization delivery. Open **Friends**, enter your display name, and choose **Connect**. **Relay settings** contains **Relay URL**, prefilled with [the EDMW Mod Studio relay](https://edmw-mod-studio.onrender.com), so its address needs no manual entry. You can edit it while disconnected to use another service; saved custom URLs are retained. Exchange friend codes and accept a request before inviting a friend into a shared map, choosing **Export to friends**, or sharing an installed Home item. Both users must connect to the same relay and run matching application builds. LAN features remain available independently.
+Online friends and matchmaking connect to [the EDMW Mod Studio relay](https://edmw-mod-studio.onrender.com) automatically when the app opens and send a heartbeat once a minute. Configure another relay in **Friends → Relay settings** while disconnected. Exchange friend codes and accept a request before inviting a friend into a shared map, choosing **Export to friends**, or sharing an installed Home item. Use the map script page's collaboration panel for online map invitations and LAN collaboration. Both users must connect to the same relay and run matching application builds.
 
 The relay uses HTTPS/WSS, authenticates device identities, and checks accepted friendships for invitations and exports. The app protects its local credential with Windows DPAPI and keeps a separate identity for each relay endpoint. Export recipients review and approve installation through the existing package validation and installation system.
 
@@ -153,7 +153,7 @@ EDMWMapDesigner/              Main application; legacy source directory/namespac
 EDMWMultiplayerInstaller/    Embedded map installer template and standalone package UI
 EDMWCivilizationInstaller/   Civilization installer template; shares package domain code
 native/EDMWAnchored/         Production x86 map generator and resource-alignment checks
-native/EDMWRelayBridge/      x86 Winsock bridge and guarded game launcher for relay gameplay
+native/EDMWRelayBridge/      x86 Winsock bridge and guarded game launcher for online gameplay
 native/EDMWResourceSnapshot/ Optional diagnostic resource probe
 native/EDMWStringProbe/      Optional diagnostic string probe
 tools/                      Geography generators and native diagnostic tools

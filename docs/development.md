@@ -1,6 +1,6 @@
 # Development and verification
 
-The 1.4.0 beta consists of a Windows Forms editor, installer templates, native game components, and a separate online relay. Matchmaking rooms, binary datagram forwarding, and a guarded x86 hook for the supported TCP/IP provider are implemented; live cross-internet session validation remains pending. This document does not claim that every verification has been run on every game installation. See the [v1.4.0 beta notes](releases/v1.4.0.md), [v1.3.0 stable release notes](releases/v1.3.0.md), and [changelog](../CHANGELOG.md).
+The 1.4.0 beta consists of a Windows Forms editor, installer templates, native game components, and a separate online relay. Matchmaking rooms, authenticated ICE signaling, direct STUN peer connections, and a guarded x86 hook for the supported TCP/IP provider are implemented; the relay does not carry gameplay data, and live cross-internet session validation remains pending. This document does not claim that every verification has been run on every game installation. See the [v1.4.0 beta notes](releases/v1.4.0.md), [v1.3.0 stable release notes](releases/v1.3.0.md), and [changelog](../CHANGELOG.md).
 
 ## Build pipeline
 

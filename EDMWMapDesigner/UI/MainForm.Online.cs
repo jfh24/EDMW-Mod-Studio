@@ -51,6 +51,7 @@ public sealed partial class MainForm
             foreach (var invitation in _onlineInvitations.Values.Where(invite => !friends.Contains(invite.From.UserId)).ToArray())
                 _onlineInvitations.Remove(invitation.SessionId);
             UpdateFriendsButton();
+            UpdateCollaborationPanel();
         });
         _online.GameInvitationsChanged += (_, _) => PostOnlineUi(UpdateFriendsButton);
         _online.StatusChanged += (_, message) => PostOnlineUi(() =>
@@ -68,7 +69,8 @@ public sealed partial class MainForm
         {
             _onlineInvitations[invitation.SessionId] = invitation;
             UpdateFriendsButton();
-            _status.Text = $"{invitation.From.DisplayName} invited you to {invitation.MapName}. Open Friends to join.";
+            UpdateCollaborationPanel();
+            _status.Text = $"{invitation.From.DisplayName} invited you to {invitation.MapName}. Open the map script page to join.";
         });
         _online.GameInviteReceived += (_, invitation) => PostOnlineUi(() =>
         {
@@ -86,6 +88,31 @@ public sealed partial class MainForm
             if (room is null) StopOnlineGameTrafficBridge();
         });
         _online.ExportOfferReceived += (_, offer) => _ = ReviewOnlineExportAsync(offer);
+    }
+
+    private async Task AutoConnectOnlineRelayAsync()
+    {
+        if (_verificationMode || _closingDesigner || _online.IsConnected) return;
+        if (_onlinePreferences.LoadError is { } loadError)
+        {
+            _status.Text = loadError;
+            return;
+        }
+        try
+        {
+            _status.Text = "Connecting to the online relay…";
+            await _online.ConnectAsync(_onlinePreferences.Endpoint, _onlinePreferences.DisplayName, _onlineLifetime.Token);
+        }
+        catch (OperationCanceledException) when (_onlineLifetime.IsCancellationRequested) { }
+        catch (Exception error)
+        {
+            PostOnlineUi(() =>
+            {
+                _status.Text = "Online relay connection failed: " + error.Message;
+                UpdateFriendsButton();
+                UpdateCollaborationPanel();
+            });
+        }
     }
 
     private void ApplyOnlineDocument(Action action)
@@ -206,8 +233,8 @@ public sealed partial class MainForm
         var pending = _onlineInvitations.Count + _online.GameInvitations.Length + (_online.IsConnected ? _online.Friends.Incoming.Length : 0);
         _friendsButton.Text = pending > 0 ? $"Friends ({pending})" : "Friends";
         _friendsButton.ToolTipText = _online.IsConnected
-            ? $"Online as {_online.User?.DisplayName}. {pending} pending requests or game/map invitations. Manage friends, matchmaking, and exports."
-            : "Connect to your online friends, share a map, and manage requests";
+            ? $"Online as {_online.User?.DisplayName}. {pending} pending requests or invitations. Manage friends, matchmaking, and exports."
+            : "Manage friends, connection settings, and matchmaking";
         _centerToolbarActions?.Invoke();
     }
 
@@ -215,12 +242,7 @@ public sealed partial class MainForm
     {
         if (_closingDesigner) return;
         using var dialog = new FriendsDialog(_online, _onlinePreferences,
-            () => _onlineInvitations.Values.ToArray(),
-            () => _activeView == AppView.MapGenerator,
-            () => _onlineCollaboration.IsConnected,
-            InviteFriendToMapAsync, JoinOnlineMapAsync, LeaveOnlineMapAsync,
-            () => _collaboration.IsConnected ? "Leave the LAN session before inviting friends."
-                : _onlineCollaboration.IsConnected && !_onlineCollaboration.IsHosting ? "Only the map host can invite friends." : null,
+            () => !_onlineCollaboration.IsConnected,
             LaunchOnlineGameAsync, () => _onlineGameTrafficBridge?.TrafficSummary);
         dialog.ShowDialog(this);
     }
@@ -228,30 +250,30 @@ public sealed partial class MainForm
     private async Task LaunchOnlineGameAsync()
     {
         if (_onlineGameTrafficBridge is not null)
-            throw new InvalidOperationException("EDMW already has an active relay gameplay bridge.");
+            throw new InvalidOperationException("EDMW already has an active direct gameplay bridge.");
         var roomId = _online.CurrentGameRoom?.RoomId ?? throw new InvalidOperationException("Join a relay game room first.");
         var gamePath = FindGamePath();
         if (gamePath is null && !SelectGameInstallPath())
             throw new InvalidOperationException("Select the EDMW game folder before launching an online game.");
         gamePath = FindGamePath() ?? throw new InvalidOperationException("The selected EDMW folder is unavailable.");
-        if (IsEdmwRunning()) throw new InvalidOperationException("Close EDMW before launching it through the relay bridge.");
+        if (IsEdmwRunning()) throw new InvalidOperationException("Close EDMW before launching it through the direct gameplay bridge.");
 
         var bridge = await OnlineGameTrafficBridge.LaunchAsync(_online, gamePath, _onlineLifetime.Token);
         if (_closingDesigner || IsDisposed || _online.CurrentGameRoom?.RoomId != roomId)
         {
             await bridge.DisposeAsync();
-            throw new InvalidOperationException("The relay room ended before EDMW finished launching.");
+            throw new InvalidOperationException("The matchmaking room ended before EDMW finished launching.");
         }
         _onlineGameTrafficBridge = bridge;
         bridge.StatusChanged += OnlineGameBridgeStatusChanged;
         bridge.Exited += OnlineGameBridgeExited;
         if (bridge.IsFaulted)
         {
-            var message = bridge.ProviderStatusMessage ?? "The relay gameplay bridge stopped.";
+            var message = bridge.ProviderStatusMessage ?? "The direct gameplay bridge stopped.";
             StopOnlineGameTrafficBridge();
             throw new InvalidOperationException(message);
         }
-        _status.Text = bridge.ProviderStatusMessage ?? "EDMW launched. Select TCP/IP, then host or join a LAN game; relay hookup will be confirmed when the provider loads.";
+        _status.Text = bridge.ProviderStatusMessage ?? "EDMW launched. Select TCP/IP, then host or join a LAN game; direct ICE traffic will appear when the provider loads.";
         if (!await bridge.BringGameWindowToFrontAsync(_onlineLifetime.Token))
             _status.Text = "EDMW launched. If its window is behind Mod Studio, use Alt+Tab to bring EDMW forward before selecting TCP/IP.";
         if (bridge.LauncherHasExited) OnlineGameBridgeExited(bridge, EventArgs.Empty);
@@ -267,7 +289,7 @@ public sealed partial class MainForm
             if (_onlineGameTrafficBridge != bridge) return;
             var faulted = bridge.IsFaulted;
             StopOnlineGameTrafficBridge();
-            if (!faulted) _status.Text = "EDMW closed. The relay game room is still available.";
+            if (!faulted) _status.Text = "EDMW closed. The matchmaking room is still available.";
         });
     }
 
@@ -296,7 +318,7 @@ public sealed partial class MainForm
         if (!_onlineCollaboration.IsHosting) throw new InvalidOperationException("Only the map host can invite friends.");
         await _onlineCollaboration.InviteAsync(friendId);
         UpdateCollaborationPanel();
-        _status.Text = "Map invitation sent. Your friend can join from Friends.";
+        _status.Text = "Map invitation sent.";
     }
 
     private async Task JoinOnlineMapAsync(Guid sessionId)

@@ -27,9 +27,27 @@ public sealed partial class MainForm : Form
     private readonly Stack<UndoEntry> _redo = new();
     private readonly LanCollaborationSession _collaboration = new();
     private readonly FlowLayoutPanel _collaboratorList = new() { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, FlowDirection = FlowDirection.TopDown, WrapContents = false };
-    private readonly MedievalToggleSwitch _hostListeningToggle = new() { Text = "Host", AutoSize = true };
-    private readonly Button _joinCollaborationButton = new() { Text = "Join", AutoSize = true };
+    private readonly MedievalToggleSwitch _hostListeningToggle = new()
+    {
+        Text = "Host LAN session", AutoSize = true, AccessibleName = "Host LAN session",
+        AccessibleDescription = "Starts map collaboration on the local network. Online collaboration starts when you invite a friend."
+    };
+    private readonly Button _joinCollaborationButton = new()
+    { Text = "Join LAN", AutoSize = true, AccessibleName = "Join LAN collaboration" };
+    private readonly Button _leaveOnlineCollaborationButton = new() { Text = "Leave online session", AutoSize = true };
     private readonly Dictionary<Guid, string> _connectedCollaborators = new();
+    private readonly FlowLayoutPanel _onlineFriendList = new()
+    {
+        AutoScroll = true, FlowDirection = FlowDirection.TopDown, WrapContents = false,
+        Size = new Size(310, 126), Margin = Padding.Empty, BackColor = Color.Transparent,
+        AccessibleName = "Online friends available to invite"
+    };
+    private readonly FlowLayoutPanel _onlineMapInvitationList = new()
+    {
+        AutoScroll = true, FlowDirection = FlowDirection.TopDown, WrapContents = false,
+        Size = new Size(310, 96), Margin = Padding.Empty, BackColor = Color.Transparent,
+        AccessibleName = "Incoming online map invitations"
+    };
     private Panel? _collaborationPanel;
     private Button? _collaborationPanelTab;
     private bool _updatingCollaborationPanel;
@@ -440,7 +458,11 @@ public sealed partial class MainForm : Form
                 if (_activeView == AppView.MapGenerator) MatchMapRegionToDrawableSquare();
                 _toolbarHideAfterUtc = DateTime.UtcNow.AddMilliseconds(700);
                 _toolbarAutoHideTimer.Start();
-                BeginInvoke(new Action(() => Opacity = 1));
+                BeginInvoke(new Action(() =>
+                {
+                    Opacity = 1;
+                    _ = AutoConnectOnlineRelayAsync();
+                }));
             }));
         };
         _mainSplit.SizeChanged += (_, _) =>
@@ -820,26 +842,41 @@ public sealed partial class MainForm : Form
         };
         var body = new TableLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, ColumnCount = 1, Dock = DockStyle.Fill };
         body.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        body.Controls.Add(new Label { Text = "COLLABORATORS", AutoSize = true, Font = MedievalTheme.UiFont(8.5f, FontStyle.Bold), ForeColor = MedievalTheme.GoldBright });
+        body.Controls.Add(new Label { Text = "MAP COLLABORATION", AutoSize = true, Font = MedievalTheme.UiFont(8.5f, FontStyle.Bold), ForeColor = MedievalTheme.GoldBright });
         _collaboratorList.Margin = new Padding(0, 5, 0, 5);
         _collaboratorList.BackColor = Color.Transparent;
         body.Controls.Add(_collaboratorList);
-        var actions = new FlowLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, FlowDirection = FlowDirection.LeftToRight, WrapContents = false, Margin = Padding.Empty };
+        body.Controls.Add(new Label { Text = "ONLINE FRIENDS", AutoSize = true, Margin = new Padding(0, 4, 0, 2), Font = MedievalTheme.UiFont(8.25f, FontStyle.Bold), ForeColor = MedievalTheme.GoldBright });
+        body.Controls.Add(_onlineFriendList);
+        body.Controls.Add(new Label { Text = "MAP INVITATIONS", AutoSize = true, Margin = new Padding(0, 7, 0, 2), Font = MedievalTheme.UiFont(8.25f, FontStyle.Bold), ForeColor = MedievalTheme.GoldBright });
+        body.Controls.Add(_onlineMapInvitationList);
+        var actions = new FlowLayoutPanel
+        {
+            AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, FlowDirection = FlowDirection.LeftToRight,
+            WrapContents = true, Margin = Padding.Empty, MaximumSize = new Size(370, 0)
+        };
         _hostListeningToggle.ForeColor = MedievalTheme.Text;
         _hostListeningToggle.Margin = new Padding(0, 0, 8, 0);
-        _hostListeningToggle.CheckedChanged += async (_, _) =>
+        _hostListeningToggle.CheckedChanged += (_, _) =>
         {
             if (_updatingCollaborationPanel) return;
-            if (_hostListeningToggle.Checked) await HostCollaborationAsync();
-            else DisconnectCollaboration();
+            _ = RunCollaborationActionAsync(async () =>
+            {
+                if (_hostListeningToggle.Checked) await HostCollaborationAsync();
+                else DisconnectCollaboration();
+            });
         };
         MedievalTheme.StyleSecondaryButton(_joinCollaborationButton);
-        _joinCollaborationButton.Click += async (_, _) => await JoinCollaborationAsync();
+        _joinCollaborationButton.Click += (_, _) => _ = RunCollaborationActionAsync(JoinCollaborationAsync);
+        MedievalTheme.StyleSecondaryButton(_leaveOnlineCollaborationButton);
+        _leaveOnlineCollaborationButton.Visible = false;
+        _leaveOnlineCollaborationButton.Click += (_, _) => _ = RunCollaborationActionAsync(LeaveOnlineMapAsync);
         var collapse = new Button { Text = "◀", Size = new Size(30, 28), AccessibleName = "Hide collaborators" };
         MedievalTheme.StyleSecondaryButton(collapse);
         collapse.Click += (_, _) => SetCollaborationPanelCollapsed(true);
         actions.Controls.Add(_hostListeningToggle);
         actions.Controls.Add(_joinCollaborationButton);
+        actions.Controls.Add(_leaveOnlineCollaborationButton);
         actions.Controls.Add(collapse);
         body.Controls.Add(actions);
         panel.Controls.Add(body);
@@ -2087,7 +2124,7 @@ public sealed partial class MainForm : Form
             "Open your civilization workspace", (_, _) => ShowView(
                 _activeView == AppView.Civilizations ? AppView.MapGenerator : AppView.Civilizations));
         strip.Items.Add(_viewSwitchButton);
-        _friendsButton = Button("Friends", MedievalIcon.Bundle, "Connect to your online friends, share a map, and manage requests", (_, _) => ShowFriends());
+        _friendsButton = Button("Friends", MedievalIcon.Bundle, "Manage online friends, requests, and matchmaking", (_, _) => ShowFriends());
         strip.Items.Add(_friendsButton);
 
         var centerSpacer = new ToolStripLabel { AutoSize = false, Width = 0 };
@@ -2759,26 +2796,103 @@ public sealed partial class MainForm : Form
             _hostListeningToggle.Checked = _collaboration.IsHosting;
             _hostListeningToggle.Enabled = !_onlineCollaboration.IsConnected;
             _joinCollaborationButton.Enabled = !MapSessionConnected;
+            _leaveOnlineCollaborationButton.Visible = _onlineCollaboration.IsConnected;
+            _leaveOnlineCollaborationButton.Enabled = _onlineCollaboration.IsConnected;
+
+            _onlineFriendList.SuspendLayout();
+            _onlineFriendList.Controls.Clear();
+            var inviteAllowed = _online.IsConnected && !_collaboration.IsConnected &&
+                (!_onlineCollaboration.IsConnected || _onlineCollaboration.IsHosting);
+            if (!_online.IsConnected)
+            {
+                _onlineFriendList.Height = 26;
+                _onlineFriendList.Controls.Add(new Label
+                {
+                    Text = "Online friends appear after relay connection.", AutoSize = true,
+                    ForeColor = MedievalTheme.TextMuted, Font = MedievalTheme.UiFont(8.25f)
+                });
+            }
+            else
+            {
+                var friends = _online.Friends.Friends.Where(friend => friend.Online)
+                    .OrderBy(friend => friend.DisplayName, StringComparer.OrdinalIgnoreCase).ToArray();
+                _onlineFriendList.Height = Math.Max(26, Math.Min(friends.Length, 4) * 33);
+                if (friends.Length == 0)
+                    _onlineFriendList.Controls.Add(new Label
+                    {
+                        Text = "No friends online", AutoSize = true,
+                        ForeColor = MedievalTheme.TextMuted, Font = MedievalTheme.UiFont(8.25f)
+                    });
+                foreach (var friend in friends)
+                {
+                    var row = new Panel { Width = 286, Height = 30, Margin = new Padding(0, 0, 0, 3), BackColor = Color.Transparent };
+                    var name = new Label
+                    {
+                        Text = friend.DisplayName, AutoEllipsis = true,
+                        Location = new Point(0, 5), Size = new Size(195, 22),
+                        ForeColor = MedievalTheme.Text, Font = MedievalTheme.UiFont(8.25f),
+                        AccessibleName = friend.DisplayName
+                    };
+                    var invite = new Button { Text = "Invite", Size = new Size(76, 26), Location = new Point(204, 1), Enabled = inviteAllowed };
+                    MedievalTheme.StyleSecondaryButton(invite);
+                    invite.Click += (_, _) => _ = RunCollaborationActionAsync(() => InviteFriendToMapAsync(friend.UserId));
+                    row.Controls.Add(name);
+                    row.Controls.Add(invite);
+                    _onlineFriendList.Controls.Add(row);
+                }
+            }
+            _onlineFriendList.ResumeLayout();
+
+            _onlineMapInvitationList.SuspendLayout();
+            _onlineMapInvitationList.Controls.Clear();
+            var invitations = _onlineInvitations.Values.OrderBy(item => item.MapName, StringComparer.OrdinalIgnoreCase).ToArray();
+            _onlineMapInvitationList.Height = Math.Max(26, Math.Min(invitations.Length, 3) * 33);
+            if (_onlineInvitations.Count == 0)
+                _onlineMapInvitationList.Controls.Add(new Label
+                {
+                    Text = "No incoming map invitations", AutoSize = true,
+                    ForeColor = MedievalTheme.TextMuted, Font = MedievalTheme.UiFont(8.25f)
+                });
+            foreach (var invitation in invitations)
+            {
+                var row = new Panel { Width = 286, Height = 30, Margin = new Padding(0, 0, 0, 3), BackColor = Color.Transparent };
+                var name = new Label
+                {
+                    Text = $"{invitation.MapName} · {invitation.From.DisplayName}", AutoEllipsis = true,
+                    Location = new Point(0, 5), Size = new Size(195, 22),
+                    ForeColor = MedievalTheme.Text, Font = MedievalTheme.UiFont(8.25f)
+                };
+                var join = new Button { Text = "Join", Size = new Size(76, 26), Location = new Point(204, 1), Enabled = !MapSessionConnected };
+                MedievalTheme.StyleSecondaryButton(join);
+                join.Click += (_, _) => _ = RunCollaborationActionAsync(() => JoinOnlineMapAsync(invitation.SessionId));
+                row.Controls.Add(name);
+                row.Controls.Add(join);
+                _onlineMapInvitationList.Controls.Add(row);
+            }
+            _onlineMapInvitationList.ResumeLayout();
+
             _collaboratorList.SuspendLayout();
             _collaboratorList.Controls.Clear();
             if (!MapSessionConnected)
             {
                 _collaboratorList.Controls.Add(new Label { Text = "No active session", AutoSize = true, ForeColor = MedievalTheme.TextMuted, Font = MedievalTheme.UiFont(8.25f) });
-                return;
             }
-            var you = _onlineCollaboration.IsConnected
-                ? $"You · {_online.User?.DisplayName} · Online"
-                : _collaboration.IsHosting && !string.IsNullOrWhiteSpace(_hostLanAddress)
-                ? $"You · {_project.Author} · {_hostLanAddress}"
-                : $"You · {_project.Author}";
-            _collaboratorList.Controls.Add(new Label { Text = you, AutoSize = true, ForeColor = MedievalTheme.GoldBright, Font = MedievalTheme.UiFont(8.25f, FontStyle.Bold) });
-            var collaborators = _connectedCollaborators.Values.Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(author => author).ToArray();
-            for (var index = 0; index < collaborators.Length; index++)
+            else
             {
-                var label = !_collaboration.IsHosting && index == 0 && !string.IsNullOrWhiteSpace(_hostLanAddress)
-                    ? $"{collaborators[index]} · {_hostLanAddress}"
-                    : collaborators[index];
-                _collaboratorList.Controls.Add(new Label { Text = label, AutoSize = true, ForeColor = MedievalTheme.Text, Font = MedievalTheme.UiFont(8.25f) });
+                var you = _onlineCollaboration.IsConnected
+                    ? $"You · {_online.User?.DisplayName} · Online"
+                    : _collaboration.IsHosting && !string.IsNullOrWhiteSpace(_hostLanAddress)
+                    ? $"You · {_project.Author} · {_hostLanAddress}"
+                    : $"You · {_project.Author}";
+                _collaboratorList.Controls.Add(new Label { Text = you, AutoSize = true, ForeColor = MedievalTheme.GoldBright, Font = MedievalTheme.UiFont(8.25f, FontStyle.Bold) });
+                var collaborators = _connectedCollaborators.Values.Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(author => author).ToArray();
+                for (var index = 0; index < collaborators.Length; index++)
+                {
+                    var label = !_collaboration.IsHosting && index == 0 && !string.IsNullOrWhiteSpace(_hostLanAddress)
+                        ? $"{collaborators[index]} · {_hostLanAddress}"
+                        : collaborators[index];
+                    _collaboratorList.Controls.Add(new Label { Text = label, AutoSize = true, ForeColor = MedievalTheme.Text, Font = MedievalTheme.UiFont(8.25f) });
+                }
             }
         }
         finally
@@ -2786,6 +2900,17 @@ public sealed partial class MainForm : Form
             _collaboratorList.ResumeLayout();
             _updatingCollaborationPanel = false;
         }
+    }
+
+    private async Task RunCollaborationActionAsync(Func<Task> action)
+    {
+        try { await action(); }
+        catch (OperationCanceledException) when (_onlineLifetime.IsCancellationRequested) { }
+        catch (Exception error)
+        {
+            if (!_closingDesigner && !IsDisposed) _status.Text = error.Message;
+        }
+        if (!_closingDesigner && !IsDisposed) UpdateCollaborationPanel();
     }
 
     private void QueueCollaborationUpdate()

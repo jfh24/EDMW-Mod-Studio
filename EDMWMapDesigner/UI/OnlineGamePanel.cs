@@ -2,7 +2,7 @@ using EDMWMapDesigner.Networking;
 
 namespace EDMWMapDesigner.UI;
 
-/// <summary>Relay-backed public and friends-only game rooms embedded in the Matchmaking tab.</summary>
+/// <summary>Public and friends-only matchmaking rooms embedded in the Matchmaking tab.</summary>
 internal sealed class OnlineGamePanel : UserControl
 {
     private sealed record FriendChoice(OnlineProfile Profile)
@@ -90,7 +90,7 @@ internal sealed class OnlineGamePanel : UserControl
         _launch = Button("Launch EDMW", () => RunAsync(async () =>
         {
             if (_launchGameplay is null) throw new InvalidOperationException("Launch EDMW from the Matchmaking tab.");
-            SetStatus("Starting EDMW with the relay bridge…");
+            SetStatus("Starting EDMW with direct ICE gameplay…");
             await _launchGameplay();
             SetStatus(_gameTrafficStatus() ?? "EDMW launched. Choose TCP/IP, then host or join a LAN game.");
             _trafficTimer.Start();
@@ -172,7 +172,7 @@ internal sealed class OnlineGamePanel : UserControl
         RefreshLists();
         if (!_client.IsConnected)
         {
-            SetStatus("Connect to the relay from the Friends tab to use matchmaking.");
+            SetStatus("The relay connection is needed to use matchmaking. Check Friends for connection settings.");
             return;
         }
         if (_busy) return;
@@ -206,7 +206,7 @@ internal sealed class OnlineGamePanel : UserControl
         fields.Controls.Add(MedievalTheme.FrameInput(_capacity), 2, 0);
         fields.Controls.Add(_create, 3, 0);
         content.Controls.Add(fields, 0, 1);
-        var hint = new Label { Text = "Invite accepted online friends or publish a public room. After joining, launch EDMW and choose its TCP/IP provider; the relay bridge carries gameplay traffic while you host or join a LAN game.", Dock = DockStyle.Fill, ForeColor = MedievalTheme.TextSecondary, TextAlign = ContentAlignment.MiddleLeft, AutoEllipsis = true };
+        var hint = new Label { Text = "Invite accepted online friends or publish a public room. After joining, launch EDMW and choose its TCP/IP provider. Gameplay uses a direct ICE/STUN connection; the relay handles sign-in, matchmaking, and connection setup.", Dock = DockStyle.Fill, ForeColor = MedievalTheme.TextSecondary, TextAlign = ContentAlignment.MiddleLeft, AutoEllipsis = true };
         content.Controls.Add(hint, 0, 2);
         return Card(content);
     }
@@ -309,7 +309,7 @@ internal sealed class OnlineGamePanel : UserControl
         catch (Exception error)
         {
             var message = string.Equals(error.Message, "Unknown command.", StringComparison.OrdinalIgnoreCase)
-                ? "This relay does not support matchmaking yet. Deploy the 1.4.0 relay update, then reconnect."
+                ? "This relay does not support matchmaking and ICE signaling yet. Deploy the 1.4.0 relay update, then reconnect."
                 : error.Message;
             SetStatus(message, error: true);
             MedievalDialog.Show(this, message, "Online games", MessageBoxButtons.OK, MessageBoxIcon.Warning);

@@ -2,11 +2,12 @@
 
 ## 1.4.0 Beta — 2026-11-02
 
-- Added public and friends-only relay game rooms, online friend invitations, room discovery, and a tabbed online workspace for Friends, Map collaboration, and Matchmaking. The Matchmaking tab reuses accepted online friends for invitations.
-- Added a bounded binary datagram channel and an x86 native bridge for the supported game's TCP/IP provider. Matchmaking can launch the game with a process-local hook so the game's LAN host/join flow carries traffic through the relay room.
+- Added public and friends-only relay game rooms, online friend invitations, and room discovery. Mod Studio now connects to the relay at launch and sends a 60-second heartbeat. Map collaboration options are grouped in the map script page panel, with online friend invites, incoming invitations, and clearly labeled LAN hosting/joining; the Friends dialog now has Friends and Matchmaking tabs.
+- Added direct ICE/STUN peer connections for online rooms. The relay carries authenticated matchmaking and ICE signaling only; gameplay uses an unreliable UDP data channel and a reliable TCP stream data channel between players, with no TURN or gameplay relay fallback.
+- Added an x86 native bridge for the supported game's TCP/IP provider and a local TCP stream proxy so the game's LAN host/join flow can use the direct peer channels.
 - Forwarded limited, multicast, and subnet-directed LAN discovery broadcasts to all relay room members, including when the in-game host is not the relay room owner.
 - Restored and foregrounded the game window after launching from Matchmaking so the modal Friends dialog does not block game input.
-- Added live relay-traffic counters to Matchmaking status for provider hookup, UDP sockets, room broadcasts, received packets, and local game delivery.
+- Added live direct-connection and gameplay counters to Matchmaking status for ICE peers, provider hookup, UDP sockets, room broadcasts, received packets, and local game delivery.
 - Added a guarded launcher that checks the supported game and provider hashes before injecting the bridge; it does not replace game files. Live cross-internet session validation remains pending.
 - Updated application and installer template version metadata to 1.4.0.
 

@@ -1,4 +1,3 @@
-using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Http.Headers;
@@ -17,8 +16,8 @@ public sealed class OnlineRelayClient : IDisposable
     public const int MaximumCivilizationBytes = 128 * 1024 * 1024;
     private const int MaximumMessageBytes = 16 * 1024 * 1024;
     public const int MaximumGamePacketBytes = 1200;
-    private const int GamePacketHeaderBytes = 46;
-    private const int RelayedGamePacketHeaderBytes = 84;
+    public const int MaximumGameStreamChunkBytes = 1100;
+    public const int MaximumGameSignalBytes = 16 * 1024;
     private static readonly TimeSpan ConnectTimeout = TimeSpan.FromSeconds(150);
     private static readonly TimeSpan CommandTimeout = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan TransferTimeout = TimeSpan.FromMinutes(3);
@@ -34,12 +33,18 @@ public sealed class OnlineRelayClient : IDisposable
     private CancellationTokenSource? _connectingCancellation;
     private OnlineIdentity? _identity;
     private Uri? _endpoint;
+    private bool _isConnecting;
     private bool _disposed;
 
-    public OnlineRelayClient(OnlinePreferences? preferences = null) => Preferences = preferences ?? OnlinePreferences.Load();
+    public OnlineRelayClient(OnlinePreferences? preferences = null)
+    {
+        Preferences = preferences ?? OnlinePreferences.Load();
+        GameIceSession = new OnlineGameIceSession(this);
+    }
     public OnlinePreferences Preferences { get; }
     internal string LastCloseDiagnostic { get; private set; } = "No WebSocket close attempted.";
     public bool IsConnected { get { lock (_gate) return _connection is { Authenticated: true }; } }
+    public bool IsConnecting { get { lock (_gate) return _isConnecting; } }
     public OnlineProfile? User { get; private set; }
     public OnlineFriendsSnapshot Friends { get; private set; } = new(new(Guid.Empty, "", ""), [], [], []);
     public OnlineGameRoom? CurrentGameRoom { get; private set; }
@@ -52,7 +57,8 @@ public sealed class OnlineRelayClient : IDisposable
     public event EventHandler<OnlineGameInvite[]>? GameInvitationsChanged;
     public event EventHandler<OnlineGameRoom?>? GameRoomChanged;
     public event EventHandler<string>? GameRoomEnded;
-    public event EventHandler<OnlineGamePacket>? GamePacketReceived;
+    public event EventHandler<OnlineGameSignal>? GameSignalReceived;
+    internal OnlineGameIceSession GameIceSession { get; }
     public event EventHandler<OnlineExportOffer>? ExportOfferReceived;
     public event EventHandler<string>? StatusChanged;
     internal event EventHandler<OnlineRelayEvent>? RelayEventReceived;
@@ -67,6 +73,7 @@ public sealed class OnlineRelayClient : IDisposable
         await _connectLock.WaitAsync(cancellationToken).ConfigureAwait(false);
         Connection? connection = null;
         CancellationTokenSource? connecting = null;
+        lock (_gate) _isConnecting = true;
         try
         {
             await DisconnectAsync().WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -128,22 +135,31 @@ public sealed class OnlineRelayClient : IDisposable
                 if (_connection != connection || connection.Lifetime.IsCancellationRequested)
                     throw new IOException("The online relay disconnected during authentication.");
                 connection.Authenticated = true;
+                _isConnecting = false;
             }
             StatusChanged?.Invoke(this, "Connected to the online relay.");
+            _ = HeartbeatLoopAsync(connection);
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
+            lock (_gate) _isConnecting = false;
             if (connection is not null) _ = EndConnection(connection, "The online relay connection timed out.");
             throw new TimeoutException("The online relay did not wake and connect within 150 seconds. Try connecting again after it wakes up.");
         }
-        catch
+        catch (Exception error)
         {
+            lock (_gate) _isConnecting = false;
             if (connection is not null) _ = EndConnection(connection, "Could not connect to the online relay.");
+            StatusChanged?.Invoke(this, "Online relay connection failed: " + CleanText(error.Message, 180));
             throw;
         }
         finally
         {
-            lock (_gate) if (_connectingCancellation == connecting) _connectingCancellation = null;
+            lock (_gate)
+            {
+                _isConnecting = false;
+                if (_connectingCancellation == connecting) _connectingCancellation = null;
+            }
             connecting?.Dispose();
             _connectLock.Release();
         }
@@ -186,6 +202,28 @@ public sealed class OnlineRelayClient : IDisposable
         return GameCommandAsync("game.invite", new() { ["roomId"] = room.RoomId, ["userId"] = friendId }, cancellationToken);
     }
 
+    public Task SendGameSignalAsync(Guid targetUserId, string signalType, string payload,
+        CancellationToken cancellationToken = default)
+    {
+        var room = CurrentGameRoom ?? throw new InvalidOperationException("Join a game room before sending ICE signaling.");
+        var userId = User?.UserId ?? throw new InvalidOperationException("Connect to the online relay before sending ICE signaling.");
+        if (targetUserId == Guid.Empty || targetUserId == userId ||
+            !room.Members.Any(member => member.Profile.UserId == targetUserId))
+            throw new ArgumentOutOfRangeException(nameof(targetUserId), "Choose another member of this game room.");
+        if (signalType is not ("offer" or "answer" or "candidate" or "complete"))
+            throw new ArgumentOutOfRangeException(nameof(signalType));
+        ArgumentNullException.ThrowIfNull(payload);
+        if (Encoding.UTF8.GetByteCount(payload) > MaximumGameSignalBytes || string.IsNullOrWhiteSpace(payload))
+            throw new ArgumentOutOfRangeException(nameof(payload), "ICE signaling payload is empty or too large.");
+        return GameCommandAsync("game.signal", new()
+        {
+            ["roomId"] = room.RoomId,
+            ["targetUserId"] = targetUserId,
+            ["signalType"] = signalType,
+            ["payload"] = payload,
+        }, cancellationToken);
+    }
+
     public async Task<OnlineGameRoom> JoinGameRoomAsync(Guid roomId, CancellationToken cancellationToken = default)
     {
         if (roomId == Guid.Empty) throw new ArgumentException("Choose a game room.", nameof(roomId));
@@ -209,32 +247,6 @@ public sealed class OnlineRelayClient : IDisposable
         await GameCommandAsync("game.leave", null, cancellationToken).ConfigureAwait(false);
         CurrentGameRoom = null;
         GameRoomChanged?.Invoke(this, null!);
-    }
-
-    public async Task SendGamePacketAsync(int relayTargetPort, int sourcePort, int targetPort, ReadOnlyMemory<byte> packet,
-        CancellationToken cancellationToken = default)
-    {
-        if (packet.Length is < 1 or > MaximumGamePacketBytes) throw new ArgumentOutOfRangeException(nameof(packet));
-        if (relayTargetPort is < 0 or > 65535) throw new ArgumentOutOfRangeException(nameof(relayTargetPort));
-        if (sourcePort is < 1 or > 65535) throw new ArgumentOutOfRangeException(nameof(sourcePort));
-        if (targetPort is < 1 or > 65535) throw new ArgumentOutOfRangeException(nameof(targetPort));
-        var room = CurrentGameRoom ?? throw new InvalidOperationException("Join a game room before sending gameplay traffic.");
-        var userId = User?.UserId ?? throw new InvalidOperationException("Connect to the online relay before sending gameplay traffic.");
-        if (relayTargetPort != 0 && !room.Members.Any(member => member.RelayPort == relayTargetPort && member.Profile.UserId != userId))
-            throw new ArgumentOutOfRangeException(nameof(relayTargetPort), "Choose another member's relay port or 0 to broadcast.");
-        var connection = RequireConnection();
-        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, connection.Lifetime.Token);
-        timeout.CancelAfter(CommandTimeout);
-        var frame = new byte[GamePacketHeaderBytes + packet.Length];
-        Encoding.ASCII.GetBytes("EDWG", frame.AsSpan(0, 4));
-        Encoding.ASCII.GetBytes(room.RoomId.ToString("D"), frame.AsSpan(4, 36));
-        BinaryPrimitives.WriteUInt16BigEndian(frame.AsSpan(40, 2), (ushort)relayTargetPort);
-        BinaryPrimitives.WriteUInt16BigEndian(frame.AsSpan(42, 2), (ushort)sourcePort);
-        BinaryPrimitives.WriteUInt16BigEndian(frame.AsSpan(44, 2), (ushort)targetPort);
-        packet.CopyTo(frame.AsMemory(GamePacketHeaderBytes));
-        await connection.SendLock.WaitAsync(timeout.Token).ConfigureAwait(false);
-        try { await connection.Socket.SendAsync(frame.AsMemory(), WebSocketMessageType.Binary, true, timeout.Token).ConfigureAwait(false); }
-        finally { connection.SendLock.Release(); }
     }
 
     private async Task GameCommandAsync(string type, Dictionary<string, object?>? fields, CancellationToken cancellationToken)
@@ -277,6 +289,21 @@ public sealed class OnlineRelayClient : IDisposable
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested && !connection.Lifetime.IsCancellationRequested)
         { throw new TimeoutException("The online relay did not acknowledge the command in time."); }
         finally { connection.Pending.TryRemove(requestId, out _); }
+    }
+
+    private async Task HeartbeatLoopAsync(Connection connection)
+    {
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(60));
+        try
+        {
+            while (await timer.WaitForNextTickAsync(connection.Lifetime.Token).ConfigureAwait(false))
+                _ = await RequestOnConnectionAsync(connection, "heartbeat", null, connection.Lifetime.Token, null).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (connection.Lifetime.IsCancellationRequested) { }
+        catch (Exception error)
+        {
+            _ = EndConnection(connection, $"The online relay heartbeat failed: {CleanText(error.Message, 180)}");
+        }
     }
 
     public async Task<OnlineExportResult> SendExportAsync(Guid friendId, string kind, string name, byte[] payload,
@@ -385,18 +412,11 @@ public sealed class OnlineRelayClient : IDisposable
                 {
                     received = await connection.Socket.ReceiveAsync(buffer.AsMemory(), connection.Lifetime.Token).ConfigureAwait(false);
                     if (received.MessageType == WebSocketMessageType.Close) return;
-                    var limit = received.MessageType == WebSocketMessageType.Binary
-                        ? RelayedGamePacketHeaderBytes + MaximumGamePacketBytes : MaximumMessageBytes;
-                    if (received.MessageType is not (WebSocketMessageType.Text or WebSocketMessageType.Binary) || data.Length + received.Count > limit)
+                    if (received.MessageType != WebSocketMessageType.Text || data.Length + received.Count > MaximumMessageBytes)
                         throw new InvalidDataException("The online relay sent an invalid or oversized message.");
                     data.Write(buffer, 0, received.Count);
                 } while (!received.EndOfMessage);
                 lock (_gate) if (_connection != connection) continue;
-                if (received.MessageType == WebSocketMessageType.Binary)
-                {
-                    HandleGamePacket(data.ToArray());
-                    continue;
-                }
                 using var document = JsonDocument.Parse(data.ToArray(), new JsonDocumentOptions { MaxDepth = 64 });
                 HandleMessage(connection, document.RootElement);
             }
@@ -455,6 +475,17 @@ public sealed class OnlineRelayClient : IDisposable
                     GameRoomChanged?.Invoke(this, CurrentGameRoom);
                 }
                 break;
+            case "game.signal":
+                var signal = Deserialize<OnlineGameSignal>(payload);
+                if (signal.RoomId == Guid.Empty || signal.From is null || signal.Payload is null || signal.From.UserId == Guid.Empty ||
+                    signal.SignalType is not ("offer" or "answer" or "candidate" or "complete") ||
+                    Encoding.UTF8.GetByteCount(signal.Payload) > MaximumGameSignalBytes ||
+                    string.IsNullOrWhiteSpace(signal.Payload) ||
+                    CurrentGameRoom?.RoomId != signal.RoomId ||
+                    !CurrentGameRoom.Members.Any(member => member.Profile.UserId == signal.From.UserId))
+                    return;
+                GameSignalReceived?.Invoke(this, signal);
+                break;
             case "game.ended":
                 var endedRoom = RequiredGuid(payload, "roomId");
                 if (CurrentGameRoom?.RoomId == endedRoom)
@@ -507,28 +538,6 @@ public sealed class OnlineRelayClient : IDisposable
         foreach (var room in rooms) ValidateGameRoom(room);
         GameRooms = rooms;
         GameRoomsChanged?.Invoke(this, rooms);
-    }
-
-    private void HandleGamePacket(byte[] frame)
-    {
-        if (frame.Length is < RelayedGamePacketHeaderBytes + 1 or > RelayedGamePacketHeaderBytes + MaximumGamePacketBytes ||
-            !frame.AsSpan(0, 4).SequenceEqual("EDWG"u8))
-            throw new InvalidDataException("The relay returned an invalid game packet.");
-        if (!Guid.TryParse(Encoding.ASCII.GetString(frame, 4, 36), out var roomId) || roomId == Guid.Empty ||
-            !Guid.TryParse(Encoding.ASCII.GetString(frame, 40, 36), out var senderId) || senderId == Guid.Empty)
-            throw new InvalidDataException("The relay returned invalid game packet identities.");
-        var room = CurrentGameRoom;
-        if (room?.RoomId != roomId) return;
-        var sender = room.Members.FirstOrDefault(member => member.Profile.UserId == senderId);
-        if (sender is null) return;
-        var sourcePort = BinaryPrimitives.ReadUInt16BigEndian(frame.AsSpan(76, 2));
-        var targetPort = BinaryPrimitives.ReadUInt16BigEndian(frame.AsSpan(78, 2));
-        var sourceGamePort = BinaryPrimitives.ReadUInt16BigEndian(frame.AsSpan(80, 2));
-        var targetGamePort = BinaryPrimitives.ReadUInt16BigEndian(frame.AsSpan(82, 2));
-        if (sourcePort != sender.RelayPort || targetPort != 0 && targetPort != room.RelayPort || sourceGamePort == 0 || targetGamePort == 0)
-            throw new InvalidDataException("The relay returned invalid game datagram routing data.");
-        GamePacketReceived?.Invoke(this, new(roomId, senderId, sourcePort, targetPort, sourceGamePort, targetGamePort,
-            frame.AsSpan(RelayedGamePacketHeaderBytes).ToArray()));
     }
 
     private static void ValidateGameRoom(OnlineGameRoom room)
@@ -814,6 +823,7 @@ public sealed class OnlineRelayClient : IDisposable
     {
         if (_disposed) return;
         _disposed = true;
+        GameIceSession.Dispose();
         Disconnect();
         _http.Dispose();
     }

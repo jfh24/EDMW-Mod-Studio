@@ -22,6 +22,8 @@ constexpr size_t MaximumQueuedPipeBytes = 512 * 1024;
 constexpr size_t TunnelHeaderSize = 14;
 using SocketFn = SOCKET(WSAAPI*)(int, int, int);
 using BindFn = int(WSAAPI*)(SOCKET, const sockaddr*, int);
+using ListenFn = int(WSAAPI*)(SOCKET, int);
+using AcceptFn = SOCKET(WSAAPI*)(SOCKET, sockaddr*, int*);
 using ConnectFn = int(WSAAPI*)(SOCKET, const sockaddr*, int);
 using CloseFn = int(WSAAPI*)(SOCKET);
 using SendFn = int(WSAAPI*)(SOCKET, const char*, int, int);
@@ -31,6 +33,8 @@ using RecvFromFn = int(WSAAPI*)(SOCKET, char*, int, int, sockaddr*, int*);
 
 SocketFn realSocket = ::socket;
 BindFn realBind = ::bind;
+ListenFn realListen = ::listen;
+AcceptFn realAccept = ::accept;
 ConnectFn realConnect = ::connect;
 CloseFn realClose = ::closesocket;
 SendFn realSend = ::send;
@@ -44,12 +48,17 @@ std::deque<std::vector<uint8_t>> pipeQueue;
 size_t pipeQueueBytes = 0;
 std::atomic<bool> pipeConnected{ false };
 std::unordered_map<SOCKET, sockaddr_in> virtualPeers;
+std::unordered_map<uint32_t, sockaddr_in> tcpPeerAddresses;
 std::atomic<uint16_t> ownRelayPort{ 0 };
+std::atomic<uint16_t> tcpProxyPort{ 0 };
 std::once_flag broadcastAddressInitialization;
 std::vector<uint32_t> directedBroadcastAddresses;
 
 uint16_t ReadU16(const uint8_t* p) { return static_cast<uint16_t>((p[0] << 8) | p[1]); }
 void WriteU16(uint8_t* p, uint16_t value) { p[0] = static_cast<uint8_t>(value >> 8); p[1] = static_cast<uint8_t>(value); }
+uint32_t TcpPeerKey(uint16_t listenerPort, uint16_t localProxyPort) {
+    return (static_cast<uint32_t>(listenerPort) << 16) | localProxyPort;
+}
 bool ReadExact(HANDLE pipe, void* buffer, DWORD bytes) {
     auto* next = static_cast<uint8_t*>(buffer);
     while (bytes) {
@@ -82,6 +91,10 @@ bool WritePipeFrame(const std::vector<uint8_t>& body) {
 bool IsDatagram(SOCKET socket) {
     int type = 0, size = sizeof(type);
     return ::getsockopt(socket, SOL_SOCKET, SO_TYPE, reinterpret_cast<char*>(&type), &size) == 0 && type == SOCK_DGRAM;
+}
+bool IsSocketType(SOCKET socket, int expected) {
+    int type = 0, size = sizeof(type);
+    return ::getsockopt(socket, SOL_SOCKET, SO_TYPE, reinterpret_cast<char*>(&type), &size) == 0 && type == expected;
 }
 void InitializeDirectedBroadcastAddresses() {
     ULONG bufferSize = 16 * 1024;
@@ -137,6 +150,14 @@ bool NotifyBoundSocket(SOCKET socket) {
     if (!LocalEndpoint(socket, local)) return false;
     std::vector<uint8_t> body(7);
     body[0] = 4; WriteU16(body.data() + 1, ntohs(local.sin_port));
+    memcpy(body.data() + 3, &local.sin_addr.s_addr, sizeof(local.sin_addr.s_addr));
+    return WritePipeFrame(body);
+}
+bool NotifyTcpListener(SOCKET socket) {
+    sockaddr_in local{};
+    if (!LocalEndpoint(socket, local)) return false;
+    std::vector<uint8_t> body(7);
+    body[0] = 8; WriteU16(body.data() + 1, ntohs(local.sin_port));
     memcpy(body.data() + 3, &local.sin_addr.s_addr, sizeof(local.sin_addr.s_addr));
     return WritePipeFrame(body);
 }
@@ -203,12 +224,60 @@ int WSAAPI HookBind(SOCKET socket, const sockaddr* address, int length) {
     if (result == 0 && IsDatagram(socket) && !NotifyBoundSocket(socket)) WSASetLastError(WSAENOBUFS);
     return result;
 }
+int WSAAPI HookListen(SOCKET socket, int backlog) {
+    const int result = realListen(socket, backlog);
+    if (result == 0 && IsSocketType(socket, SOCK_STREAM) && !NotifyTcpListener(socket)) WSASetLastError(WSAENOBUFS);
+    return result;
+}
+SOCKET WSAAPI HookAccept(SOCKET socket, sockaddr* address, int* addressLength) {
+    const SOCKET accepted = realAccept(socket, address, addressLength);
+    if (accepted == INVALID_SOCKET || !address || !addressLength || *addressLength < static_cast<int>(sizeof(sockaddr_in)) ||
+        address->sa_family != AF_INET) return accepted;
+    auto* remote = reinterpret_cast<sockaddr_in*>(address);
+    const uint16_t localProxyPort = ntohs(remote->sin_port);
+    sockaddr_in local{};
+    if (!LocalEndpoint(socket, local)) return accepted;
+    std::lock_guard<std::mutex> lock(stateLock);
+    const auto mapping = tcpPeerAddresses.find(TcpPeerKey(ntohs(local.sin_port), localProxyPort));
+    if (mapping != tcpPeerAddresses.end()) {
+        *remote = mapping->second;
+        tcpPeerAddresses.erase(mapping);
+    }
+    return accepted;
+}
 int WSAAPI HookConnect(SOCKET socket, const sockaddr* address, int length) {
     if (address && address->sa_family == AF_INET && length >= static_cast<int>(sizeof(sockaddr_in)) && IsDatagram(socket)) {
         sockaddr_in peer{}; memcpy(&peer, address, sizeof(peer));
         if (RouteFromVirtualAddress(peer) == 0 && !IsBroadcastOrMulticast(peer) && ownRelayPort.load() != RelayPortBase)
             peer.sin_addr.s_addr = htonl(VirtualNetwork | 1);
         std::lock_guard<std::mutex> lock(stateLock); virtualPeers[socket] = peer;
+        return 0;
+    }
+    if (address && address->sa_family == AF_INET && length >= static_cast<int>(sizeof(sockaddr_in)) &&
+        IsSocketType(socket, SOCK_STREAM) && tcpProxyPort.load() != 0) {
+        sockaddr_in target{}; memcpy(&target, address, sizeof(target));
+        const uint16_t relayPort = RouteFor(target);
+        if (relayPort == 0) { WSASetLastError(WSAEHOSTUNREACH); return SOCKET_ERROR; }
+        sockaddr_in proxy{};
+        proxy.sin_family = AF_INET;
+        proxy.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        proxy.sin_port = htons(tcpProxyPort.load());
+        const int result = realConnect(socket, reinterpret_cast<const sockaddr*>(&proxy), sizeof(proxy));
+        if (result == SOCKET_ERROR) return result;
+        sockaddr_in local{};
+        if (!LocalEndpoint(socket, local)) { WSASetLastError(WSAEINVAL); return SOCKET_ERROR; }
+        uint8_t preamble[12]{};
+        memcpy(preamble, "EDWTCP", 6);
+        WriteU16(preamble + 6, relayPort);
+        WriteU16(preamble + 8, ntohs(local.sin_port));
+        WriteU16(preamble + 10, ntohs(target.sin_port));
+        int sent = 0;
+        while (sent < static_cast<int>(sizeof(preamble))) {
+            const int count = realSend(socket, reinterpret_cast<const char*>(preamble + sent),
+                static_cast<int>(sizeof(preamble)) - sent, 0);
+            if (count == SOCKET_ERROR || count == 0) return SOCKET_ERROR;
+            sent += count;
+        }
         return 0;
     }
     return realConnect(socket, address, length);
@@ -274,6 +343,8 @@ void PatchThunk(uint8_t* base, IMAGE_THUNK_DATA32* lookup, IMAGE_THUNK_DATA32* a
     const char* name = byOrdinal ? "" : reinterpret_cast<const char*>(base + lookup->u1.AddressOfData + 2);
     if ((byOrdinal && ordinal == 23) || (!byOrdinal && strcmp(name, "socket") == 0)) hook = reinterpret_cast<FARPROC>(HookSocket);
     else if ((byOrdinal && ordinal == 2) || (!byOrdinal && strcmp(name, "bind") == 0)) hook = reinterpret_cast<FARPROC>(HookBind);
+    else if ((byOrdinal && ordinal == 13) || (!byOrdinal && strcmp(name, "listen") == 0)) hook = reinterpret_cast<FARPROC>(HookListen);
+    else if ((byOrdinal && ordinal == 1) || (!byOrdinal && strcmp(name, "accept") == 0)) hook = reinterpret_cast<FARPROC>(HookAccept);
     else if ((byOrdinal && ordinal == 4) || (!byOrdinal && strcmp(name, "connect") == 0)) hook = reinterpret_cast<FARPROC>(HookConnect);
     else if ((byOrdinal && ordinal == 3) || (!byOrdinal && strcmp(name, "closesocket") == 0)) hook = reinterpret_cast<FARPROC>(HookClose);
     else if ((byOrdinal && ordinal == 19) || (!byOrdinal && strcmp(name, "send") == 0)) hook = reinterpret_cast<FARPROC>(HookSend);
@@ -296,7 +367,7 @@ bool PatchProvider(HMODULE provider) {
     const auto directory = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
     if (!directory.VirtualAddress) return false;
     auto* imports = reinterpret_cast<IMAGE_IMPORT_DESCRIPTOR*>(base + directory.VirtualAddress);
-    uint8_t patched = 0;
+    uint16_t patched = 0;
     for (; imports->Name; ++imports) {
         const char* dll = reinterpret_cast<const char*>(base + imports->Name);
         if (_stricmp(dll, "WS2_32.dll") != 0) continue;
@@ -312,13 +383,15 @@ bool PatchProvider(HMODULE provider) {
             if ((byOrdinal && ordinal == 2) || (!byOrdinal && strcmp(name, "bind") == 0)) patched |= 0x01;
             else if ((byOrdinal && ordinal == 4) || (!byOrdinal && strcmp(name, "connect") == 0)) patched |= 0x02;
             else if ((byOrdinal && ordinal == 3) || (!byOrdinal && strcmp(name, "closesocket") == 0)) patched |= 0x04;
+            else if ((byOrdinal && ordinal == 13) || (!byOrdinal && strcmp(name, "listen") == 0)) patched |= 0x80;
+            else if ((byOrdinal && ordinal == 1) || (!byOrdinal && strcmp(name, "accept") == 0)) patched |= 0x100;
             else if ((byOrdinal && ordinal == 19) || (!byOrdinal && strcmp(name, "send") == 0)) patched |= 0x08;
             else if ((byOrdinal && ordinal == 20) || (!byOrdinal && strcmp(name, "sendto") == 0)) patched |= 0x10;
             else if ((byOrdinal && ordinal == 16) || (!byOrdinal && strcmp(name, "recv") == 0)) patched |= 0x20;
             else if ((byOrdinal && ordinal == 17) || (!byOrdinal && strcmp(name, "recvfrom") == 0)) patched |= 0x40;
         }
     }
-    constexpr uint8_t required = 0x07;
+    constexpr uint16_t required = 0x187;
     return (patched & required) == required && (patched & 0x18) != 0 && (patched & 0x60) != 0;
 }
 DWORD WINAPI PatchWorker(void*) {
@@ -381,10 +454,12 @@ DWORD WINAPI PipeWorker(void*) {
         if (!ReadExact(pipeHandle, &length, sizeof(length)) || length == 0 || length > PipeFrameLimit) break;
         std::vector<uint8_t> body(length);
         if (!ReadExact(pipeHandle, body.data(), length)) break;
-        if (body[0] == 3 && length == 3) {
+        if (body[0] == 3 && length == 5) {
             const uint16_t relayPort = ReadU16(body.data() + 1);
-            if (relayPort >= RelayPortBase && relayPort <= RelayPortBase + 7) {
+            const uint16_t proxyPort = ReadU16(body.data() + 3);
+            if (relayPort >= RelayPortBase && relayPort <= RelayPortBase + 7 && proxyPort != 0) {
                 ownRelayPort.store(relayPort);
+                tcpProxyPort.store(proxyPort);
                 InitializeDirectedBroadcastAddresses();
                 if (!patchWorkerStarted) {
                     patchWorkerStarted = CreateThread(nullptr, 0, PatchWorker, nullptr, 0, nullptr) != nullptr;
@@ -393,6 +468,24 @@ DWORD WINAPI PipeWorker(void*) {
                         WritePipeFrame(result);
                     }
                 }
+            }
+        } else if (body[0] == 6 && length == 9) {
+            const uint16_t localPeerPort = ReadU16(body.data() + 1);
+            const uint16_t relayPeerPort = ReadU16(body.data() + 3);
+            const uint16_t gamePeerPort = ReadU16(body.data() + 5);
+            const uint16_t gameListenerPort = ReadU16(body.data() + 7);
+            if (localPeerPort != 0 && relayPeerPort >= RelayPortBase && relayPeerPort <= RelayPortBase + 7 &&
+                gamePeerPort != 0 && gameListenerPort != 0) {
+                sockaddr_in peer{};
+                peer.sin_family = AF_INET;
+                peer.sin_addr.s_addr = htonl(VirtualNetwork | (relayPeerPort - RelayPortBase + 1));
+                peer.sin_port = htons(gamePeerPort);
+                {
+                    std::lock_guard<std::mutex> lock(stateLock);
+                    tcpPeerAddresses[TcpPeerKey(gameListenerPort, localPeerPort)] = peer;
+                }
+                const std::vector<uint8_t> acknowledgement{ 7, body[1], body[2], body[7], body[8] };
+                WritePipeFrame(acknowledgement);
             }
         }
     }

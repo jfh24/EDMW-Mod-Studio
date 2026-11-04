@@ -121,15 +121,6 @@ export async function createRelay(options = {}) {
     }
     socket.send(payload, error => { if (error) socket.terminate(); });
   }
-  function wireSendBinary(socket, payload) {
-    if (!socket || socket.readyState !== WebSocket.OPEN) return;
-    const buffered = [...wss.clients].reduce((sum, client) => sum + client.bufferedAmount, 0);
-    if (socket.bufferedAmount > 8 * MiB || buffered + payload.length > 32 * MiB) {
-      socket.close(4008, 'Relay game traffic backpressure limit reached; reconnect and rejoin.');
-      const timeout = setTimeout(() => socket.terminate(), 1000); timeout.unref(); return;
-    }
-    socket.send(payload, { binary: true }, error => { if (error) socket.terminate(); });
-  }
   function send(socket, type, data) { wireSend(socket, { type, data }); }
   function reply(socket, requestId, data, error) {
     wireSend(socket, error ? { type: 'response', requestId, ok: false, error } : { type: 'response', requestId, ok: true, data });
@@ -187,39 +178,6 @@ export async function createRelay(options = {}) {
       }
     }
     if (changed) notifyGameRooms();
-  }
-  function sendGamePacket(socket, raw) {
-    check(socket.userId && connections.get(socket.userId) === socket, 'Authenticate first.', 401);
-    check(raw.length >= 47 && raw.length <= 46 + 1200 && raw.subarray(0, 4).toString('ascii') === 'EDWG', 'Invalid game packet.');
-    const roomId = raw.subarray(4, 40).toString('ascii');
-    check(validId(roomId), 'Invalid game room ID.');
-    const room = gameSessions.get(roomId), sender = room?.members.get(socket.userId);
-    check(room && sender && userGameSessions.get(socket.userId) === roomId, 'You are not a member of this game room.', 403);
-    const targetPort = raw.readUInt16BE(40);
-    const sourceGamePort = raw.readUInt16BE(42), destinationGamePort = raw.readUInt16BE(44);
-    check(sourceGamePort > 0 && destinationGamePort > 0, 'Invalid game datagram ports.');
-    const rate = socket.gameTraffic ??= { start: now(), count: 0, bytes: 0 };
-    if (now() - rate.start >= 1000) { rate.start = now(); rate.count = 0; rate.bytes = 0; }
-    rate.count++;
-    rate.bytes += raw.length - 46;
-    check(rate.count <= 240 && rate.bytes <= 512 * 1024, 'Game traffic rate limit reached.', 429);
-    const recipients = targetPort === 0
-      ? [...room.members.entries()].filter(([id]) => id !== socket.userId)
-      : [...room.members.entries()].filter(([id, member]) => id !== socket.userId && member.relayPort === targetPort);
-    check(targetPort === 0 || recipients.length === 1, 'Game packet destination is not a room member.', 403);
-    if (!recipients.length) return;
-    const header = Buffer.allocUnsafe(84);
-    header.write('EDWG', 0, 'ascii');
-    header.write(room.id, 4, 36, 'ascii');
-    header.write(socket.userId, 40, 36, 'ascii');
-    header.writeUInt16BE(sender.relayPort, 76);
-    header.writeUInt16BE(targetPort, 78);
-    header.writeUInt16BE(sourceGamePort, 80);
-    header.writeUInt16BE(destinationGamePort, 82);
-    const payload = Buffer.concat([header, raw.subarray(46)]);
-    for (const [id] of recipients) {
-      wireSendBinary(connections.get(id), payload);
-    }
   }
   function roomFor(userId, sessionId) {
     check(validId(sessionId), 'Invalid session ID.');
@@ -402,6 +360,7 @@ export async function createRelay(options = {}) {
     }
     const userId = socket.userId;
     check(userId && connections.get(userId) === socket, 'Authenticate first.', 401);
+    if (type === 'heartbeat') return { serverTime: now() };
     if (type === 'friends.list') return snapshot(userId);
     if (type === 'friends.request') {
       check(typeof message.friendCode === 'string' && /^[A-Z0-9]{12}$/i.test(message.friendCode), 'Invalid friend code.');
@@ -512,6 +471,24 @@ export async function createRelay(options = {}) {
       return {};
     }
     if (type === 'game.rooms.list') return { rooms: gameRoomList(userId) };
+    if (type === 'game.signal') {
+      check(validId(message.roomId) && validId(message.targetUserId), 'Invalid ICE signaling route.');
+      check(['offer', 'answer', 'candidate'].includes(message.signalType), 'Invalid ICE signaling type.');
+      check(typeof message.payload === 'string' && Buffer.byteLength(message.payload, 'utf8') <= 16 * 1024 &&
+        message.payload.length > 0, 'ICE signaling payload is invalid or too large.');
+      const room = gameSessions.get(message.roomId);
+      check(room && room.members.has(userId) && userGameSessions.get(userId) === room.id, 'You are not a member of this game room.', 403);
+      check(message.targetUserId !== userId && room.members.has(message.targetUserId) && isOnline(message.targetUserId), 'ICE signaling recipient is not an online room member.', 403);
+      const size = Buffer.byteLength(message.payload, 'utf8');
+      const rate = socket.gameSignalTraffic ??= { start: now(), count: 0, bytes: 0 };
+      if (now() - rate.start >= 1000) { rate.start = now(); rate.count = 0; rate.bytes = 0; }
+      rate.count++; rate.bytes += size;
+      check(rate.count <= 64 && rate.bytes <= 64 * 1024, 'ICE signaling rate limit reached.', 429);
+      send(connections.get(message.targetUserId), 'game.signal', {
+        roomId: room.id, from: profile(userId), signalType: message.signalType, payload: message.payload,
+      });
+      return {};
+    }
     if (type === 'game.create') {
       check(gameSessions.size < 128, 'The relay has reached its game room limit.');
       check(['friends', 'public'].includes(message.visibility), 'Choose friends-only or public visibility.');
@@ -688,11 +665,7 @@ export async function createRelay(options = {}) {
     socket.on('error', () => {});
     socket.on('message', (raw, binary) => {
       if (binary) {
-        try { sendGamePacket(socket, Buffer.from(raw)); }
-        catch (error) {
-          if (error instanceof PublicError && error.status === 429) socket.close(4008, error.message);
-          else socket.close(1008, error instanceof PublicError ? error.message : 'Game packet rejected.');
-        }
+        socket.close(1003, 'Gameplay uses direct ICE data channels.');
         return;
       }
       if (socket.pendingBytes + raw.length > 32 * MiB || queuedMessageBytes + raw.length > 64 * MiB) {
