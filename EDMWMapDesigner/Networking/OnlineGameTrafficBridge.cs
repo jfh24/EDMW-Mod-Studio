@@ -5,6 +5,7 @@ using System.IO.Pipes;
 using System.Net;
 using System.Net.Sockets;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading.Channels;
 
@@ -15,6 +16,7 @@ internal sealed class OnlineGameTrafficBridge : IAsyncDisposable
 {
     private const int MaximumDatagramBytes = OnlineRelayClient.MaximumGamePacketBytes;
     private const int PipeFrameLimit = 2048;
+    private const int SwRestore = 9;
     private const string NativeLibrary = "EDMWRelayBridge.dll";
     private const string NativeLauncher = "EDMWRelayLauncher.exe";
     private readonly OnlineRelayClient _client;
@@ -36,12 +38,46 @@ internal sealed class OnlineGameTrafficBridge : IAsyncDisposable
     private int _faulted;
     private string? _providerStatusMessage;
 
+    [DllImport("user32.dll")]
+    private static extern bool ShowWindow(IntPtr window, int command);
+
+    [DllImport("user32.dll")]
+    private static extern bool SetForegroundWindow(IntPtr window);
+
+    [DllImport("user32.dll")]
+    private static extern bool AllowSetForegroundWindow(uint processId);
+
     public event EventHandler<string>? StatusChanged;
     public event EventHandler? Exited;
     public bool IsProviderHooked => Volatile.Read(ref _providerHookState) == 1;
     public bool IsFaulted => Volatile.Read(ref _faulted) != 0;
     public bool LauncherHasExited => _launcher.HasExited;
     public string? ProviderStatusMessage => Volatile.Read(ref _providerStatusMessage);
+
+    public async Task<bool> BringGameWindowToFrontAsync(CancellationToken cancellationToken = default)
+    {
+        var game = _gameProcess;
+        if (game is null) return false;
+        for (var attempt = 0; attempt < 40; attempt++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
+                if (game.HasExited) return false;
+                game.Refresh();
+                var window = game.MainWindowHandle;
+                if (window != IntPtr.Zero)
+                {
+                    _ = AllowSetForegroundWindow(checked((uint)game.Id));
+                    _ = ShowWindow(window, SwRestore);
+                    return SetForegroundWindow(window);
+                }
+            }
+            catch (InvalidOperationException) { return false; }
+            await Task.Delay(250, cancellationToken).ConfigureAwait(false);
+        }
+        return false;
+    }
 
     private OnlineGameTrafficBridge(OnlineRelayClient client, NamedPipeServerStream pipe, Process launcher, string sessionDirectory)
     {

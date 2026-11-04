@@ -89,7 +89,7 @@ internal sealed class OnlineGamePanel : UserControl
             if (_launchGameplay is null) throw new InvalidOperationException("Launch EDMW from the Matchmaking tab.");
             SetStatus("Starting EDMW with the relay bridge…");
             await _launchGameplay();
-            SetStatus("EDMW launched. Choose TCP/IP, then host or join a LAN game. Friends status confirms when relay hookup is active.");
+            SetStatus("EDMW launched. Choose TCP/IP, then host or join a LAN game. If the menu does not respond, use Alt+Tab to activate EDMW.");
         }), primary: true);
 
         MedievalTheme.StyleTextInput(_name);

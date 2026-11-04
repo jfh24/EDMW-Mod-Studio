@@ -252,6 +252,8 @@ public sealed partial class MainForm
             throw new InvalidOperationException(message);
         }
         _status.Text = bridge.ProviderStatusMessage ?? "EDMW launched. Select TCP/IP, then host or join a LAN game; relay hookup will be confirmed when the provider loads.";
+        if (!await bridge.BringGameWindowToFrontAsync(_onlineLifetime.Token))
+            _status.Text = "EDMW launched. If its window is behind Mod Studio, use Alt+Tab to bring EDMW forward before selecting TCP/IP.";
         if (bridge.LauncherHasExited) OnlineGameBridgeExited(bridge, EventArgs.Empty);
     }
 
