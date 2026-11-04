@@ -15,6 +15,7 @@ internal sealed class FriendsDialog : Form
     private readonly Func<Task> _leave;
     private readonly Func<string?> _inviteUnavailableReason;
     private readonly Func<Task>? _launchGameplay;
+    private readonly Func<string?> _gameTrafficStatus;
     private readonly CancellationTokenSource _lifetime = new();
     private readonly ToolTip _tips = new() { AutoPopDelay = 15000 };
     private readonly TextBox _endpoint;
@@ -49,7 +50,8 @@ internal sealed class FriendsDialog : Form
     public FriendsDialog(OnlineRelayClient client, OnlinePreferences preferences,
         Func<OnlineCollaborationInvite[]> invitations, Func<bool> mapWorkspace, Func<bool> mapSession,
         Func<Guid, Task> invite, Func<Guid, Task> join, Func<Task> leave,
-        Func<string?>? inviteUnavailableReason = null, Func<Task>? launchGameplay = null)
+        Func<string?>? inviteUnavailableReason = null, Func<Task>? launchGameplay = null,
+        Func<string?>? gameTrafficStatus = null)
     {
         _client = client;
         _invitations = invitations;
@@ -60,6 +62,7 @@ internal sealed class FriendsDialog : Form
         _leave = leave;
         _inviteUnavailableReason = inviteUnavailableReason ?? (() => null);
         _launchGameplay = launchGameplay;
+        _gameTrafficStatus = gameTrafficStatus ?? (() => null);
         Text = "Online friends and matchmaking";
         ClientSize = new Size(900, 720);
         MinimumSize = new Size(760, 600);
@@ -234,7 +237,7 @@ internal sealed class FriendsDialog : Form
         collaborationLayout.Controls.Add(Card(invitationCard), 0, 0);
         collaborationPage.Controls.Add(collaborationLayout);
         var matchmakingPage = CreateSectionPage("Matchmaking");
-        _matchmakingPanel = new OnlineGamePanel(_client, _launchGameplay);
+        _matchmakingPanel = new OnlineGamePanel(_client, _launchGameplay, _gameTrafficStatus);
         matchmakingPage.Controls.Add(_matchmakingPanel);
         var sectionContent = new MedievalBufferedPanel
         {

@@ -12,7 +12,9 @@ internal sealed class OnlineGamePanel : UserControl
 
     private readonly OnlineRelayClient _client;
     private readonly Func<Task>? _launchGameplay;
+    private readonly Func<string?> _gameTrafficStatus;
     private readonly CancellationTokenSource _lifetime = new();
+    private readonly System.Windows.Forms.Timer _trafficTimer = new() { Interval = 1000 };
     private readonly ToolTip _tips = new() { AutoPopDelay = 15000 };
     private readonly TextBox _name = new() { MaxLength = 80, PlaceholderText = "Game room name", AccessibleName = "Game room name" };
     private readonly ComboBox _visibility = new() { DropDownStyle = ComboBoxStyle.DropDownList, AccessibleName = "Game room visibility" };
@@ -31,10 +33,11 @@ internal sealed class OnlineGamePanel : UserControl
     private readonly Button _launch;
     private bool _busy;
 
-    public OnlineGamePanel(OnlineRelayClient client, Func<Task>? launchGameplay = null)
+    public OnlineGamePanel(OnlineRelayClient client, Func<Task>? launchGameplay = null, Func<string?>? gameTrafficStatus = null)
     {
         _client = client ?? throw new ArgumentNullException(nameof(client));
         _launchGameplay = launchGameplay;
+        _gameTrafficStatus = gameTrafficStatus ?? (() => null);
         _name.Text = $"{_client.User?.DisplayName ?? "Player"}'s game";
         Dock = DockStyle.Fill;
         Font = MedievalTheme.UiFont();
@@ -89,7 +92,8 @@ internal sealed class OnlineGamePanel : UserControl
             if (_launchGameplay is null) throw new InvalidOperationException("Launch EDMW from the Matchmaking tab.");
             SetStatus("Starting EDMW with the relay bridge…");
             await _launchGameplay();
-            SetStatus("EDMW launched. Choose TCP/IP, then host or join a LAN game. If the menu does not respond, use Alt+Tab to activate EDMW.");
+            SetStatus(_gameTrafficStatus() ?? "EDMW launched. Choose TCP/IP, then host or join a LAN game.");
+            _trafficTimer.Start();
         }), primary: true);
 
         MedievalTheme.StyleTextInput(_name);
@@ -137,9 +141,17 @@ internal sealed class OnlineGamePanel : UserControl
         _client.GameRoomChanged += GameRoomChanged;
         _client.GameRoomEnded += GameRoomEnded;
         _client.StatusChanged += StatusChanged;
+        _trafficTimer.Tick += (_, _) =>
+        {
+            var status = _gameTrafficStatus();
+            if (status is null) _trafficTimer.Stop();
+            else SetStatus(status);
+        };
         Disposed += (_, _) =>
         {
             _lifetime.Cancel();
+            _trafficTimer.Stop();
+            _trafficTimer.Dispose();
             _tips.Dispose();
             _client.GameRoomsChanged -= GameRoomsChanged;
             _client.FriendsChanged -= FriendsChanged;

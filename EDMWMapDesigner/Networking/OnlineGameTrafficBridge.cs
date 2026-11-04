@@ -37,6 +37,11 @@ internal sealed class OnlineGameTrafficBridge : IAsyncDisposable
     private int _providerHookState;
     private int _faulted;
     private string? _providerStatusMessage;
+    private long _registeredGameSockets;
+    private long _packetsSentToRelay;
+    private long _broadcastsSentToRelay;
+    private long _packetsReceivedFromRelay;
+    private long _packetsInjectedToGame;
 
     [DllImport("user32.dll")]
     private static extern bool ShowWindow(IntPtr window, int command);
@@ -53,6 +58,14 @@ internal sealed class OnlineGameTrafficBridge : IAsyncDisposable
     public bool IsFaulted => Volatile.Read(ref _faulted) != 0;
     public bool LauncherHasExited => _launcher.HasExited;
     public string? ProviderStatusMessage => Volatile.Read(ref _providerStatusMessage);
+    public string TrafficSummary
+    {
+        get
+        {
+            var state = IsFaulted ? "bridge stopped" : IsProviderHooked ? "hook active" : "waiting for provider";
+            return $"{state} · UDP {Interlocked.Read(ref _registeredGameSockets)} · TX {Interlocked.Read(ref _packetsSentToRelay)} (broadcast {Interlocked.Read(ref _broadcastsSentToRelay)}) · RX {Interlocked.Read(ref _packetsReceivedFromRelay)} · game {Interlocked.Read(ref _packetsInjectedToGame)}";
+        }
+    }
 
     public async Task<bool> BringGameWindowToFrontAsync(CancellationToken cancellationToken = default)
     {
@@ -215,6 +228,8 @@ internal sealed class OnlineGameTrafficBridge : IAsyncDisposable
             throw new InvalidDataException("The game bridge sent invalid datagram routing data.");
         await _client.SendGamePacketAsync(targetRelayPort, sourcePort, targetPort, body.AsMemory(9, length), _lifetime.Token)
             .ConfigureAwait(false);
+        Interlocked.Increment(ref _packetsSentToRelay);
+        if (targetRelayPort == 0) Interlocked.Increment(ref _broadcastsSentToRelay);
     }
 
     private void RegisterGameSocket(byte[] body)
@@ -223,12 +238,14 @@ internal sealed class OnlineGameTrafficBridge : IAsyncDisposable
         var port = BinaryPrimitives.ReadUInt16BigEndian(body.AsSpan(1, 2));
         if (port == 0) throw new InvalidDataException("The game bridge registered an invalid UDP port.");
         var address = new IPAddress(body.AsSpan(3, 4));
-        _boundGameAddresses[port] = address.Equals(IPAddress.Any) ? IPAddress.Loopback : address;
+        if (_boundGameAddresses.TryAdd(port, address.Equals(IPAddress.Any) ? IPAddress.Loopback : address))
+            Interlocked.Increment(ref _registeredGameSockets);
     }
 
     private void GamePacketReceived(object? sender, OnlineGamePacket packet)
     {
         if (packet.RoomId != _client.CurrentGameRoom?.RoomId || Volatile.Read(ref _disposed) != 0) return;
+        Interlocked.Increment(ref _packetsReceivedFromRelay);
         if (!_incoming.Writer.TryWrite(packet))
         {
             Abort("The local game bridge queue is full; relay gameplay was stopped to protect state.");
@@ -261,6 +278,7 @@ internal sealed class OnlineGameTrafficBridge : IAsyncDisposable
         packet.Payload.CopyTo(frame, 14);
         await _gameSocket.SendToAsync(frame, SocketFlags.None, new IPEndPoint(localAddress, packet.TargetPort), _lifetime.Token)
             .ConfigureAwait(false);
+        Interlocked.Increment(ref _packetsInjectedToGame);
     }
 
     private async Task WritePipeFrameAsync(byte[] body, CancellationToken cancellationToken)

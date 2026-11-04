@@ -6,6 +6,7 @@
 - Added a bounded binary datagram channel and an x86 native bridge for the supported game's TCP/IP provider. Matchmaking can launch the game with a process-local hook so the game's LAN host/join flow carries traffic through the relay room.
 - Forwarded limited, multicast, and subnet-directed LAN discovery broadcasts to all relay room members, including when the in-game host is not the relay room owner.
 - Restored and foregrounded the game window after launching from Matchmaking so the modal Friends dialog does not block game input.
+- Added live relay-traffic counters to Matchmaking status for provider hookup, UDP sockets, room broadcasts, received packets, and local game delivery.
 - Added a guarded launcher that checks the supported game and provider hashes before injecting the bridge; it does not replace game files. Live cross-internet session validation remains pending.
 - Updated application and installer template version metadata to 1.4.0.
 

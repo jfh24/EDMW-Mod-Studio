@@ -221,7 +221,7 @@ public sealed partial class MainForm
             InviteFriendToMapAsync, JoinOnlineMapAsync, LeaveOnlineMapAsync,
             () => _collaboration.IsConnected ? "Leave the LAN session before inviting friends."
                 : _onlineCollaboration.IsConnected && !_onlineCollaboration.IsHosting ? "Only the map host can invite friends." : null,
-            LaunchOnlineGameAsync);
+            LaunchOnlineGameAsync, () => _onlineGameTrafficBridge?.TrafficSummary);
         dialog.ShowDialog(this);
     }
 
