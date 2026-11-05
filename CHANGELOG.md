@@ -5,6 +5,7 @@
 - Added public and friends-only relay game rooms, online friend invitations, and room discovery. Mod Studio now connects to the relay at launch and sends a 60-second heartbeat. Map collaboration options are grouped in the map script page panel, with online friend invites, incoming invitations, and clearly labeled LAN hosting/joining; the Friends dialog now has Friends and Matchmaking tabs.
 - Added direct ICE/STUN peer connections for online rooms. The relay carries authenticated matchmaking and ICE signaling only; gameplay uses an unreliable UDP data channel and a reliable TCP stream data channel between players, with no TURN or gameplay relay fallback.
 - Added an x86 native bridge for the supported game's TCP/IP provider and a local TCP stream proxy so the game's LAN host/join flow can use the direct peer channels.
+- Hardened provider hooking for valid PE imports without an original lookup table, and made Matchmaking report when the TCP/IP provider has not loaded yet.
 - Forwarded limited, multicast, and subnet-directed LAN discovery broadcasts to all relay room members, including when the in-game host is not the relay room owner.
 - Restored and foregrounded the game window after launching from Matchmaking so the modal Friends dialog does not block game input.
 - Added live direct-connection and gameplay counters to Matchmaking status for ICE peers, provider hookup, UDP sockets, room broadcasts, received packets, and local game delivery.

@@ -89,7 +89,8 @@ internal sealed class OnlineGameTrafficBridge : IAsyncDisposable
     {
         get
         {
-            var state = IsFaulted ? "bridge stopped" : IsProviderHooked ? "hook active" : "waiting for provider";
+            var state = IsFaulted ? "bridge stopped" : IsProviderHooked ? "hook active" :
+                Volatile.Read(ref _providerHookState) == 2 ? "provider not loaded" : "waiting for provider";
             var peers = _client.CurrentGameRoom?.Members.Length - 1 ?? 0;
             var ready = _client.GameIceSession.ReadyPeerCount;
             return $"{state} · ICE {ready}/{Math.Max(0, peers)} peers · UDP {Interlocked.Read(ref _registeredGameSockets)} · TX {Interlocked.Read(ref _packetsSentDirect)} (broadcast {Interlocked.Read(ref _broadcastPackets)}) · RX {Interlocked.Read(ref _packetsReceivedDirect)} · game {Interlocked.Read(ref _packetsInjectedToGame)}";
@@ -250,6 +251,14 @@ internal sealed class OnlineGameTrafficBridge : IAsyncDisposable
         {
             const string message = "EDMW's TCP/IP provider is connected to direct ICE gameplay. Host or join from the game's LAN screen.";
             Volatile.Write(ref _providerHookState, 1);
+            Volatile.Write(ref _providerStatusMessage, message);
+            StatusChanged?.Invoke(this, message);
+            return;
+        }
+        if (body[1] == 3)
+        {
+            const string message = "The game bridge is ready and waiting for EDMW's TCP/IP provider to load.";
+            Volatile.Write(ref _providerHookState, 2);
             Volatile.Write(ref _providerStatusMessage, message);
             StatusChanged?.Invoke(this, message);
             return;

@@ -336,65 +336,118 @@ int WSAAPI HookRecv(SOCKET socket, char* bytes, int length, int flags) {
     }
 }
 
-void PatchThunk(uint8_t* base, IMAGE_THUNK_DATA32* lookup, IMAGE_THUNK_DATA32* address) {
-    FARPROC hook = nullptr;
-    const bool byOrdinal = IMAGE_SNAP_BY_ORDINAL32(lookup->u1.Ordinal) != FALSE;
-    const WORD ordinal = byOrdinal ? IMAGE_ORDINAL32(lookup->u1.Ordinal) : 0;
-    const char* name = byOrdinal ? "" : reinterpret_cast<const char*>(base + lookup->u1.AddressOfData + 2);
-    if ((byOrdinal && ordinal == 23) || (!byOrdinal && strcmp(name, "socket") == 0)) hook = reinterpret_cast<FARPROC>(HookSocket);
-    else if ((byOrdinal && ordinal == 2) || (!byOrdinal && strcmp(name, "bind") == 0)) hook = reinterpret_cast<FARPROC>(HookBind);
-    else if ((byOrdinal && ordinal == 13) || (!byOrdinal && strcmp(name, "listen") == 0)) hook = reinterpret_cast<FARPROC>(HookListen);
-    else if ((byOrdinal && ordinal == 1) || (!byOrdinal && strcmp(name, "accept") == 0)) hook = reinterpret_cast<FARPROC>(HookAccept);
-    else if ((byOrdinal && ordinal == 4) || (!byOrdinal && strcmp(name, "connect") == 0)) hook = reinterpret_cast<FARPROC>(HookConnect);
-    else if ((byOrdinal && ordinal == 3) || (!byOrdinal && strcmp(name, "closesocket") == 0)) hook = reinterpret_cast<FARPROC>(HookClose);
-    else if ((byOrdinal && ordinal == 19) || (!byOrdinal && strcmp(name, "send") == 0)) hook = reinterpret_cast<FARPROC>(HookSend);
-    else if ((byOrdinal && ordinal == 20) || (!byOrdinal && strcmp(name, "sendto") == 0)) hook = reinterpret_cast<FARPROC>(HookSendTo);
-    else if ((byOrdinal && ordinal == 16) || (!byOrdinal && strcmp(name, "recv") == 0)) hook = reinterpret_cast<FARPROC>(HookRecv);
-    else if ((byOrdinal && ordinal == 17) || (!byOrdinal && strcmp(name, "recvfrom") == 0)) hook = reinterpret_cast<FARPROC>(HookRecvFrom);
-    if (!hook) return;
-    DWORD prior = 0;
-    if (VirtualProtect(&address->u1.Function, sizeof(address->u1.Function), PAGE_READWRITE, &prior)) {
-        address->u1.Function = reinterpret_cast<DWORD>(hook);
-        DWORD ignored = 0; VirtualProtect(&address->u1.Function, sizeof(address->u1.Function), prior, &ignored);
+struct ImportHook {
+    const char* name;
+    WORD ordinal;
+    FARPROC hook;
+    uint16_t bit;
+};
+const ImportHook ProviderHooks[] = {
+    { "socket", 23, reinterpret_cast<FARPROC>(HookSocket), 0x0200 },
+    { "bind", 2, reinterpret_cast<FARPROC>(HookBind), 0x0001 },
+    { "listen", 13, reinterpret_cast<FARPROC>(HookListen), 0x0080 },
+    { "accept", 1, reinterpret_cast<FARPROC>(HookAccept), 0x0100 },
+    { "connect", 4, reinterpret_cast<FARPROC>(HookConnect), 0x0002 },
+    { "closesocket", 3, reinterpret_cast<FARPROC>(HookClose), 0x0004 },
+    { "send", 19, reinterpret_cast<FARPROC>(HookSend), 0x0008 },
+    { "sendto", 20, reinterpret_cast<FARPROC>(HookSendTo), 0x0010 },
+    { "recv", 16, reinterpret_cast<FARPROC>(HookRecv), 0x0020 },
+    { "recvfrom", 17, reinterpret_cast<FARPROC>(HookRecvFrom), 0x0040 }
+};
+bool ImageRange(uint32_t imageSize, uint32_t rva, size_t length) {
+    return rva <= imageSize && length <= static_cast<size_t>(imageSize - rva);
+}
+const ImportHook* FindProviderHook(const char* name, WORD ordinal, bool byOrdinal,
+    bool lookupNamesAvailable, DWORD resolvedAddress, HMODULE winsock) {
+    for (const auto& candidate : ProviderHooks) {
+        if (lookupNamesAvailable) {
+            if ((byOrdinal && candidate.ordinal == ordinal) ||
+                (!byOrdinal && name && _stricmp(candidate.name, name) == 0)) return &candidate;
+            continue;
+        }
+        // OriginalFirstThunk can be absent in a valid PE image. In that case
+        // FirstThunk contains resolved function pointers, not import-name RVAs.
+        // Match those pointers against the loaded Winsock exports instead of
+        // interpreting them as RVAs and crashing the patch worker.
+        FARPROC original = GetProcAddress(winsock, candidate.name);
+        if (original && reinterpret_cast<DWORD>(original) == resolvedAddress) return &candidate;
+        original = GetProcAddress(winsock, MAKEINTRESOURCEA(candidate.ordinal));
+        if (original && reinterpret_cast<DWORD>(original) == resolvedAddress) return &candidate;
     }
+    return nullptr;
+}
+bool PatchThunk(const ImportHook& imported, IMAGE_THUNK_DATA32* address, uint16_t& patched) {
+    const DWORD replacement = reinterpret_cast<DWORD>(imported.hook);
+    if (address->u1.Function != replacement) {
+        DWORD prior = 0;
+        if (!VirtualProtect(&address->u1.Function, sizeof(address->u1.Function), PAGE_READWRITE, &prior)) return false;
+        address->u1.Function = replacement;
+        DWORD ignored = 0;
+        const bool restored = VirtualProtect(&address->u1.Function, sizeof(address->u1.Function), prior, &ignored) != FALSE;
+        if (!restored) return false;
+    }
+    patched |= imported.bit;
+    return true;
 }
 bool PatchProvider(HMODULE provider) {
     auto* base = reinterpret_cast<uint8_t*>(provider);
     auto* dos = reinterpret_cast<IMAGE_DOS_HEADER*>(base);
-    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return false;
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew <= 0) return false;
     auto* nt = reinterpret_cast<IMAGE_NT_HEADERS32*>(base + dos->e_lfanew);
     if (nt->Signature != IMAGE_NT_SIGNATURE || nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR32_MAGIC) return false;
+    const uint32_t imageSize = nt->OptionalHeader.SizeOfImage;
     const auto directory = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
-    if (!directory.VirtualAddress) return false;
+    if (!directory.VirtualAddress || directory.Size < sizeof(IMAGE_IMPORT_DESCRIPTOR) ||
+        !ImageRange(imageSize, directory.VirtualAddress, directory.Size)) return false;
+    HMODULE winsock = GetModuleHandleW(L"WS2_32.dll");
+    if (!winsock) return false;
     auto* imports = reinterpret_cast<IMAGE_IMPORT_DESCRIPTOR*>(base + directory.VirtualAddress);
     uint16_t patched = 0;
-    for (; imports->Name; ++imports) {
-        const char* dll = reinterpret_cast<const char*>(base + imports->Name);
+    const size_t descriptorCount = directory.Size / sizeof(IMAGE_IMPORT_DESCRIPTOR);
+    for (size_t descriptorIndex = 0; descriptorIndex < descriptorCount && imports[descriptorIndex].Name; ++descriptorIndex) {
+        auto& descriptor = imports[descriptorIndex];
+        if (!ImageRange(imageSize, descriptor.Name, 1)) return false;
+        const char* dll = reinterpret_cast<const char*>(base + descriptor.Name);
+        if (!memchr(dll, '\0', imageSize - descriptor.Name)) return false;
         if (_stricmp(dll, "WS2_32.dll") != 0) continue;
-        auto* lookup = reinterpret_cast<IMAGE_THUNK_DATA32*>(base + (imports->OriginalFirstThunk ? imports->OriginalFirstThunk : imports->FirstThunk));
-        auto* address = reinterpret_cast<IMAGE_THUNK_DATA32*>(base + imports->FirstThunk);
-        for (; lookup->u1.AddressOfData; ++lookup, ++address) {
-            const DWORD before = address->u1.Function;
-            PatchThunk(base, lookup, address);
-            if (before == address->u1.Function) continue;
-            const bool byOrdinal = IMAGE_SNAP_BY_ORDINAL32(lookup->u1.Ordinal) != FALSE;
-            const WORD ordinal = byOrdinal ? IMAGE_ORDINAL32(lookup->u1.Ordinal) : 0;
-            const char* name = byOrdinal ? "" : reinterpret_cast<const char*>(base + lookup->u1.AddressOfData + 2);
-            if ((byOrdinal && ordinal == 2) || (!byOrdinal && strcmp(name, "bind") == 0)) patched |= 0x01;
-            else if ((byOrdinal && ordinal == 4) || (!byOrdinal && strcmp(name, "connect") == 0)) patched |= 0x02;
-            else if ((byOrdinal && ordinal == 3) || (!byOrdinal && strcmp(name, "closesocket") == 0)) patched |= 0x04;
-            else if ((byOrdinal && ordinal == 13) || (!byOrdinal && strcmp(name, "listen") == 0)) patched |= 0x80;
-            else if ((byOrdinal && ordinal == 1) || (!byOrdinal && strcmp(name, "accept") == 0)) patched |= 0x100;
-            else if ((byOrdinal && ordinal == 19) || (!byOrdinal && strcmp(name, "send") == 0)) patched |= 0x08;
-            else if ((byOrdinal && ordinal == 20) || (!byOrdinal && strcmp(name, "sendto") == 0)) patched |= 0x10;
-            else if ((byOrdinal && ordinal == 16) || (!byOrdinal && strcmp(name, "recv") == 0)) patched |= 0x20;
-            else if ((byOrdinal && ordinal == 17) || (!byOrdinal && strcmp(name, "recvfrom") == 0)) patched |= 0x40;
+        if (!ImageRange(imageSize, descriptor.FirstThunk, sizeof(IMAGE_THUNK_DATA32))) return false;
+        const bool lookupNamesAvailable = descriptor.OriginalFirstThunk != 0;
+        const uint32_t lookupRva = lookupNamesAvailable ? descriptor.OriginalFirstThunk : descriptor.FirstThunk;
+        if (!ImageRange(imageSize, lookupRva, sizeof(IMAGE_THUNK_DATA32))) return false;
+        auto* lookup = reinterpret_cast<IMAGE_THUNK_DATA32*>(base + lookupRva);
+        auto* address = reinterpret_cast<IMAGE_THUNK_DATA32*>(base + descriptor.FirstThunk);
+        const size_t lookupCount = (imageSize - lookupRva) / sizeof(IMAGE_THUNK_DATA32);
+        const size_t addressCount = (imageSize - descriptor.FirstThunk) / sizeof(IMAGE_THUNK_DATA32);
+        const size_t thunkCount = (std::min)(lookupCount, addressCount);
+        bool terminated = false;
+        for (size_t thunkIndex = 0; thunkIndex < thunkCount; ++thunkIndex) {
+            const DWORD lookupValue = lookup[thunkIndex].u1.AddressOfData;
+            if (lookupValue == 0) { terminated = true; break; }
+            bool byOrdinal = false;
+            WORD ordinal = 0;
+            const char* name = nullptr;
+            if (lookupNamesAvailable) {
+                byOrdinal = IMAGE_SNAP_BY_ORDINAL32(lookup[thunkIndex].u1.Ordinal) != FALSE;
+                ordinal = byOrdinal ? IMAGE_ORDINAL32(lookup[thunkIndex].u1.Ordinal) : 0;
+                if (!byOrdinal) {
+                    const uint32_t nameRva = lookup[thunkIndex].u1.AddressOfData;
+                    if (!ImageRange(imageSize, nameRva, sizeof(WORD) + 1)) return false;
+                    name = reinterpret_cast<const char*>(base + nameRva + sizeof(WORD));
+                    if (!memchr(name, '\0', imageSize - nameRva - sizeof(WORD))) return false;
+                }
+            }
+            const auto* imported = FindProviderHook(name, ordinal, byOrdinal, lookupNamesAvailable,
+                address[thunkIndex].u1.Function, winsock);
+            if (imported && !PatchThunk(*imported, &address[thunkIndex], patched)) return false;
         }
+        if (!terminated) return false;
     }
     constexpr uint16_t required = 0x187;
     return (patched & required) == required && (patched & 0x18) != 0 && (patched & 0x60) != 0;
 }
 DWORD WINAPI PatchWorker(void*) {
+    const std::vector<uint8_t> waiting{ 5, 3 };
+    WritePipeFrame(waiting);
     while (true) {
         if (HMODULE provider = GetModuleHandleW(L"TCP Protocol.dll")) {
             std::vector<uint8_t> result{ 5, static_cast<uint8_t>(PatchProvider(provider) ? 0 : 1) };
