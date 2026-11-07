@@ -202,6 +202,26 @@ public sealed class OnlineRelayClient : IDisposable
         return GameCommandAsync("game.invite", new() { ["roomId"] = room.RoomId, ["userId"] = friendId }, cancellationToken);
     }
 
+    public async Task<OnlineGameRoom> DesignateGameHostAsync(Guid userId, CancellationToken cancellationToken = default)
+    {
+        var current = CurrentGameRoom ?? throw new InvalidOperationException("Join a game room before choosing its EDMW host.");
+        if (User?.UserId != current.Host.UserId)
+            throw new InvalidOperationException("Only the matchmaking room host can designate the EDMW host.");
+        if (userId == Guid.Empty || !current.Members.Any(member => member.Profile.UserId == userId))
+            throw new ArgumentOutOfRangeException(nameof(userId), "Choose a member of this game room.");
+
+        OnlineGameRoom? updated = null;
+        _ = await RequestAsync("game.host.set", new Dictionary<string, object?> { ["userId"] = userId },
+            cancellationToken, data =>
+            {
+                updated = Deserialize<OnlineGameRoom>(data);
+                ValidateGameRoom(updated);
+                CurrentGameRoom = updated;
+                GameRoomChanged?.Invoke(this, updated);
+            }).ConfigureAwait(false);
+        return updated ?? throw new InvalidDataException("The relay returned no updated game room.");
+    }
+
     public Task SendGameSignalAsync(Guid targetUserId, string signalType, string payload,
         CancellationToken cancellationToken = default)
     {
@@ -471,7 +491,16 @@ public sealed class OnlineRelayClient : IDisposable
                 var members = Deserialize<OnlineGameMember[]>(payload.GetProperty("members"));
                 if (CurrentGameRoom?.RoomId == roomId)
                 {
-                    CurrentGameRoom = CurrentGameRoom with { Members = ValidateGameMembers(members) };
+                    var validatedMembers = ValidateGameMembers(members);
+                    Guid? gameHostUserId = null;
+                    if (payload.TryGetProperty("gameHostUserId", out var gameHostElement) && gameHostElement.ValueKind != JsonValueKind.Null)
+                    {
+                        if (!gameHostElement.TryGetGuid(out var parsedGameHost) || parsedGameHost == Guid.Empty ||
+                            !validatedMembers.Any(member => member.Profile.UserId == parsedGameHost))
+                            throw new InvalidDataException("The relay returned an invalid EDMW host.");
+                        gameHostUserId = parsedGameHost;
+                    }
+                    CurrentGameRoom = CurrentGameRoom with { Members = validatedMembers, GameHostUserId = gameHostUserId };
                     GameRoomChanged?.Invoke(this, CurrentGameRoom);
                 }
                 break;
@@ -548,6 +577,8 @@ public sealed class OnlineRelayClient : IDisposable
             room.RelayPort is < 0 or > 65535)
             throw new InvalidDataException("The relay returned an invalid game room.");
         _ = ValidateGameMembers(room.Members);
+        if (room.GameHostUserId is { } gameHostUserId && !room.Members.Any(member => member.Profile.UserId == gameHostUserId))
+            throw new InvalidDataException("The relay returned an EDMW host who is not a game room member.");
     }
 
     private static OnlineGameMember[] ValidateGameMembers(OnlineGameMember[] members)

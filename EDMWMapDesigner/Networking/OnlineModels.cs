@@ -12,9 +12,25 @@ public sealed record OnlineFriendsSnapshot(OnlineProfile User, OnlineProfile[] F
 public sealed record OnlineCollaborationInvite(Guid SessionId, OnlineProfile From, string MapName);
 public sealed record OnlineGameMember(OnlineProfile Profile, int RelayPort);
 public sealed record OnlineGameRoom(Guid RoomId, string Name, OnlineProfile Host, string Visibility,
-    int MaxPlayers, OnlineGameMember[] Members, int RelayPort = 0);
+    int MaxPlayers, OnlineGameMember[] Members, int RelayPort = 0)
+{
+    public Guid? GameHostUserId { get; init; }
+}
 public sealed record OnlineGameInvite(Guid RoomId, OnlineProfile From, string Name);
 public sealed record OnlineGameSignal(Guid RoomId, OnlineProfile From, string SignalType, string Payload);
+
+internal static class OnlineGameAddress
+{
+    private const int RelayPortBase = 40000;
+
+    public static string VirtualIpv4(int relayPort)
+    {
+        if (relayPort is < RelayPortBase or > RelayPortBase + 7)
+            throw new ArgumentOutOfRangeException(nameof(relayPort), "The matchmaking room route is outside the supported virtual network.");
+        return $"10.254.255.{relayPort - RelayPortBase + 1}";
+    }
+}
+
 public sealed record OnlineExportOffer(Guid ExportId, OnlineProfile From, string Kind, string Name, int Size, string Sha256)
 {
     // Installation must remain cancellable when a friendship or connection ends.

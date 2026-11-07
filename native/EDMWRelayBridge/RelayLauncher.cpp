@@ -57,12 +57,19 @@ int wmain(int argc, wchar_t** argv) {
     const std::wstring executable(argc > 1 ? argv[1] : L"");
     const auto workingDirectory = executable.substr(0, executable.find_last_of(L"\\/"));
     const std::wstring provider = workingDirectory + L"\\TCP Protocol.dll";
-    if (argc != 4 || !SupportedExecutable(argv[1]) || !SupportedTcpProvider(provider.c_str())) {
+    if (argc != 4 ||
+        !SupportedExecutable(argv[1]) || !SupportedTcpProvider(provider.c_str())) {
         fwprintf(stderr, L"Internet play requires the supported EDMW executable and TCP/IP provider.\n"); return 2;
     }
-    if (!SetEnvironmentVariableW(L"EDMW_RELAY_PIPE", argv[3])) { fwprintf(stderr, L"Could not configure the relay bridge.\n"); return 3; }
+    if (!SetEnvironmentVariableW(L"EDMW_RELAY_PIPE", argv[3]) ||
+        !SetEnvironmentVariableW(L"EDMW_RELAY_MODE", L"menu")) {
+        fwprintf(stderr, L"Could not configure the relay bridge's native game process.\n"); return 3;
+    }
     std::wstring command = L"\"" + executable + L"\"";
-    STARTUPINFOW startup{}; startup.cb = sizeof(startup); PROCESS_INFORMATION game{};
+    STARTUPINFOW startup{}; startup.cb = sizeof(startup);
+    startup.dwFlags = STARTF_USESHOWWINDOW;
+    startup.wShowWindow = SW_HIDE;
+    PROCESS_INFORMATION game{};
     if (!CreateProcessW(executable.c_str(), command.data(), nullptr, nullptr, FALSE, CREATE_SUSPENDED,
         nullptr, workingDirectory.c_str(), &startup, &game)) {
         fwprintf(stderr, L"Windows could not start EDMW (%lu).\n", GetLastError()); return 4;

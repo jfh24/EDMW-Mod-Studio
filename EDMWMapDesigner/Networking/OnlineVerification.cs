@@ -65,6 +65,8 @@ internal static class OnlineVerification
         var receipt = hostClient.Friends.FriendReceipts.Single();
         Require(friendClient.Friends.FriendReceipts.Single() == receipt, "Accepted friendship receipts differ between peers.");
         checks.Add("Friend request, explicit acceptance, online presence, and non-friend export rejection");
+        await VerifyGameRoomAndIceControlAsync(hostClient, friendClient, strangerClient, hostId, friendId);
+        checks.Add("Friends-only/public room visibility, invitation-gated membership, direct ICE UDP/TCP/control readiness, and peer acknowledgement");
 
         using var host = new OnlineCollaborationSession(hostClient);
         using var friend = new OnlineCollaborationSession(friendClient);
@@ -271,7 +273,7 @@ internal static class OnlineVerification
             await ExpectRejectedAsync(() => hostClient.SendExportAsync(friendId, "map", "Removed after reset", [1]));
         }
         completed = true;
-        if (!live) Console.WriteLine("ONLINE PASS: cold-start 503/HTML readiness and cancellation, desktop/Node authentication, friendship ACL, invitation-only rooms, 512-cell grid serialization, concurrent strokes, cursors, resize, bounded export bytes and approval status, reconnect and revocation" +
+        if (!live) Console.WriteLine("ONLINE PASS: cold-start 503/HTML readiness and cancellation, desktop/Node authentication, friendship ACL, matchmaking room visibility and direct ICE map control, invitation-only map sessions, 512-cell grid serialization, concurrent strokes, cursors, resize, bounded export bytes and approval status, reconnect and revocation" +
             (restartControlDirectory is null ? "." : "; free-service identity/contact recovery across two complete filesystem replacements."));
         }
         catch (Exception error) { failure = error; throw; }
@@ -304,6 +306,83 @@ internal static class OnlineVerification
                 if (completed && failure is not null) throw new InvalidOperationException("Live test cleanup failed; see the verification report.", failure);
                 if (outcome == "PASS") Console.WriteLine("LIVE DESKTOP PASS: " + string.Join("; ", checks));
             }
+        }
+    }
+
+    private static async Task VerifyGameRoomAndIceControlAsync(OnlineRelayClient hostClient,
+        OnlineRelayClient friendClient, OnlineRelayClient strangerClient, Guid hostId, Guid friendId)
+    {
+        var invitations = Channel.CreateUnbounded<OnlineGameInvite>();
+        var fromHostFrames = Channel.CreateUnbounded<OnlineIceControlFrame>();
+        var fromFriendFrames = Channel.CreateUnbounded<OnlineIceControlFrame>();
+        void CaptureInvitation(object? _, OnlineGameInvite invite) => invitations.Writer.TryWrite(invite);
+        void CaptureHostFrame(object? _, OnlineIceControlFrame frame) => fromHostFrames.Writer.TryWrite(frame);
+        void CaptureFriendFrame(object? _, OnlineIceControlFrame frame) => fromFriendFrames.Writer.TryWrite(frame);
+        friendClient.GameInviteReceived += CaptureInvitation;
+        friendClient.GameIceSession.ControlFrameReceived += CaptureFriendFrame;
+        hostClient.GameIceSession.ControlFrameReceived += CaptureHostFrame;
+        try
+        {
+            var privateRoom = await hostClient.CreateGameRoomAsync("ICE control verification", "friends", 2);
+            Require(privateRoom.GameHostUserId == hostId, "A new matchmaking room did not default its EDMW host to the room host.");
+            await Task.WhenAll(friendClient.RefreshGameRoomsAsync(), strangerClient.RefreshGameRoomsAsync());
+            Require(friendClient.GameRooms.Any(room => room.RoomId == privateRoom.RoomId), "An accepted friend did not see a friends-only game room.");
+            Require(!strangerClient.GameRooms.Any(room => room.RoomId == privateRoom.RoomId), "A non-friend saw a friends-only game room.");
+            await ExpectRejectedAsync(() => strangerClient.JoinGameRoomAsync(privateRoom.RoomId));
+
+            await hostClient.InviteToGameAsync(friendId);
+            var invitation = await invitations.Reader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10));
+            Require(invitation.RoomId == privateRoom.RoomId && invitation.From.UserId == hostId,
+                "The game-room invitation did not preserve its host and room identity.");
+            var joined = await friendClient.JoinGameRoomAsync(invitation.RoomId);
+            Require(joined.GameHostUserId == hostId && joined.Members.Length == 2,
+                "The invited player did not join the designated two-player room.");
+
+            await hostClient.GameIceSession.WaitForPeersReadyAsync([friendId], TimeSpan.FromSeconds(45));
+            await friendClient.GameIceSession.WaitForPeersReadyAsync([hostId], TimeSpan.FromSeconds(45));
+            Require(hostClient.GameIceSession.IsPeerReady(friendId) && friendClient.GameIceSession.IsPeerReady(hostId),
+                "The game room did not open direct ICE UDP, TCP, and reliable control channels for both players.");
+
+            var sessionId = Guid.NewGuid();
+            var hostMember = joined.Members.Single(member => member.Profile.UserId == hostId);
+            var launch = new OnlineGameClientLaunch(sessionId, OnlineGameAddress.VirtualIpv4(hostMember.RelayPort));
+            Require(hostClient.GameIceSession.SendControlFrame(friendId,
+                    OnlineGameSessionProtocol.EncodeJson(OnlineGameSessionFrameType.LaunchClient, launch)),
+                "The host could not send the room network launch request over its direct ICE control channel.");
+            var incomingLaunch = await fromFriendFrames.Reader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10));
+            Require(incomingLaunch.RoomId == privateRoom.RoomId && incomingLaunch.FromUserId == hostId &&
+                    OnlineGameSessionProtocol.TryDecodeJson(incomingLaunch.Payload,
+                        OnlineGameSessionFrameType.LaunchClient, out OnlineGameClientLaunch? decodedLaunch) &&
+                    decodedLaunch == launch,
+                "The network launch request changed or lost its authenticated peer identity over ICE.");
+
+            var status = new OnlineGameSessionStatus(sessionId, "Room network bridge ready.");
+            Require(friendClient.GameIceSession.SendControlFrame(hostId,
+                    OnlineGameSessionProtocol.EncodeJson(OnlineGameSessionFrameType.GameReady, status)),
+                "The room member could not acknowledge network readiness over ICE.");
+            var acknowledgement = await fromHostFrames.Reader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10));
+            Require(acknowledgement.RoomId == privateRoom.RoomId && acknowledgement.FromUserId == friendId &&
+                    OnlineGameSessionProtocol.TryDecodeJson(acknowledgement.Payload,
+                        OnlineGameSessionFrameType.GameReady, out OnlineGameSessionStatus? decodedStatus) &&
+                    decodedStatus == status,
+                "The host did not receive the peer's network-ready acknowledgement.");
+
+            await friendClient.LeaveGameRoomAsync();
+            await hostClient.LeaveGameRoomAsync();
+            var publicRoom = await hostClient.CreateGameRoomAsync("Public visibility verification", "public", 2);
+            await Task.WhenAll(friendClient.RefreshGameRoomsAsync(), strangerClient.RefreshGameRoomsAsync());
+            Require(friendClient.GameRooms.Any(room => room.RoomId == publicRoom.RoomId) &&
+                    strangerClient.GameRooms.Any(room => room.RoomId == publicRoom.RoomId),
+                "A public game room was not visible to other connected players.");
+            await hostClient.LeaveGameRoomAsync();
+        }
+        finally
+        {
+            friendClient.GameInviteReceived -= CaptureInvitation;
+            friendClient.GameIceSession.ControlFrameReceived -= CaptureFriendFrame;
+            hostClient.GameIceSession.ControlFrameReceived -= CaptureHostFrame;
+            if (friendClient.CurrentGameRoom is not null) await friendClient.LeaveGameRoomAsync();
+            if (hostClient.CurrentGameRoom is not null) await hostClient.LeaveGameRoomAsync();
         }
     }
 

@@ -127,6 +127,18 @@ internal static class Program
                 return 1;
             }
         }
+        if (args.Length == 3 && args[0].Equals("--verify-online-game-start", StringComparison.OrdinalIgnoreCase))
+        {
+            try
+            {
+                return Networking.OnlineGameRuntimeVerification.Run(args[1], args[2]);
+            }
+            catch (Exception error)
+            {
+                Console.Error.WriteLine("ONLINE GAME FAIL: " + error);
+                return 1;
+            }
+        }
         if (args.Length == 1 && args[0].Equals("--verify-civilization-navigation", StringComparison.OrdinalIgnoreCase))
         {
             Application.SetUnhandledExceptionMode(UnhandledExceptionMode.ThrowException);

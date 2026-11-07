@@ -12,6 +12,8 @@ public sealed partial class MainForm
     private readonly OnlineRelayClient _online;
     private readonly OnlineCollaborationSession _onlineCollaboration;
     private OnlineGameTrafficBridge? _onlineGameTrafficBridge;
+    private OnlineGameStartState? _onlineGameStartState;
+    private event EventHandler<string>? OnlineRoomStartStatusChanged;
     private readonly CancellationTokenSource _onlineLifetime = new();
     private readonly Dictionary<Guid, OnlineCollaborationInvite> _onlineInvitations = [];
     private ToolStripButton? _friendsButton;
@@ -21,6 +23,16 @@ public sealed partial class MainForm
     private MapProject? _onlineSubmittedProject;
     private bool _discardPendingOnlineReplacement;
     private sealed class OnlineReplacementRejectedException(string message) : Exception(message);
+    private sealed class OnlineGameStartState(Guid sessionId, Guid[] peerIds)
+    {
+        public Guid SessionId { get; } = sessionId;
+        public Dictionary<Guid, OnlineGamePeerStartState> Peers { get; } = peerIds.ToDictionary(
+            id => id, _ => new OnlineGamePeerStartState());
+    }
+    private sealed class OnlineGamePeerStartState
+    {
+        public TaskCompletionSource<OnlineGameSessionStatus> GameReady { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    }
     private bool MapSessionConnected => _collaboration.IsConnected || _onlineCollaboration.IsConnected;
 
     private void InitializeOnlineSharing()
@@ -85,8 +97,18 @@ public sealed partial class MainForm
         _online.GameRoomChanged += (_, room) => PostOnlineUi(() =>
         {
             UpdateFriendsButton();
-            if (room is null) StopOnlineGameTrafficBridge();
+            if (room is null)
+            {
+                StopOnlineGameTrafficBridge();
+                if (_onlineGameStartState is { } start)
+                {
+                    foreach (var peer in start.Peers.Values)
+                        peer.GameReady.TrySetException(new OperationCanceledException("The matchmaking room ended during network setup."));
+                    _onlineGameStartState = null;
+                }
+            }
         });
+        _online.GameIceSession.ControlFrameReceived += OnlineGameControlFrameReceived;
         _online.ExportOfferReceived += (_, offer) => _ = ReviewOnlineExportAsync(offer);
     }
 
@@ -243,43 +265,218 @@ public sealed partial class MainForm
         if (_closingDesigner) return;
         using var dialog = new FriendsDialog(_online, _onlinePreferences,
             () => !_onlineCollaboration.IsConnected,
-            LaunchOnlineGameAsync, () => _onlineGameTrafficBridge?.TrafficSummary);
-        dialog.ShowDialog(this);
+            () => _onlineGameTrafficBridge?.TrafficSummary,
+            PrepareOnlineGameNetworkAsync);
+        void HandleRoomStatus(object? sender, string message) => dialog.UpdateMatchmakingStatus(message);
+        OnlineRoomStartStatusChanged += HandleRoomStatus;
+        try { dialog.ShowDialog(this); }
+        finally { OnlineRoomStartStatusChanged -= HandleRoomStatus; }
     }
 
-    private async Task LaunchOnlineGameAsync()
+    private async Task PrepareOnlineGameNetworkAsync(Action<string> reportStatus)
     {
-        if (_onlineGameTrafficBridge is not null)
-            throw new InvalidOperationException("EDMW already has an active direct gameplay bridge.");
-        var roomId = _online.CurrentGameRoom?.RoomId ?? throw new InvalidOperationException("Join a relay game room first.");
+        var room = _online.CurrentGameRoom ?? throw new InvalidOperationException("Join a matchmaking room first.");
+        var user = _online.User ?? throw new InvalidOperationException("Connect to the online relay first.");
+        var gameHostId = room.GameHostUserId ?? room.Host.UserId;
+        if (gameHostId != user.UserId)
+            throw new InvalidOperationException("Only the designated EDMW host can prepare the room game network.");
+        if (_onlineGameTrafficBridge is not null || _onlineGameStartState is not null)
+            throw new InvalidOperationException("A room game network is already starting or running.");
         var gamePath = FindGamePath();
         if (gamePath is null && !SelectGameInstallPath())
-            throw new InvalidOperationException("Select the EDMW game folder before launching an online game.");
+            throw new InvalidOperationException("Select the EDMW game folder before preparing the room game network.");
         gamePath = FindGamePath() ?? throw new InvalidOperationException("The selected EDMW folder is unavailable.");
-        if (IsEdmwRunning()) throw new InvalidOperationException("Close EDMW before launching it through the direct gameplay bridge.");
+        if (!_verificationMode && IsEdmwRunning())
+            throw new InvalidOperationException("Close EDMW on this computer before preparing the room game network.");
 
-        var bridge = await OnlineGameTrafficBridge.LaunchAsync(_online, gamePath, _onlineLifetime.Token);
-        if (_closingDesigner || IsDisposed || _online.CurrentGameRoom?.RoomId != roomId)
+        var memberIds = room.Members.Select(member => member.Profile.UserId).Distinct().ToArray();
+        if (!memberIds.Contains(user.UserId)) throw new InvalidDataException("The relay room does not list this device as a member.");
+        var peerIds = memberIds.Where(id => id != user.UserId).ToArray();
+        if (peerIds.Length == 0) throw new InvalidOperationException("Invite or join at least one other player before preparing the game network.");
+
+        var sessionId = Guid.NewGuid();
+        var startState = new OnlineGameStartState(sessionId, peerIds);
+        _onlineGameStartState = startState;
+        try
         {
-            await bridge.DisposeAsync();
-            throw new InvalidOperationException("The matchmaking room ended before EDMW finished launching.");
+            reportStatus("Waiting for direct ICE channels to every room member…");
+            await _online.GameIceSession.WaitForPeersReadyAsync(peerIds, TimeSpan.FromSeconds(60), _onlineLifetime.Token);
+            if (string.IsNullOrWhiteSpace(_online.GameIceSession.PreferredLocalIpv4))
+                throw new InvalidOperationException("ICE channels are ready, but they did not expose a local IPv4 interface address for GameRanger-style mapping.");
+            reportStatus("Launching EDMW with the room network bridge…");
+            var bridge = await OnlineGameTrafficBridge.LaunchAsync(_online, gamePath, _onlineLifetime.Token);
+            if (_closingDesigner || IsDisposed || _online.CurrentGameRoom?.RoomId != room.RoomId)
+            {
+                await bridge.DisposeAsync();
+                throw new InvalidOperationException("The matchmaking room ended before EDMW finished launching.");
+            }
+            AttachOnlineGameBridge(bridge);
+            if (!_verificationMode && !await bridge.BringGameWindowToFrontAsync(_onlineLifetime.Token))
+                throw new InvalidOperationException("EDMW started, but Windows could not show its native game window.");
+
+            var hostMember = room.Members.FirstOrDefault(member => member.Profile.UserId == user.UserId)
+                ?? throw new InvalidDataException("The designated EDMW host is no longer in this room.");
+            var launch = new OnlineGameClientLaunch(sessionId, OnlineGameAddress.VirtualIpv4(hostMember.RelayPort));
+            var launchFrame = OnlineGameSessionProtocol.EncodeJson(OnlineGameSessionFrameType.LaunchClient, launch);
+            foreach (var peerId in peerIds)
+                if (!_online.GameIceSession.SendControlFrame(peerId, launchFrame))
+                    throw new IOException("Could not send the native game launch request to every room member.");
+            reportStatus("Launching each room member with the room network bridge…");
+            var launchStatuses = await Task.WhenAll(startState.Peers.Select(async pair =>
+            {
+                var memberName = room.Members.FirstOrDefault(member => member.Profile.UserId == pair.Key)?.Profile.DisplayName ?? pair.Key.ToString("N");
+                reportStatus($"Waiting for {memberName}'s game network bridge…");
+                return (PeerId: pair.Key, Status: await pair.Value.GameReady.Task.WaitAsync(TimeSpan.FromSeconds(120), _onlineLifetime.Token));
+            }));
+            RequireSuccessfulRoomStatuses(launchStatuses, "start EDMW with the room network bridge");
+            reportStatus($"EDMW is open on all {room.Members.Length} players. Host IP: {launch.HostVirtualIpv4}. Create a game in EDMW, then have other players join by IP using this address.");
         }
+        catch
+        {
+            StopOnlineGameTrafficBridge();
+            throw;
+        }
+        finally
+        {
+            if (ReferenceEquals(_onlineGameStartState, startState)) _onlineGameStartState = null;
+        }
+    }
+
+    private void RequireSuccessfulRoomStatuses(IEnumerable<(Guid PeerId, OnlineGameSessionStatus Status)> statuses, string action)
+    {
+        foreach (var (peerId, status) in statuses)
+        {
+            var player = _online.CurrentGameRoom?.Members.FirstOrDefault(member => member.Profile.UserId == peerId)?.Profile.DisplayName
+                ?? peerId.ToString("N");
+            if (string.IsNullOrEmpty(status.Message) || status.Message.StartsWith("FAILED:", StringComparison.Ordinal))
+            {
+                var details = status.Message is { Length: > 7 } failure && failure.StartsWith("FAILED:", StringComparison.Ordinal)
+                    ? failure[7..] : "No stage details were returned.";
+                throw new InvalidOperationException($"{player} could not {action}: {details}");
+            }
+        }
+    }
+
+    private void AttachOnlineGameBridge(OnlineGameTrafficBridge bridge)
+    {
         _onlineGameTrafficBridge = bridge;
         bridge.StatusChanged += OnlineGameBridgeStatusChanged;
         bridge.Exited += OnlineGameBridgeExited;
+        if (_verificationMode && bridge.LatestAutomationStatus is { } latestStatus)
+            Console.WriteLine("BRIDGE: " + latestStatus);
         if (bridge.IsFaulted)
         {
             var message = bridge.ProviderStatusMessage ?? "The direct gameplay bridge stopped.";
             StopOnlineGameTrafficBridge();
             throw new InvalidOperationException(message);
         }
-        _status.Text = bridge.ProviderStatusMessage ?? "EDMW launched. Select TCP/IP, then host or join a LAN game; direct ICE traffic will appear when the provider loads.";
-        if (!await bridge.BringGameWindowToFrontAsync(_onlineLifetime.Token))
-            _status.Text = "EDMW launched. If its window is behind Mod Studio, use Alt+Tab to bring EDMW forward before selecting TCP/IP.";
-        if (bridge.LauncherHasExited) OnlineGameBridgeExited(bridge, EventArgs.Empty);
     }
 
-    private void OnlineGameBridgeStatusChanged(object? sender, string message) => PostOnlineUi(() => _status.Text = message);
+    private void OnlineGameControlFrameReceived(object? sender, OnlineIceControlFrame frame) =>
+        PostOnlineUi(() => _ = HandleOnlineGameControlFrameAsync(frame));
+
+    private void PublishOnlineRoomStartStatus(string message)
+    {
+        _status.Text = message;
+        OnlineRoomStartStatusChanged?.Invoke(this, message);
+    }
+
+    private async Task HandleOnlineGameControlFrameAsync(OnlineIceControlFrame frame)
+    {
+        var room = _online.CurrentGameRoom;
+        if (room is null || room.RoomId != frame.RoomId ||
+            !room.Members.Any(member => member.Profile.UserId == frame.FromUserId)) return;
+        try
+        {
+            if (OnlineGameSessionProtocol.TryDecodeJson(frame.Payload, OnlineGameSessionFrameType.LaunchClient, out OnlineGameClientLaunch? launch))
+            {
+                await LaunchOnlineRoomClientAsync(frame.FromUserId, room, launch!);
+                return;
+            }
+            if (OnlineGameSessionProtocol.TryDecodeJson(frame.Payload, OnlineGameSessionFrameType.GameReady, out OnlineGameSessionStatus? gameReady))
+            {
+                CompleteOnlineGamePeerStatus(frame.FromUserId, gameReady!);
+                return;
+            }
+            if (OnlineGameSessionProtocol.TryDecodeJson(frame.Payload, OnlineGameSessionFrameType.LaunchFailed, out OnlineGameSessionStatus? failed))
+            {
+                failed = failed! with { Message = "FAILED:" + failed!.Message };
+                CompleteOnlineGamePeerStatus(frame.FromUserId, failed!);
+                return;
+            }
+        }
+        catch (Exception error) when (error is not OutOfMemoryException and not StackOverflowException)
+        {
+            var session = TryReadSessionId(frame.Payload);
+            if (session != Guid.Empty) SendOnlineSessionStatus(frame.FromUserId, OnlineGameSessionFrameType.LaunchFailed, session, error.Message);
+            PublishOnlineRoomStartStatus("Room game setup failed: " + error.Message);
+        }
+    }
+
+    private async Task LaunchOnlineRoomClientAsync(Guid fromUserId, OnlineGameRoom room, OnlineGameClientLaunch launch)
+    {
+        try
+        {
+            var hostId = room.GameHostUserId ?? room.Host.UserId;
+            var hostMember = room.Members.FirstOrDefault(member => member.Profile.UserId == hostId)
+                ?? throw new InvalidDataException("The designated EDMW host is no longer in this room.");
+            var expectedAddress = OnlineGameAddress.VirtualIpv4(hostMember.RelayPort);
+            if (fromUserId != hostId || launch.SessionId == Guid.Empty ||
+                !string.Equals(launch.HostVirtualIpv4, expectedAddress, StringComparison.Ordinal))
+                throw new InvalidDataException("The room game network request does not match the designated EDMW host.");
+            if (_onlineGameTrafficBridge is not null || (!_verificationMode && IsEdmwRunning()))
+                throw new InvalidOperationException("Close any existing EDMW process before preparing the room game network.");
+            var gamePath = FindGamePath() ?? throw new InvalidOperationException("Select the EDMW game folder before preparing the room game network.");
+            PublishOnlineRoomStartStatus($"Starting EDMW's native UI with the room network. The host's Join by IP address is {expectedAddress}.");
+            var bridge = await OnlineGameTrafficBridge.LaunchAsync(_online, gamePath, _onlineLifetime.Token);
+            if (_online.CurrentGameRoom?.RoomId != room.RoomId)
+            {
+                await bridge.DisposeAsync();
+                throw new InvalidOperationException("The matchmaking room ended before EDMW finished launching.");
+            }
+            AttachOnlineGameBridge(bridge);
+            if (!_verificationMode && !await bridge.BringGameWindowToFrontAsync(_onlineLifetime.Token))
+                throw new InvalidOperationException("EDMW started, but Windows could not show its native game window.");
+            var status = bridge.ProviderStatusMessage ?? "EDMW's native UI is open with the room network bridge configured.";
+            PublishOnlineRoomStartStatus(status + $" Host Join by IP address: {expectedAddress}.");
+            SendOnlineSessionStatus(fromUserId, OnlineGameSessionFrameType.GameReady, launch.SessionId,
+                "EDMW started with the matchmaking network bridge configured.");
+        }
+        catch (Exception error) when (error is not OutOfMemoryException and not StackOverflowException)
+        {
+            if (_verificationMode) Console.WriteLine("CLIENT FAIL: " + error);
+            SendOnlineSessionStatus(fromUserId, OnlineGameSessionFrameType.LaunchFailed, launch.SessionId, error.Message);
+            PublishOnlineRoomStartStatus("Could not prepare the room game: " + error.Message);
+        }
+    }
+
+    private static Guid TryReadSessionId(byte[] frame)
+    {
+        if (OnlineGameSessionProtocol.TryDecodeJson(frame, OnlineGameSessionFrameType.LaunchClient, out OnlineGameClientLaunch? launch))
+            return launch!.SessionId;
+        return Guid.Empty;
+    }
+
+    private void CompleteOnlineGamePeerStatus(Guid peerId, OnlineGameSessionStatus status)
+    {
+        var state = _onlineGameStartState;
+        if (state is null || status.SessionId != state.SessionId ||
+            !state.Peers.TryGetValue(peerId, out var peer)) return;
+        peer.GameReady.TrySetResult(status);
+    }
+
+    private void SendOnlineSessionStatus(Guid peerId, OnlineGameSessionFrameType type, Guid sessionId, string message)
+    {
+        if (message.Length > 1024) message = message[..1024];
+        _online.GameIceSession.SendControlFrame(peerId,
+            OnlineGameSessionProtocol.EncodeJson(type, new OnlineGameSessionStatus(sessionId, message)));
+    }
+
+    private void OnlineGameBridgeStatusChanged(object? sender, string message)
+    {
+        if (_verificationMode) Console.WriteLine("BRIDGE: " + message);
+        PostOnlineUi(() => PublishOnlineRoomStartStatus(message));
+    }
 
     private void OnlineGameBridgeExited(object? sender, EventArgs e)
     {
@@ -289,7 +486,9 @@ public sealed partial class MainForm
             if (_onlineGameTrafficBridge != bridge) return;
             var faulted = bridge.IsFaulted;
             StopOnlineGameTrafficBridge();
-            if (!faulted) _status.Text = "EDMW closed. The matchmaking room is still available.";
+            _status.Text = faulted
+                ? bridge.ProviderStatusMessage ?? "The EDMW network bridge stopped."
+                : "EDMW closed. The matchmaking room is still available.";
         });
     }
 

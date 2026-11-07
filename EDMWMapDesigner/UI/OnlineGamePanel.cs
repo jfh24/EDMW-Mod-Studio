@@ -9,20 +9,26 @@ internal sealed class OnlineGamePanel : UserControl
     {
         public override string ToString() => Profile.DisplayName;
     }
+    private sealed record GameHostChoice(OnlineGameMember Member)
+    {
+        public override string ToString() => $"{Member.Profile.DisplayName} · {OnlineGameAddress.VirtualIpv4(Member.RelayPort)}";
+    }
 
     private readonly OnlineRelayClient _client;
-    private readonly Func<Task>? _launchGameplay;
     private readonly Func<string?> _gameTrafficStatus;
+    private readonly Func<Action<string>, Task>? _prepareGameNetwork;
     private readonly CancellationTokenSource _lifetime = new();
     private readonly System.Windows.Forms.Timer _trafficTimer = new() { Interval = 1000 };
     private readonly ToolTip _tips = new() { AutoPopDelay = 15000 };
-    private readonly TextBox _name = new() { MaxLength = 80, PlaceholderText = "Game room name", AccessibleName = "Game room name" };
+    private readonly TextBox _name = new() { MaxLength = 64, PlaceholderText = "Game room name", AccessibleName = "Game room name" };
     private readonly ComboBox _visibility = new() { DropDownStyle = ComboBoxStyle.DropDownList, AccessibleName = "Game room visibility" };
     private readonly NumericUpDown _capacity = new() { Minimum = 2, Maximum = 8, Value = 8, AccessibleName = "Maximum game room players" };
     private readonly ComboBox _friendPicker = new() { DropDownStyle = ComboBoxStyle.DropDownList, Height = 32, Width = 160, AccessibleName = "Invite an online friend" };
+    private readonly ComboBox _gameHostPicker = new() { DropDownStyle = ComboBoxStyle.DropDownList, Height = 32, AccessibleName = "EDMW game host" };
     private readonly ListView _rooms = MakeList("Available relay game rooms");
     private readonly ListView _invitations = MakeList("Incoming game invitations");
     private readonly Label _roomState = new() { Dock = DockStyle.Fill, ForeColor = MedievalTheme.TextSecondary, AutoEllipsis = true, TextAlign = ContentAlignment.MiddleLeft };
+    private readonly Label _hostAddress = new() { Dock = DockStyle.Fill, ForeColor = MedievalTheme.TextSecondary, AutoEllipsis = true, TextAlign = ContentAlignment.MiddleLeft, AccessibleName = "EDMW host virtual IP address" };
     private readonly Label _status = new() { Dock = DockStyle.Fill, ForeColor = MedievalTheme.TextSecondary, AutoEllipsis = true, TextAlign = ContentAlignment.MiddleLeft };
     private readonly Button _create;
     private readonly Button _refresh;
@@ -30,14 +36,17 @@ internal sealed class OnlineGamePanel : UserControl
     private readonly Button _joinRoom;
     private readonly Button _joinInvite;
     private readonly Button _leave;
-    private readonly Button _launch;
+    private readonly Button _prepareNetwork;
+    private readonly Button _setGameHost;
+    private readonly Button _copyHostAddress;
     private bool _busy;
 
-    public OnlineGamePanel(OnlineRelayClient client, Func<Task>? launchGameplay = null, Func<string?>? gameTrafficStatus = null)
+    public OnlineGamePanel(OnlineRelayClient client, Func<string?>? gameTrafficStatus = null,
+        Func<Action<string>, Task>? prepareGameNetwork = null)
     {
         _client = client ?? throw new ArgumentNullException(nameof(client));
-        _launchGameplay = launchGameplay;
         _gameTrafficStatus = gameTrafficStatus ?? (() => null);
+        _prepareGameNetwork = prepareGameNetwork;
         _name.Text = $"{_client.User?.DisplayName ?? "Player"}'s game";
         Dock = DockStyle.Fill;
         Font = MedievalTheme.UiFont();
@@ -87,21 +96,39 @@ internal sealed class OnlineGamePanel : UserControl
             await _client.LeaveGameRoomAsync(_lifetime.Token);
             SetStatus("Left the game room.");
         }));
-        _launch = Button("Launch EDMW", () => RunAsync(async () =>
+        _prepareNetwork = Button("Prepare game network", () => RunAsync(async () =>
         {
-            if (_launchGameplay is null) throw new InvalidOperationException("Launch EDMW from the Matchmaking tab.");
-            SetStatus("Starting EDMW with direct ICE gameplay…");
-            await _launchGameplay();
-            SetStatus(_gameTrafficStatus() ?? "EDMW launched. Choose TCP/IP, then host or join a LAN game.");
+            if (_prepareGameNetwork is null) throw new InvalidOperationException("Room game network setup is unavailable from this Matchmaking panel.");
+            SetStatus("Preparing the room network…");
+            await _prepareGameNetwork(message => SetStatus(message));
+            SetStatus(_gameTrafficStatus() ?? "EDMW is open for every player. The host creates a game in EDMW; other players join with the displayed host IP.");
             _trafficTimer.Start();
         }), primary: true);
+        _setGameHost = Button("Set EDMW host", () => RunAsync(async () =>
+        {
+            if (_gameHostPicker.SelectedItem is not GameHostChoice choice) return;
+            await _client.DesignateGameHostAsync(choice.Member.Profile.UserId, _lifetime.Token);
+            SetStatus($"{choice.Member.Profile.DisplayName} is the designated EDMW host.");
+        }));
+        _copyHostAddress = Button("Copy host IP", () => RunAsync(() =>
+        {
+            var room = _client.CurrentGameRoom;
+            var member = room is null ? null : DesignatedGameHost(room);
+            if (member is null) throw new InvalidOperationException("Choose an EDMW host in the current room first.");
+            var address = OnlineGameAddress.VirtualIpv4(member.RelayPort);
+            Clipboard.SetText(address);
+            SetStatus($"Copied EDMW host IP {address}.");
+            return Task.CompletedTask;
+        }));
 
         MedievalTheme.StyleTextInput(_name);
         MedievalTheme.StyleTextInput(_visibility);
         MedievalTheme.StyleTextInput(_capacity);
         MedievalTheme.StyleTextInput(_friendPicker);
+        MedievalTheme.StyleTextInput(_gameHostPicker);
         _visibility.Items.AddRange(["Friends only", "Public"]);
         _visibility.SelectedIndex = 0;
+        _tips.SetToolTip(_visibility, "Public rooms are listed for all connected players. Friends-only rooms are listed for accepted friends and invitees.");
 
         _rooms.Columns.Add("Game", 260);
         _rooms.Columns.Add("Host", 170);
@@ -114,24 +141,27 @@ internal sealed class OnlineGamePanel : UserControl
         _invitations.SizeChanged += (_, _) => FriendsDialog.FitColumns(_invitations, 0.58f);
         _invitations.SelectedIndexChanged += (_, _) => RefreshActions();
         _friendPicker.SelectedIndexChanged += (_, _) => RefreshActions();
+        _gameHostPicker.SelectedIndexChanged += (_, _) => RefreshActions();
         _name.TextChanged += (_, _) => RefreshActions();
 
-        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(16), ColumnCount = 1, RowCount = 6, BackColor = Color.Transparent };
+        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(16), ColumnCount = 1, RowCount = 7, BackColor = Color.Transparent };
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 112));
-        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 52));
-        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 28));
+        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 47));
+        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 25));
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 38));
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 28));
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 78));
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 45));
         layout.Controls.Add(CreateRoomCard(), 0, 0);
         layout.Controls.Add(RoomListCard(), 0, 1);
         layout.Controls.Add(InvitationCard(), 0, 2);
+        layout.Controls.Add(GameHostControls(), 0, 3);
         var actions = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = true, Margin = Padding.Empty };
-        foreach (Control control in new Control[] { _refresh, _friendPicker, _invite, _joinRoom, _joinInvite, _leave, _launch }) actions.Controls.Add(control);
-        layout.Controls.Add(_roomState, 0, 3);
-        layout.Controls.Add(actions, 0, 4);
-        layout.Controls.Add(_status, 0, 5);
+        foreach (Control control in new Control[] { _refresh, _friendPicker, _invite, _joinRoom, _joinInvite, _leave, _prepareNetwork }) actions.Controls.Add(control);
+        layout.Controls.Add(_roomState, 0, 4);
+        layout.Controls.Add(actions, 0, 5);
+        layout.Controls.Add(_status, 0, 6);
         Controls.Add(layout);
 
         _client.GameRoomsChanged += GameRoomsChanged;
@@ -184,6 +214,12 @@ internal sealed class OnlineGamePanel : UserControl
         });
     }
 
+    public void SetExternalStatus(string message)
+    {
+        SetStatus(message);
+        if (_gameTrafficStatus() is not null) _trafficTimer.Start();
+    }
+
     private OnlineGameRoom? SelectedRoom => _rooms.SelectedItems.Count > 0 ? _rooms.SelectedItems[0].Tag as OnlineGameRoom : null;
     private OnlineGameInvite? SelectedInvite => _invitations.SelectedItems.Count > 0 ? _invitations.SelectedItems[0].Tag as OnlineGameInvite : null;
 
@@ -206,7 +242,7 @@ internal sealed class OnlineGamePanel : UserControl
         fields.Controls.Add(MedievalTheme.FrameInput(_capacity), 2, 0);
         fields.Controls.Add(_create, 3, 0);
         content.Controls.Add(fields, 0, 1);
-        var hint = new Label { Text = "Invite accepted online friends or publish a public room. After joining, launch EDMW and choose its TCP/IP provider. Gameplay uses a direct ICE/STUN connection; the relay handles sign-in, matchmaking, and connection setup.", Dock = DockStyle.Fill, ForeColor = MedievalTheme.TextSecondary, TextAlign = ContentAlignment.MiddleLeft, AutoEllipsis = true };
+        var hint = new Label { Text = "Group players here, then prepare the game network. Mod Studio opens EDMW for everyone and maps room traffic to virtual IPs. Use EDMW's own multiplayer UI: the host creates a game and other players join by the displayed host IP. Everyone needs the supported game build and map installed.", Dock = DockStyle.Fill, ForeColor = MedievalTheme.TextSecondary, TextAlign = ContentAlignment.MiddleLeft, AutoEllipsis = true };
         content.Controls.Add(hint, 0, 2);
         return Card(content);
     }
@@ -231,6 +267,31 @@ internal sealed class OnlineGamePanel : UserControl
         content.Controls.Add(new Label { Text = "Game invitations", Dock = DockStyle.Fill, ForeColor = MedievalTheme.GoldBright, Font = MedievalTheme.DisplayFont(12), TextAlign = ContentAlignment.MiddleLeft }, 0, 0);
         content.Controls.Add(_invitations, 0, 1);
         return Card(content);
+    }
+
+    private Control GameHostControls()
+    {
+        var row = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill, ColumnCount = 4, RowCount = 1, Margin = Padding.Empty,
+            BackColor = Color.Transparent
+        };
+        row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 190));
+        row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 128));
+        row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 100));
+        row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        _setGameHost.Dock = DockStyle.Fill;
+        _setGameHost.Margin = new Padding(6, 0, 6, 0);
+        _copyHostAddress.Dock = DockStyle.Fill;
+        _copyHostAddress.Margin = new Padding(0, 0, 8, 0);
+        row.Controls.Add(MedievalTheme.FrameInput(_gameHostPicker), 0, 0);
+        row.Controls.Add(_setGameHost, 1, 0);
+        row.Controls.Add(_copyHostAddress, 2, 0);
+        row.Controls.Add(_hostAddress, 3, 0);
+        _tips.SetToolTip(_gameHostPicker, "The matchmaking room host selects which player is hosting EDMW.");
+        _tips.SetToolTip(_setGameHost, "Designate which room member will host the EDMW multiplayer game.");
+        _tips.SetToolTip(_copyHostAddress, "Copy the designated host's virtual IPv4 address for the game's Join by IP field.");
+        return row;
     }
 
     private void RefreshFriendPicker()
@@ -275,15 +336,47 @@ internal sealed class OnlineGamePanel : UserControl
         _invitations.EndUpdate();
         var active = _client.CurrentGameRoom;
         _roomState.Text = active is null ? "No active room" : $"In {active.Name} · {active.Members.Length}/{active.MaxPlayers} players";
+        RefreshGameHostPicker();
         RefreshFriendPicker();
         RefreshActions();
     }
+
+    private void RefreshGameHostPicker()
+    {
+        var room = _client.CurrentGameRoom;
+        _gameHostPicker.BeginUpdate();
+        try
+        {
+            _gameHostPicker.Items.Clear();
+            if (room is not null)
+            {
+                foreach (var member in room.Members.OrderBy(member => member.Profile.DisplayName, StringComparer.OrdinalIgnoreCase))
+                {
+                    var choice = new GameHostChoice(member);
+                    _gameHostPicker.Items.Add(choice);
+                    if (member.Profile.UserId == (room.GameHostUserId ?? room.Host.UserId)) _gameHostPicker.SelectedItem = choice;
+                }
+            }
+        }
+        finally { _gameHostPicker.EndUpdate(); }
+
+        var gameHost = room is null ? null : DesignatedGameHost(room);
+        _hostAddress.Text = gameHost is null
+            ? "EDMW host IP: not set"
+            : $"EDMW host IP: {OnlineGameAddress.VirtualIpv4(gameHost.RelayPort)} · {gameHost.Profile.DisplayName}";
+    }
+
+    private static OnlineGameMember? DesignatedGameHost(OnlineGameRoom room) => room.GameHostUserId is { } userId
+        ? room.Members.FirstOrDefault(member => member.Profile.UserId == userId)
+        : room.Members.FirstOrDefault(member => member.Profile.UserId == room.Host.UserId);
 
     private void RefreshActions()
     {
         var connected = _client.IsConnected;
         var active = _client.CurrentGameRoom;
         var host = active is not null && _client.User?.UserId == active.Host.UserId;
+        var designatedGameHost = active is not null && _client.User?.UserId ==
+            (active.GameHostUserId ?? active.Host.UserId);
         var friend = _friendPicker.SelectedItem as FriendChoice;
         _create.Enabled = connected && !_busy && active is null && !string.IsNullOrWhiteSpace(_name.Text);
         _tips.SetToolTip(_create, !connected ? "Connect to the relay first." : _busy ? "A matchmaking request is in progress."
@@ -295,8 +388,21 @@ internal sealed class OnlineGamePanel : UserControl
         _joinRoom.Enabled = connected && !_busy && active is null && SelectedRoom is not null;
         _joinInvite.Enabled = connected && !_busy && active is null && SelectedInvite is not null;
         _leave.Enabled = connected && !_busy && active is not null;
-        _launch.Enabled = connected && !_busy && active is not null && _launchGameplay is not null;
+        _copyHostAddress.Enabled = active is not null && DesignatedGameHost(active) is not null;
+        _prepareNetwork.Enabled = connected && !_busy && active is not null && designatedGameHost &&
+            _prepareGameNetwork is not null && _gameTrafficStatus() is null;
+        _setGameHost.Enabled = connected && !_busy && host && _gameHostPicker.SelectedItem is GameHostChoice selectedHost &&
+            active?.GameHostUserId != selectedHost.Member.Profile.UserId;
+        _tips.SetToolTip(_prepareNetwork, !connected ? "Connect to the relay first." : _busy ? "A matchmaking action is in progress."
+            : active is null ? "Join a matchmaking room first."
+            : !designatedGameHost ? "Only the designated EDMW host can prepare the room game network."
+            : _gameTrafficStatus() is not null ? "EDMW already has an active game bridge. Close the game to prepare another room."
+            : "Open EDMW's native UI on each room member and configure the room's virtual IP network.");
+        _tips.SetToolTip(_setGameHost, !host ? "The matchmaking room host chooses which member is hosting EDMW." :
+            _gameHostPicker.SelectedItem is not GameHostChoice ? "Choose the player who will host the EDMW game." :
+            "Set the selected member as the EDMW game host.");
         _roomState.ForeColor = active is null ? MedievalTheme.TextSecondary : MedievalTheme.Success;
+        _hostAddress.ForeColor = active?.GameHostUserId is null ? MedievalTheme.TextSecondary : MedievalTheme.Success;
     }
 
     private async Task RunAsync(Func<Task> operation)
@@ -309,7 +415,7 @@ internal sealed class OnlineGamePanel : UserControl
         catch (Exception error)
         {
             var message = string.Equals(error.Message, "Unknown command.", StringComparison.OrdinalIgnoreCase)
-                ? "This relay does not support matchmaking and ICE signaling yet. Deploy the 1.4.0 relay update, then reconnect."
+                ? "This relay does not support the current matchmaking command. Deploy the updated relay server, then reconnect."
                 : error.Message;
             SetStatus(message, error: true);
             MedievalDialog.Show(this, message, "Online games", MessageBoxButtons.OK, MessageBoxIcon.Warning);
@@ -326,6 +432,7 @@ internal sealed class OnlineGamePanel : UserControl
         if (IsDisposed || Disposing) return;
         _status.Text = message;
         _status.ForeColor = error ? MedievalTheme.Warning : MedievalTheme.TextSecondary;
+        _tips.SetToolTip(_status, message);
     }
 
     private void GameRoomsChanged(object? sender, OnlineGameRoom[] rooms) => OnUi(RefreshLists);

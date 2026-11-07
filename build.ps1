@@ -17,6 +17,8 @@ $native = Join-Path $PSScriptRoot 'native\EDMWAnchored\build-native.cmd'
 if ($LASTEXITCODE -ne 0) { throw "Native generator build failed with exit code $LASTEXITCODE" }
 & (Join-Path $PSScriptRoot 'native\EDMWEffects\build-native.cmd')
 if ($LASTEXITCODE -ne 0) { throw "Native effects build failed with exit code $LASTEXITCODE" }
+& (Join-Path $PSScriptRoot 'native\EDMWRelayBridge\build-native.cmd')
+if ($LASTEXITCODE -ne 0) { throw "Native game network bridge build failed with exit code $LASTEXITCODE" }
 
 $installerProject = Join-Path $PSScriptRoot 'EDMWMultiplayerInstaller\EDMWMultiplayerInstaller.csproj'
 $installerAsset = Join-Path $PSScriptRoot 'EDMWMapDesigner\Assets'

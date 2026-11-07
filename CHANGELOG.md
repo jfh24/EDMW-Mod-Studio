@@ -9,6 +9,9 @@
 - Forwarded limited, multicast, and subnet-directed LAN discovery broadcasts to all relay room members, including when the in-game host is not the relay room owner.
 - Restored and foregrounded the game window after launching from Matchmaking so the modal Friends dialog does not block game input.
 - Added live direct-connection and gameplay counters to Matchmaking status for ICE peers, provider hookup, UDP sockets, room broadcasts, received packets, and local game delivery.
+- Made **Prepare game network** network-only: it waits for every player's ICE channels, configures virtual IPv4 and route mappings, then opens EDMW's normal UI. Players must already have the same map installed; matchmaking no longer transfers or installs maps.
+- Added reliable peer setup messages and per-player launch/readiness errors. The bridge chooses a local IPv4 ICE interface rather than the public STUN-mapped address and self-checks the game adapter and matching route-table mappings before launch.
+- Added hidden two-client loopback verification for ICE connectivity probes, virtual-IP mapping, provider hooks, and launch coordination. This does not establish an actual in-game session or cross-internet gameplay; live validation remains pending.
 - Added a guarded launcher that checks the supported game and provider hashes before injecting the bridge; it does not replace game files. Live cross-internet session validation remains pending.
 - Updated application and installer template version metadata to 1.4.0.
 

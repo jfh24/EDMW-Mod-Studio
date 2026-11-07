@@ -1,5 +1,8 @@
 using System.Buffers.Binary;
 using System.Collections.Concurrent;
+using System.Globalization;
+using System.Net;
+using System.Net.Sockets;
 using System.Text.Json;
 using System.Threading.Channels;
 using DataChannelDotnet;
@@ -10,20 +13,26 @@ namespace EDMWMapDesigner.Networking;
 
 internal sealed record OnlineIceDatagram(Guid RoomId, Guid FromUserId, int SourcePort, int TargetPort, byte[] Payload);
 internal sealed record OnlineIceTcpFrame(Guid RoomId, Guid FromUserId, byte[] Payload);
+internal sealed record OnlineIceControlFrame(Guid RoomId, Guid FromUserId, byte[] Payload);
 
 /// <summary>Establishes direct WebRTC data channels for each online game room member.</summary>
 internal sealed class OnlineGameIceSession : IDisposable
 {
     private const string UdpChannelLabel = "edmw-game-udp";
     private const string TcpChannelLabel = "edmw-game-tcp";
+    private const string ControlChannelLabel = "edmw-session-control";
     private const int UdpHeaderLength = 8;
     private const int TcpHeaderLength = 25;
     private const int MaximumUdpPayload = OnlineRelayClient.MaximumGamePacketBytes;
     private const int MaximumTcpPayload = OnlineRelayClient.MaximumGameStreamChunkBytes;
+    internal const int MaximumControlFrameBytes = 16 * 1024;
     private readonly OnlineRelayClient _client;
     private readonly Channel<OnlineGameRoom?> _roomUpdates = Channel.CreateUnbounded<OnlineGameRoom?>(new UnboundedChannelOptions { SingleReader = true });
     private readonly ConcurrentDictionary<Guid, IcePeer> _peers = new();
     private readonly object _peerLock = new();
+    private readonly object _localCandidateLock = new();
+    private readonly Dictionary<Guid, string> _selectedLocalIpv4ByPeer = [];
+    private readonly Dictionary<Guid, (string Address, uint Priority)> _fallbackLocalIpv4ByPeer = [];
     private readonly CancellationTokenSource _lifetime = new();
     private readonly Task _roomWorker;
     private OnlineGameRoom? _room;
@@ -32,8 +41,22 @@ internal sealed class OnlineGameIceSession : IDisposable
 
     public event EventHandler<OnlineIceDatagram>? DatagramReceived;
     public event EventHandler<OnlineIceTcpFrame>? TcpFrameReceived;
+    public event EventHandler<OnlineIceControlFrame>? ControlFrameReceived;
     public event EventHandler<string>? StatusChanged;
     public string? LatestStatus => Volatile.Read(ref _latestStatus);
+    public string? PreferredLocalIpv4
+    {
+        get
+        {
+            lock (_localCandidateLock)
+            {
+                var room = Volatile.Read(ref _room);
+                var localId = _client.User?.UserId;
+                var hostId = room?.GameHostUserId ?? room?.Host.UserId;
+                return SelectPreferredLocalIpv4(localId, hostId, _selectedLocalIpv4ByPeer, _fallbackLocalIpv4ByPeer);
+            }
+        }
+    }
     public int ReadyPeerCount => _peers.Values.Count(peer => peer.IsReady);
 
     public OnlineGameIceSession(OnlineRelayClient client)
@@ -60,10 +83,26 @@ internal sealed class OnlineGameIceSession : IDisposable
             await foreach (var room in _roomUpdates.Reader.ReadAllAsync(_lifetime.Token).ConfigureAwait(false))
             {
                 if (Volatile.Read(ref _disposed) != 0) return;
+                var previousRoom = Volatile.Read(ref _room);
                 Volatile.Write(ref _room, room);
+                if (room is null || room.RoomId != previousRoom?.RoomId)
+                {
+                    lock (_localCandidateLock)
+                    {
+                        _selectedLocalIpv4ByPeer.Clear();
+                        _fallbackLocalIpv4ByPeer.Clear();
+                    }
+                }
                 var localId = _client.User?.UserId ?? Guid.Empty;
                 var members = room?.Members.Where(member => member.Profile.UserId != localId)
                     .ToDictionary(member => member.Profile.UserId) ?? [];
+                lock (_localCandidateLock)
+                {
+                    foreach (var candidateId in _selectedLocalIpv4ByPeer.Keys.Where(id => !members.ContainsKey(id)).ToArray())
+                        _selectedLocalIpv4ByPeer.Remove(candidateId);
+                    foreach (var candidateId in _fallbackLocalIpv4ByPeer.Keys.Where(id => !members.ContainsKey(id)).ToArray())
+                        _fallbackLocalIpv4ByPeer.Remove(candidateId);
+                }
                 foreach (var entry in _peers.ToArray())
                 {
                     if (room?.RoomId != entry.Value.RoomId || !members.ContainsKey(entry.Key))
@@ -107,7 +146,8 @@ internal sealed class OnlineGameIceSession : IDisposable
     {
         var isOfferer = localId.CompareTo(member.Profile.UserId) < 0;
         var peer = new IcePeer(room.RoomId, member.Profile.UserId, member.Profile.DisplayName, isOfferer,
-            SendSignalAsync, HandleUdpFrame, HandleTcpFrame, ReportStatus);
+            SendSignalAsync, HandleUdpFrame, HandleTcpFrame, HandleControlFrame, ReportStatus,
+            CaptureLocalCandidate, HasLocalMappingIpv4, ClearSelectedLocalCandidate);
         _peers[member.Profile.UserId] = peer;
         ReportStatus($"Preparing direct ICE connection to {member.Profile.DisplayName} using STUN.");
         if (isOfferer) peer.StartOffer();
@@ -133,6 +173,14 @@ internal sealed class OnlineGameIceSession : IDisposable
 
     private Task SendSignalAsync(Guid targetUserId, string type, string payload, CancellationToken cancellationToken) =>
         _client.SendGameSignalAsync(targetUserId, type, payload, cancellationToken);
+
+    private void HandleControlFrame(Guid peerUserId, byte[] payload)
+    {
+        var room = Volatile.Read(ref _room);
+        if (room is null || room.RoomId != _client.CurrentGameRoom?.RoomId ||
+            !room.Members.Any(member => member.Profile.UserId == peerUserId) || Volatile.Read(ref _disposed) != 0) return;
+        ControlFrameReceived?.Invoke(this, new(room.RoomId, peerUserId, payload));
+    }
 
     public bool SendDatagram(int targetRelayPort, int sourcePort, int targetPort, ReadOnlyMemory<byte> payload)
     {
@@ -160,7 +208,37 @@ internal sealed class OnlineGameIceSession : IDisposable
     public bool SendTcpFrame(Guid peerUserId, ReadOnlySpan<byte> frame) =>
         _peers.TryGetValue(peerUserId, out var peer) && peer.SendTcp(frame);
 
+    public bool SendControlFrame(Guid peerUserId, ReadOnlySpan<byte> frame) =>
+        frame.Length is > 0 and <= MaximumControlFrameBytes &&
+        _peers.TryGetValue(peerUserId, out var peer) && peer.SendControl(frame);
+
     public bool IsPeerReady(Guid peerUserId) => _peers.TryGetValue(peerUserId, out var peer) && peer.IsReady;
+
+    public async Task WaitForPeersReadyAsync(IEnumerable<Guid> peerUserIds, TimeSpan timeout,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(peerUserIds);
+        if (timeout <= TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(timeout));
+        var peers = peerUserIds.Where(id => id != _client.User?.UserId).Distinct().ToArray();
+        if (peers.Any(id => id == Guid.Empty)) throw new ArgumentException("A game room contains an invalid peer.", nameof(peerUserIds));
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        deadline.CancelAfter(timeout);
+        try
+        {
+            while (peers.Any(id => !_peers.TryGetValue(id, out var peer) || !peer.IsReady || !peer.TryCaptureSelectedLocalCandidate()))
+                await Task.Delay(100, deadline.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            var missing = peers.Where(id => !IsPeerReady(id)).Select(id =>
+                _client.CurrentGameRoom?.Members.FirstOrDefault(member => member.Profile.UserId == id)?.Profile.DisplayName ?? id.ToString("N"));
+            if (missing.Any())
+                throw new TimeoutException("ICE session-control channels did not become ready for: " + string.Join(", ", missing));
+            var missingRoute = peers.Where(id => !_peers.TryGetValue(id, out var peer) || !peer.HasLocalMappingIpv4)
+                .Select(id => _client.CurrentGameRoom?.Members.FirstOrDefault(member => member.Profile.UserId == id)?.Profile.DisplayName ?? id.ToString("N"));
+            throw new TimeoutException("ICE channels opened, but no local IPv4 interface candidate was available for game mapping: " + string.Join(", ", missingRoute));
+        }
+    }
 
     private void HandleUdpFrame(Guid peerUserId, byte[] frame)
     {
@@ -193,6 +271,90 @@ internal sealed class OnlineGameIceSession : IDisposable
         try { StatusChanged?.Invoke(this, message); } catch (Exception) { }
     }
 
+    private bool CaptureLocalCandidate(Guid remoteUserId, string candidateText, bool selectedPair)
+    {
+        if (!TryGetLocalMappingCandidate(candidateText, out var address, out var priority)) return false;
+        lock (_localCandidateLock)
+        {
+            if (selectedPair)
+                _selectedLocalIpv4ByPeer[remoteUserId] = address;
+            else if (!_fallbackLocalIpv4ByPeer.TryGetValue(remoteUserId, out var current) || priority > current.Priority)
+                _fallbackLocalIpv4ByPeer[remoteUserId] = (address, priority);
+        }
+        return true;
+    }
+
+    private bool HasLocalMappingIpv4(Guid remoteUserId)
+    {
+        lock (_localCandidateLock)
+            return _selectedLocalIpv4ByPeer.ContainsKey(remoteUserId) || _fallbackLocalIpv4ByPeer.ContainsKey(remoteUserId);
+    }
+
+    private void ClearSelectedLocalCandidate(Guid remoteUserId)
+    {
+        lock (_localCandidateLock) _selectedLocalIpv4ByPeer.Remove(remoteUserId);
+    }
+
+    internal static bool TryGetLocalMappingCandidate(string candidateText, out string addressText, out uint priority)
+    {
+        addressText = string.Empty;
+        priority = 0;
+        if (string.IsNullOrWhiteSpace(candidateText)) return false;
+        var parts = candidateText.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        var typeIndex = Array.FindIndex(parts, part => string.Equals(part, "typ", StringComparison.OrdinalIgnoreCase));
+        if (typeIndex < 0 || typeIndex + 1 >= parts.Length) return false;
+
+        var type = parts[typeIndex + 1];
+        string? localAddress = null;
+        if (string.Equals(type, "srflx", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(type, "prflx", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(type, "relay", StringComparison.OrdinalIgnoreCase))
+        {
+            var relatedIndex = Array.FindIndex(parts, part => string.Equals(part, "raddr", StringComparison.OrdinalIgnoreCase));
+            if (relatedIndex >= 0 && relatedIndex + 1 < parts.Length)
+            {
+                // Use the candidate's related/base local address, which is the
+                // socket-bound interface address; the srflx address itself is
+                // the STUN-mapped public address and will not match adapters.
+                localAddress = parts[relatedIndex + 1];
+            }
+        }
+        else if (string.Equals(type, "host", StringComparison.OrdinalIgnoreCase) && parts.Length > 4)
+        {
+            localAddress = parts[4];
+        }
+
+        if (localAddress is null || !IPAddress.TryParse(localAddress, out var address) ||
+            address.AddressFamily != AddressFamily.InterNetwork || IPAddress.IsLoopback(address)) return false;
+        var bytes = address.GetAddressBytes();
+        if (bytes[0] == 0 || bytes[0] >= 224 || (bytes[0] == 169 && bytes[1] == 254)) return false;
+        addressText = address.ToString();
+        if (parts.Length > 3)
+            uint.TryParse(parts[3], NumberStyles.None, CultureInfo.InvariantCulture, out priority);
+        return true;
+    }
+
+    internal static string? SelectPreferredLocalIpv4(Guid? localUserId, Guid? designatedHostUserId,
+        IReadOnlyDictionary<Guid, string> selectedRoutes,
+        IReadOnlyDictionary<Guid, (string Address, uint Priority)> gatheredFallbackRoutes)
+    {
+        if (designatedHostUserId is { } hostId && hostId != localUserId)
+        {
+            if (selectedRoutes.TryGetValue(hostId, out var selectedHostRoute)) return selectedHostRoute;
+            if (gatheredFallbackRoutes.TryGetValue(hostId, out var fallbackHostRoute)) return fallbackHostRoute.Address;
+        }
+
+        var routes = selectedRoutes.ToDictionary(entry => entry.Key, entry => entry.Value);
+        foreach (var fallback in gatheredFallbackRoutes)
+            routes.TryAdd(fallback.Key, fallback.Value.Address);
+        return routes.Values
+            .GroupBy(address => address, StringComparer.Ordinal)
+            .OrderByDescending(group => group.Count())
+            .ThenBy(group => group.Key, StringComparer.Ordinal)
+            .Select(group => group.Key)
+            .FirstOrDefault();
+    }
+
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
@@ -222,7 +384,11 @@ internal sealed class OnlineGameIceSession : IDisposable
         private readonly Func<Guid, string, string, CancellationToken, Task> _sendSignal;
         private readonly Action<Guid, byte[]> _udpReceived;
         private readonly Action<Guid, byte[]> _tcpReceived;
+        private readonly Action<Guid, byte[]> _controlReceived;
         private readonly Action<string> _status;
+        private readonly Func<Guid, string, bool, bool> _localCandidate;
+        private readonly Func<Guid, bool> _hasLocalMappingIpv4;
+        private readonly Action<Guid> _clearSelectedLocalCandidate;
         private readonly Channel<Signal> _signals = Channel.CreateBounded<Signal>(new BoundedChannelOptions(256)
         { SingleReader = true, SingleWriter = false, FullMode = BoundedChannelFullMode.Wait });
         private readonly CancellationTokenSource _lifetime = new();
@@ -231,15 +397,20 @@ internal sealed class OnlineGameIceSession : IDisposable
         private readonly object _channelLock = new();
         private IRtcDataChannel? _udp;
         private IRtcDataChannel? _tcp;
+        private IRtcDataChannel? _control;
         private bool _remoteDescriptionSet;
+        private int _localMappingIpv4State;
         private int _disposed;
 
         public Guid RoomId => _roomId;
-        public bool IsReady { get { lock (_channelLock) return _udp?.IsOpen == true && _tcp?.IsOpen == true; } }
+        public bool IsReady { get { lock (_channelLock) return _udp?.IsOpen == true && _tcp?.IsOpen == true && _control?.IsOpen == true; } }
+        public bool HasLocalMappingIpv4 => Volatile.Read(ref _localMappingIpv4State) != 0;
 
         public IcePeer(Guid roomId, Guid remoteUserId, string remoteName, bool isOfferer,
             Func<Guid, string, string, CancellationToken, Task> sendSignal,
-            Action<Guid, byte[]> udpReceived, Action<Guid, byte[]> tcpReceived, Action<string> status)
+            Action<Guid, byte[]> udpReceived, Action<Guid, byte[]> tcpReceived,
+            Action<Guid, byte[]> controlReceived, Action<string> status, Func<Guid, string, bool, bool> localCandidate,
+            Func<Guid, bool> hasLocalMappingIpv4, Action<Guid> clearSelectedLocalCandidate)
         {
             _roomId = roomId;
             _remoteUserId = remoteUserId;
@@ -248,7 +419,11 @@ internal sealed class OnlineGameIceSession : IDisposable
             _sendSignal = sendSignal;
             _udpReceived = udpReceived;
             _tcpReceived = tcpReceived;
+            _controlReceived = controlReceived;
             _status = status;
+            _localCandidate = localCandidate;
+            _hasLocalMappingIpv4 = hasLocalMappingIpv4;
+            _clearSelectedLocalCandidate = clearSelectedLocalCandidate;
             _connection = new RtcPeerConnection(new RtcPeerConfiguration
             {
                 IceServers = ["stun:stun.l.google.com:19302"],
@@ -261,9 +436,19 @@ internal sealed class OnlineGameIceSession : IDisposable
             _connection.OnIceStateChange += (_, state) =>
             {
                 if (state.ToString() is "RTC_ICE_CONNECTED" or "RTC_ICE_COMPLETED")
+                {
                     _status($"Direct ICE connection established with {_remoteName}.");
+                    if (TryCaptureSelectedLocalCandidate())
+                        _status(Volatile.Read(ref _localMappingIpv4State) == 1
+                            ? $"ICE selected the local IPv4 interface for {_remoteName}."
+                            : $"Using a gathered local IPv4 interface for {_remoteName}; the selected ICE route did not provide an IPv4 base address.");
+                }
                 else if (state.ToString() is "RTC_ICE_FAILED" or "RTC_ICE_DISCONNECTED")
+                {
+                    Interlocked.Exchange(ref _localMappingIpv4State, 0);
+                    _clearSelectedLocalCandidate(_remoteUserId);
                     _status($"Direct ICE connection to {_remoteName} failed ({state}); gameplay cannot continue without a direct path.");
+                }
             };
             _connection.OnConnectionStateChange += (_, state) =>
             {
@@ -277,6 +462,8 @@ internal sealed class OnlineGameIceSession : IDisposable
                 { Label = UdpChannelLabel, Unordered = true, Unreliable = true, MaxRetransmits = 0 }));
                 AttachChannel(_connection.CreateDataChannel(new RtcCreateDataChannelArgs
                 { Label = TcpChannelLabel, Unordered = false, Unreliable = false }));
+                AttachChannel(_connection.CreateDataChannel(new RtcCreateDataChannelArgs
+                { Label = ControlChannelLabel, Unordered = false, Unreliable = false }));
             }
         }
 
@@ -303,9 +490,31 @@ internal sealed class OnlineGameIceSession : IDisposable
         private void CandidateReady(IRtcPeerConnection _, RtcCandidate candidate)
         {
             if (string.IsNullOrWhiteSpace(candidate.Content)) return;
+            _localCandidate(_remoteUserId, candidate.Content, false);
             var payload = JsonSerializer.Serialize(new CandidatePayload(candidate.Content,
                 string.IsNullOrWhiteSpace(candidate.Mid) ? "0" : candidate.Mid), OnlineRelayClient.JsonOptions);
             if (!_signals.Writer.TryWrite(new("candidate", payload))) _status($"ICE signaling queue is full for {_remoteName}.");
+        }
+
+        public bool TryCaptureSelectedLocalCandidate()
+        {
+            try
+            {
+                if (_connection.TryGetSelectedCandidatePair(out var pair) && !string.IsNullOrWhiteSpace(pair?.LocalCandidate) &&
+                    _localCandidate(_remoteUserId, pair.LocalCandidate, true))
+                {
+                    Interlocked.Exchange(ref _localMappingIpv4State, 1);
+                    return true;
+                }
+                if (!_hasLocalMappingIpv4(_remoteUserId)) return false;
+                Interlocked.Exchange(ref _localMappingIpv4State, 2);
+                return true;
+            }
+            catch (Exception error)
+            {
+                _status($"Could not read the selected ICE route for {_remoteName}: {error.Message}");
+                return false;
+            }
         }
 
         private async Task SendSignalsAsync()
@@ -357,7 +566,7 @@ internal sealed class OnlineGameIceSession : IDisposable
 
         private void AttachChannel(IRtcDataChannel channel)
         {
-            if (channel.Label is not (UdpChannelLabel or TcpChannelLabel)) { channel.Dispose(); return; }
+            if (channel.Label is not (UdpChannelLabel or TcpChannelLabel or ControlChannelLabel)) { channel.Dispose(); return; }
             channel.OnOpen += opened => _status($"Direct {opened.Label} data channel to {_remoteName} is ready.");
             channel.OnError += (_, error) => _status($"Direct data channel to {_remoteName} failed: {error}");
             if (channel.Label == UdpChannelLabel)
@@ -365,10 +574,21 @@ internal sealed class OnlineGameIceSession : IDisposable
                 channel.OnBinaryReceivedSafe += (_, data) => _udpReceived(_remoteUserId, data.Data.ToArray());
                 lock (_channelLock) { _udp?.Dispose(); _udp = channel; }
             }
-            else
+            else if (channel.Label == TcpChannelLabel)
             {
                 channel.OnBinaryReceivedSafe += (_, data) => _tcpReceived(_remoteUserId, data.Data.ToArray());
                 lock (_channelLock) { _tcp?.Dispose(); _tcp = channel; }
+            }
+            else
+            {
+                channel.OnBinaryReceivedSafe += (_, data) =>
+                {
+                    if (data.Data.Length is > 0 and <= MaximumControlFrameBytes)
+                        _controlReceived(_remoteUserId, data.Data.ToArray());
+                    else
+                        _status($"Ignored an oversized session-control frame from {_remoteName}.");
+                };
+                lock (_channelLock) { _control?.Dispose(); _control = channel; }
             }
         }
 
@@ -392,12 +612,22 @@ internal sealed class OnlineGameIceSession : IDisposable
             }
         }
 
+        public bool SendControl(ReadOnlySpan<byte> payload)
+        {
+            lock (_channelLock)
+            {
+                if (_control?.IsOpen != true || payload.Length is < 1 or > MaximumControlFrameBytes) return false;
+                try { _control.Send(payload); return true; }
+                catch (Exception error) { _status($"Could not send a session-control message to {_remoteName}: {error.Message}"); return false; }
+            }
+        }
+
         public void Dispose()
         {
             if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
             _signals.Writer.TryComplete();
             _lifetime.Cancel();
-            lock (_channelLock) { _udp?.Dispose(); _tcp?.Dispose(); _udp = null; _tcp = null; }
+            lock (_channelLock) { _udp?.Dispose(); _tcp?.Dispose(); _control?.Dispose(); _udp = null; _tcp = null; _control = null; }
             try { _connection.Dispose(); } catch (Exception) { }
             _lifetime.Dispose();
         }

@@ -8,7 +8,6 @@ internal sealed class FriendsDialog : Form
     private sealed record FriendRow(OnlineProfile Profile, string Relationship);
     private readonly OnlineRelayClient _client;
     private readonly Func<bool> _canDisconnect;
-    private readonly Func<Task>? _launchGameplay;
     private readonly Func<string?> _gameTrafficStatus;
     private readonly CancellationTokenSource _lifetime = new();
     private readonly ToolTip _tips = new() { AutoPopDelay = 15000 };
@@ -37,12 +36,11 @@ internal sealed class FriendsDialog : Form
     private bool _connecting;
 
     public FriendsDialog(OnlineRelayClient client, OnlinePreferences preferences,
-        Func<bool> canDisconnect, Func<Task>? launchGameplay = null,
-        Func<string?>? gameTrafficStatus = null)
+        Func<bool> canDisconnect, Func<string?>? gameTrafficStatus = null,
+        Func<Action<string>, Task>? prepareGameNetwork = null)
     {
         _client = client;
         _canDisconnect = canDisconnect;
-        _launchGameplay = launchGameplay;
         _gameTrafficStatus = gameTrafficStatus ?? (() => null);
         Text = "Online friends and matchmaking";
         ClientSize = new Size(900, 720);
@@ -188,7 +186,7 @@ internal sealed class FriendsDialog : Form
         var friendsPage = CreateSectionPage("Friends");
         friendsPage.Controls.Add(_scrollContent);
         var matchmakingPage = CreateSectionPage("Matchmaking");
-        _matchmakingPanel = new OnlineGamePanel(_client, _launchGameplay, _gameTrafficStatus);
+        _matchmakingPanel = new OnlineGamePanel(_client, _gameTrafficStatus, prepareGameNetwork);
         matchmakingPage.Controls.Add(_matchmakingPanel);
         var sectionContent = new MedievalBufferedPanel
         {
@@ -402,6 +400,8 @@ internal sealed class FriendsDialog : Form
     }
 
     private void UpdateDefaultAction() => AcceptButton = _requestCode.ContainsFocus ? _request : _client.IsConnected || _client.IsConnecting ? null : _connect;
+
+    internal void UpdateMatchmakingStatus(string message) => _matchmakingPanel.SetExternalStatus(message);
 
     private void SetStatus(string message, bool error = false)
     {

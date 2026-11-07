@@ -8,7 +8,7 @@ if not defined VSROOT exit /b 2
 call "%VSROOT%\VC\Auxiliary\Build\vcvars32.bat"
 if errorlevel 1 exit /b %errorlevel%
 if not exist build mkdir build
-cl /nologo /std:c++17 /O2 /W4 /WX /EHsc /MT /GS /LD /Fo:build\ /Fe:build\EDMWRelayBridge.dll EDMWRelayBridge.cpp /link /MACHINE:X86 /DYNAMICBASE /NXCOMPAT /Brepro ws2_32.lib iphlpapi.lib
+cl /nologo /std:c++17 /O2 /W4 /WX /EHsc /MT /GS /LD /Fo:build\ /Fe:build\EDMWRelayBridge.dll EDMWRelayBridge.cpp /link /MACHINE:X86 /DYNAMICBASE /NXCOMPAT /Brepro ws2_32.lib iphlpapi.lib user32.lib
 if errorlevel 1 exit /b %errorlevel%
 cl /nologo /std:c++17 /O2 /W4 /WX /EHsc /MT /GS /Fo:build\RelayLauncher.obj /Fe:build\EDMWRelayLauncher.exe RelayLauncher.cpp /link /MACHINE:X86 /DYNAMICBASE /NXCOMPAT /Brepro bcrypt.lib
 exit /b %errorlevel%

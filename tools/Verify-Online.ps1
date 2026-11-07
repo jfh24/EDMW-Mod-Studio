@@ -37,15 +37,20 @@ try {
     $env:RELAY_DATA_DIR = $taskOldData
     $env:ONLINE_VERIFICATION_CONTROL_DIR = $taskOldControl
     $taskReady = $false
+    $taskHealthError = 'The relay did not answer before the health-check deadline.'
     for ($taskAttempt = 0; $taskAttempt -lt 40; $taskAttempt++) {
         if ($taskServer.HasExited) { throw 'The test relay exited before becoming healthy.' }
         try {
-            $taskResponse = Invoke-WebRequest -Uri ($taskEndpoint + '/health') -TimeoutSec 1
+            $taskResponse = Invoke-WebRequest -UseBasicParsing -Uri ($taskEndpoint + '/health') -TimeoutSec 1
             if ($taskResponse.StatusCode -eq 200) { $taskReady = $true; break }
         }
-        catch { Start-Sleep -Milliseconds 100 }
+        catch { $taskHealthError = $_.Exception.Message; Start-Sleep -Milliseconds 100 }
     }
-    if (!$taskReady) { throw 'The test relay did not become healthy.' }
+    if (!$taskReady) {
+        $taskRelayOutput = Get-Content -LiteralPath (Join-Path $taskChecks 'relay.log') -Raw -ErrorAction SilentlyContinue
+        $taskRelayError = Get-Content -LiteralPath (Join-Path $taskChecks 'relay-errors.log') -Raw -ErrorAction SilentlyContinue
+        throw ('The test relay did not become healthy: ' + $taskHealthError + ' Relay output: ' + $taskRelayOutput + ' ' + $taskRelayError)
+    }
     $taskAssembly = Join-Path $taskRoot 'EDMWMapDesigner\bin\Release\net9.0-windows\EDMW Mod Studio.dll'
     $taskClient = Start-Process -FilePath $taskDotnet `
         -ArgumentList ('"' + $taskAssembly + '" --verify-online ' + $taskEndpoint + ' "' + $taskChecks + '"') `

@@ -137,7 +137,7 @@ export async function createRelay(options = {}) {
     return {
       roomId: room.id, name: room.name, host: profile(room.hostId), visibility: room.visibility,
       maxPlayers: room.maxPlayers, members: [...room.members.entries()].map(([id, member]) => ({ profile: profile(id), relayPort: member.relayPort })),
-      relayPort: member?.relayPort ?? 0,
+      relayPort: member?.relayPort ?? 0, gameHostUserId: room.gameHostId ?? null,
     };
   }
   function gameRoomList(userId) {
@@ -162,9 +162,11 @@ export async function createRelay(options = {}) {
     } else {
       room.members.delete(userId);
       userGameSessions.delete(userId);
+      if (room.gameHostId === userId) room.gameHostId = null;
       send(connections.get(userId), 'game.ended', { roomId: room.id, message: 'You left the game room.' });
       for (const id of room.members.keys()) send(connections.get(id), 'game.members', {
         roomId: room.id, members: [...room.members.entries()].map(([memberId, member]) => ({ profile: profile(memberId), relayPort: member.relayPort })),
+        gameHostUserId: room.gameHostId ?? null,
       });
     }
     notifyGameRooms();
@@ -497,7 +499,7 @@ export async function createRelay(options = {}) {
       leaveGameRoom(userId);
       const room = {
         id: randomUUID(), hostId: userId, name: gameName, visibility: message.visibility,
-        maxPlayers: message.maxPlayers, members: new Map(), invites: new Set(),
+        maxPlayers: message.maxPlayers, members: new Map(), invites: new Set(), gameHostId: userId,
       };
       room.members.set(userId, { relayPort: 40000 });
       gameSessions.set(room.id, room); userGameSessions.set(userId, room.id);
@@ -516,6 +518,19 @@ export async function createRelay(options = {}) {
       notifyGameRooms();
       return { roomId: room.id };
     }
+    if (type === 'game.host.set') {
+      const room = gameSessions.get(userGameSessions.get(userId));
+      const gameHostId = message.userId;
+      check(room && room.hostId === userId && room.members.has(userId), 'Only the matchmaking room host can designate the EDMW game host.', 403);
+      check(validId(gameHostId) && room.members.has(gameHostId), 'Choose a member of this game room as the EDMW host.');
+      room.gameHostId = gameHostId;
+      const members = [...room.members.entries()].map(([memberId, member]) => ({ profile: profile(memberId), relayPort: member.relayPort }));
+      for (const id of room.members.keys()) send(connections.get(id), 'game.members', {
+        roomId: room.id, members, gameHostUserId: room.gameHostId,
+      });
+      notifyGameRooms();
+      return gameRoomSnapshot(room, userId);
+    }
     if (type === 'game.join') {
       check(validId(message.roomId), 'Invalid game room ID.');
       const room = gameSessions.get(message.roomId);
@@ -530,6 +545,7 @@ export async function createRelay(options = {}) {
       room.members.set(userId, { relayPort }); userGameSessions.set(userId, room.id);
       for (const id of room.members.keys()) send(connections.get(id), 'game.members', {
         roomId: room.id, members: [...room.members.entries()].map(([memberId, member]) => ({ profile: profile(memberId), relayPort: member.relayPort })),
+        gameHostUserId: room.gameHostId ?? null,
       });
       notifyGameRooms();
       return gameRoomSnapshot(room, userId);

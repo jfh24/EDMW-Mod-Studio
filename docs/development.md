@@ -17,7 +17,7 @@ The production build follows these dependencies:
 1. `native/EDMWAnchored/build-native.cmd` discovers Visual Studio through `vswhere` and initializes the x86 compiler environment.
 2. It compiles `ResourceAlignment.cpp`, builds and runs `ResourceAlignmentTests.exe`, then produces `EDMWAnchored.dll`. MSVC warnings are treated as errors.
 3. `native/EDMWEffects/build-native.cmd` builds and runs the native effect regression suites, then produces `EDMWEffects.dll` and `EDMWEffectsLauncher.exe` with the x86 compiler and warnings treated as errors. The installation-rule test declares `asInvoker` to avoid Windows installer detection requesting elevation during unattended builds.
-4. `native/EDMWRelayBridge/build-native.cmd` compiles the x86 provider hook and guarded launcher; run it before building Mod Studio so both native files can be embedded.
+4. `native/EDMWRelayBridge/build-native.cmd` compiles the x86 provider hook and guarded launcher. The full `build.ps1` invokes it before publishing Mod Studio so both native files are embedded from the current source.
 5. The map and civilization installer projects are published as self-contained, single-file Windows executables. Their generated templates are copied into the editor's assets for embedding.
 6. The editor embeds the native generator, effect runtime, game relay hook and launcher, installer templates, and UI artwork.
 7. The editor is published for `win-x64` and the deliverable is copied to `dist/EDMW Mod Studio.exe`.

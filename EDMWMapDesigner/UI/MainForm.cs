@@ -3434,6 +3434,7 @@ public sealed partial class MainForm : Form
         _mapLanTransfer?.Dispose();
         _collaboration.Dispose();
         _onlineLifetime.Cancel();
+        _online.GameIceSession.ControlFrameReceived -= OnlineGameControlFrameReceived;
         StopOnlineGameTrafficBridge();
         _onlineCollaboration.Dispose();
         _online.Dispose();

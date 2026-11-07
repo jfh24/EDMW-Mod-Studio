@@ -156,6 +156,19 @@ public sealed partial class MapLanPackage
         return root;
     }
 
+    /// <summary>Checks whether the exact reviewed map bytes are already installed without writing to the game folder.</summary>
+    public bool IsInstalledExactly(string gamePath)
+    {
+        var root = ValidateDestination(gamePath);
+        foreach (var file in _files)
+        {
+            var target = ResolveTarget(root, file.RelativePath);
+            if (!File.Exists(target) || !ReadBounded(target, MaximumEntryBytes).AsSpan().SequenceEqual(file.Bytes))
+                return false;
+        }
+        return true;
+    }
+
     /// <summary>Installs reviewed data directly. Received executable installers are never run.</summary>
     public string Install(string gamePath) => InstallCore(gamePath, null);
 
