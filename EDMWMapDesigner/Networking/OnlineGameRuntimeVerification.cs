@@ -213,8 +213,8 @@ internal static class OnlineGameRuntimeVerification
         try
         {
             await Task.WhenAll(
-                host.GameIceSession.WaitForPeersReadyAsync([playerId], TimeSpan.FromSeconds(60)),
-                player.GameIceSession.WaitForPeersReadyAsync([hostId], TimeSpan.FromSeconds(60))).ConfigureAwait(true);
+                host.GameIceSession.WaitForGameNetworkReadyAsync([playerId], TimeSpan.FromSeconds(60)),
+                player.GameIceSession.WaitForGameNetworkReadyAsync([hostId], TimeSpan.FromSeconds(60))).ConfigureAwait(true);
             var hostSelectedLocalIp = host.GameIceSession.PreferredLocalIpv4
                 ?? throw new InvalidOperationException("The host ICE connection has no local IPv4 interface for game network mapping.");
             var playerSelectedLocalIp = player.GameIceSession.PreferredLocalIpv4
@@ -222,15 +222,15 @@ internal static class OnlineGameRuntimeVerification
             Console.WriteLine($"ICE ROUTE: local IPv4 mapping interfaces host={hostSelectedLocalIp}; player={playerSelectedLocalIp}.");
 
             if (!host.GameIceSession.SendDatagram(playerMember.RelayPort, 31001, 31002, hostToPlayerPayload))
-                throw new IOException("The host could not send a UDP probe over its direct ICE data channel to the player's virtual route.");
+                throw new IOException("The host could not send a UDP probe over ICE or the WSS relay to the player's virtual route.");
             await WaitForProbeAsync(hostToPlayer.Task, "host-to-player unicast", TimeSpan.FromSeconds(10)).ConfigureAwait(true);
 
             if (!player.GameIceSession.SendDatagram(hostMember.RelayPort, 32001, 32002, playerToHostPayload))
-                throw new IOException("The player could not send a UDP probe over its direct ICE data channel to the host's virtual route.");
+                throw new IOException("The player could not send a UDP probe over ICE or the WSS relay to the host's virtual route.");
             await WaitForProbeAsync(playerToHost.Task, "player-to-host unicast", TimeSpan.FromSeconds(10)).ConfigureAwait(true);
 
             if (!host.GameIceSession.SendDatagram(0, 33001, 33002, roomBroadcastPayload))
-                throw new IOException("The host could not send a UDP room-broadcast probe over its direct ICE data channel.");
+                throw new IOException("The host could not send a UDP room-broadcast probe over ICE or the WSS relay.");
             await WaitForProbeAsync(roomBroadcast.Task, "room broadcast", TimeSpan.FromSeconds(10)).ConfigureAwait(true);
         }
         finally
@@ -239,7 +239,7 @@ internal static class OnlineGameRuntimeVerification
             host.GameIceSession.DatagramReceived -= captureAtHost;
         }
 
-        Console.WriteLine("ICE PASS: directed UDP probes and a room-broadcast probe reached the expected member over direct ICE data channels.");
+        Console.WriteLine("GAME NETWORK PASS: directed UDP probes and a room-broadcast probe reached the expected member over ICE or the WSS relay.");
     }
 
     private static async Task<T> WaitForProbeAsync<T>(Task<T> probe, string direction, TimeSpan timeout)

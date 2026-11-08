@@ -146,6 +146,67 @@ export async function createRelay(options = {}) {
       .filter(room => room.members.has(userId) || room.invites.has(userId) || room.members.size + room.invites.size < room.maxPlayers)
       .map(room => gameRoomSnapshot(room, userId));
   }
+  function relayGameFrame(socket, raw) {
+    const reject = message => { socket.close(1008, message); return; };
+    const frame = Buffer.isBuffer(raw) ? raw : Buffer.from(raw);
+    if (!socket.userId || connections.get(socket.userId) !== socket) return reject('Authenticate before sending gameplay.');
+    if (frame.length < 24 || frame.length > 16 * 1024 + 23 || frame.toString('ascii', 0, 4) !== 'EDMR')
+      return reject('Invalid gameplay relay frame.');
+
+    const type = frame[4];
+    const roomHex = frame.subarray(5, 21).toString('hex');
+    const roomId = `${roomHex.slice(0, 8)}-${roomHex.slice(8, 12)}-${roomHex.slice(12, 16)}-${roomHex.slice(16, 20)}-${roomHex.slice(20)}`;
+    const targetRelayPort = frame.readUInt16BE(21);
+    const payload = frame.subarray(23);
+    const room = gameSessions.get(roomId);
+    if (!room || userGameSessions.get(socket.userId) !== room.id || !room.members.has(socket.userId))
+      return reject('Gameplay relay frame is not for your current game room.');
+
+    if (type === 1) {
+      if (payload.length < 5 || payload.length > 4 + 1200 ||
+          payload.readUInt16BE(0) === 0 || payload.readUInt16BE(2) === 0 || targetRelayPort > 40007)
+        return reject('Invalid game UDP relay frame.');
+    } else if (type === 2) {
+      if (targetRelayPort < 40000 || targetRelayPort > 40007 || payload.length < 25 || payload.length > 25 + 1100 ||
+          payload.toString('ascii', 0, 4) !== 'EDWT' || payload.subarray(4, 20).every(value => value === 0) ||
+          payload.readUInt16BE(20) === 0 || payload.readUInt16BE(22) === 0 ||
+          payload[24] < 1 || payload[24] > 5 ||
+          (payload[24] === 3 ? payload.length === 25 : payload.length !== 25))
+        return reject('Invalid game TCP relay frame.');
+    } else if (type === 3) {
+      if (targetRelayPort < 40000 || targetRelayPort > 40007 || payload.length < 1 || payload.length > 16 * 1024)
+        return reject('Invalid game control relay frame.');
+    } else return reject('Unknown gameplay relay frame type.');
+
+    const rate = socket.gameRelayTraffic ??= { start: now(), count: 0, bytes: 0 };
+    if (now() - rate.start >= 1000) { rate.start = now(); rate.count = 0; rate.bytes = 0; }
+    rate.count++; rate.bytes += frame.length;
+    if (rate.count > 2048 || rate.bytes > 2 * MiB) return reject('Gameplay relay rate limit reached.');
+
+    let recipients;
+    if (targetRelayPort === 0 && type === 1) {
+      recipients = [...room.members.entries()].filter(([id]) => id !== socket.userId);
+    } else {
+      const target = [...room.members.entries()].find(([id, member]) => id !== socket.userId && member.relayPort === targetRelayPort);
+      if (!target) return reject('Gameplay relay destination is not a room member.');
+      recipients = [target];
+    }
+
+    const senderBytes = Buffer.from(socket.userId.replaceAll('-', ''), 'hex');
+    const roomBytes = Buffer.from(room.id.replaceAll('-', ''), 'hex');
+    const outgoing = Buffer.allocUnsafe(37 + payload.length);
+    outgoing.write('EDMR', 0, 4, 'ascii'); outgoing[4] = type;
+    roomBytes.copy(outgoing, 5); senderBytes.copy(outgoing, 21); payload.copy(outgoing, 37);
+    for (const [recipientId] of recipients) {
+      const recipient = connections.get(recipientId);
+      if (!recipient || recipient.readyState !== WebSocket.OPEN) continue;
+      if (recipient.bufferedAmount + outgoing.length > 2 * MiB) {
+        recipient.close(4008, 'Gameplay relay backpressure limit reached.');
+        continue;
+      }
+      recipient.send(outgoing, { binary: true }, error => { if (error) recipient.terminate(); });
+    }
+  }
   function notifyGameRooms() {
     for (const [userId, socket] of connections) send(socket, 'game.rooms.changed', { rooms: gameRoomList(userId) });
   }
@@ -681,7 +742,7 @@ export async function createRelay(options = {}) {
     socket.on('error', () => {});
     socket.on('message', (raw, binary) => {
       if (binary) {
-        socket.close(1003, 'Gameplay uses direct ICE data channels.');
+        relayGameFrame(socket, raw);
         return;
       }
       if (socket.pendingBytes + raw.length > 32 * MiB || queuedMessageBytes + raw.length > 64 * MiB) {

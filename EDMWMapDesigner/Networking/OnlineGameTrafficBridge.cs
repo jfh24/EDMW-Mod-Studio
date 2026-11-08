@@ -11,7 +11,7 @@ using System.Threading.Channels;
 
 namespace EDMWMapDesigner.Networking;
 
-/// <summary>Connects the game's Winsock traffic to direct ICE data channels through a local pipe.</summary>
+/// <summary>Connects the game's Winsock traffic to peer ICE channels or the authenticated WSS relay through a local pipe.</summary>
 internal sealed class OnlineGameTrafficBridge : IAsyncDisposable
 {
     private const byte StreamOpen = 1;
@@ -77,9 +77,9 @@ internal sealed class OnlineGameTrafficBridge : IAsyncDisposable
     private string? _routeMappingStatus;
     private string? _globalAddressMappingStatus;
     private long _registeredGameSockets;
-    private long _packetsSentDirect;
+    private long _packetsSent;
     private long _broadcastPackets;
-    private long _packetsReceivedDirect;
+    private long _packetsReceived;
     private long _packetsInjectedToGame;
 
     [DllImport("user32.dll")]
@@ -115,6 +115,10 @@ internal sealed class OnlineGameTrafficBridge : IAsyncDisposable
             var room = _client.CurrentGameRoom;
             var peers = room?.Members.Length - 1 ?? 0;
             var ready = _client.GameIceSession.ReadyPeerCount;
+            var relaySent = _client.GameIceSession.RelayFramesQueued;
+            var relayReceived = _client.GameIceSession.RelayFramesReceived;
+            var relayState = relayReceived > 0 ? "WSS fallback receiving" : relaySent > 0 ? "WSS fallback queued" :
+                room is not null && _client.IsGameRelayAvailable(room.RoomId) ? "WSS fallback ready" : "WSS fallback unavailable";
             var local = room?.Members.FirstOrDefault(member => member.Profile.UserId == _client.User?.UserId);
             var virtualIp = local is null ? "IP pending" : OnlineGameAddress.VirtualIpv4(local.RelayPort);
             var adapterMapping = Volatile.Read(ref _adapterMappingStatus) switch
@@ -139,7 +143,7 @@ internal sealed class OnlineGameTrafficBridge : IAsyncDisposable
                 "incomplete" => "global IP Helper detours incomplete",
                 _ => "global IP Helper detours pending",
             };
-            return $"{state} · {globalMapping} · {adapterMapping} · {routeMapping} · IP {virtualIp} · ICE {ready}/{Math.Max(0, peers)} peers · UDP {Interlocked.Read(ref _registeredGameSockets)} · TX {Interlocked.Read(ref _packetsSentDirect)} (broadcast {Interlocked.Read(ref _broadcastPackets)}) · RX {Interlocked.Read(ref _packetsReceivedDirect)} · game {Interlocked.Read(ref _packetsInjectedToGame)}";
+            return $"{state} · {globalMapping} · {adapterMapping} · {routeMapping} · IP {virtualIp} · ICE {ready}/{Math.Max(0, peers)} peers · {relayState} queued/received {relaySent}/{relayReceived} frames · UDP {Interlocked.Read(ref _registeredGameSockets)} · TX {Interlocked.Read(ref _packetsSent)} (broadcast {Interlocked.Read(ref _broadcastPackets)}) · RX {Interlocked.Read(ref _packetsReceived)} · game {Interlocked.Read(ref _packetsInjectedToGame)}";
         }
     }
 
@@ -195,10 +199,10 @@ internal sealed class OnlineGameTrafficBridge : IAsyncDisposable
             .Select(member => member.Profile.UserId).Distinct().ToArray();
         if (peerIds.Length == 0)
             throw new InvalidOperationException("Join at least one other player before preparing the game network.");
-        await client.GameIceSession.WaitForPeersReadyAsync(peerIds, TimeSpan.FromSeconds(60), cancellationToken).ConfigureAwait(false);
+        await client.GameIceSession.WaitForGameNetworkReadyAsync(peerIds, TimeSpan.FromSeconds(60), cancellationToken).ConfigureAwait(false);
         var physicalIpv4Text = client.GameIceSession.PreferredLocalIpv4;
         if (!IPAddress.TryParse(physicalIpv4Text, out var physicalIpv4) || physicalIpv4.AddressFamily != AddressFamily.InterNetwork)
-            throw new InvalidOperationException("The selected ICE routes and gathered candidates did not expose a usable local IPv4 interface for GameRanger-style mapping.");
+            throw new InvalidOperationException("ICE candidates and the active Windows network adapter did not expose a usable local IPv4 address for game mapping.");
         var executable = Path.Combine(Path.GetFullPath(gameDirectory), "Empires_DMW.exe");
         if (!File.Exists(executable) || !File.Exists(Path.Combine(Path.GetDirectoryName(executable)!, "TCP Protocol.dll")))
             throw new FileNotFoundException("The selected game folder needs Empires_DMW.exe and TCP Protocol.dll.", executable);
@@ -286,7 +290,7 @@ internal sealed class OnlineGameTrafficBridge : IAsyncDisposable
                 bridge._streamDispatcherTask = bridge.DispatchGameStreamFramesAsync();
                 bridge._launcherMonitor = bridge.MonitorLauncherAsync();
                 var mappingStatus = await bridge._adapterMappingReady.Task.WaitAsync(TimeSpan.FromSeconds(15), timeout.Token).ConfigureAwait(false);
-                var iceStatus = client.GameIceSession.LatestStatus ?? "Negotiating direct ICE/STUN connections.";
+                var iceStatus = client.GameIceSession.LatestStatus ?? "Negotiating direct ICE/STUN; authenticated WSS is available as fallback.";
                 var processStatus = $"EDMW process {bridge._gameProcess.Id} launched.";
                 bridge.StatusChanged?.Invoke(bridge, $"{processStatus} {mappingStatus} {iceStatus}");
                 return bridge;
@@ -445,12 +449,12 @@ internal sealed class OnlineGameTrafficBridge : IAsyncDisposable
         var trace = Interlocked.Increment(ref _diagnosticDatagramTraces);
         if (!_client.GameIceSession.SendDatagram(targetRelayPort, sourcePort, targetPort, body.AsMemory(9, length)))
         {
-            if (trace <= 16) WriteTrafficDiagnostic($"game UDP relay rejected role={_launchRole} route={targetRelayPort} source={sourcePort} target={targetPort} bytes={length} ICEpeers={_client.GameIceSession.ReadyPeerCount}");
+            if (trace <= 16) WriteTrafficDiagnostic($"game UDP send failed role={_launchRole} route={targetRelayPort} source={sourcePort} target={targetPort} bytes={length} ICEpeers={_client.GameIceSession.ReadyPeerCount} WSSqueued={_client.GameIceSession.RelayFramesQueued}");
             return;
         }
-        Interlocked.Increment(ref _packetsSentDirect);
+        Interlocked.Increment(ref _packetsSent);
         if (targetRelayPort == 0) Interlocked.Increment(ref _broadcastPackets);
-        if (trace <= 16) WriteTrafficDiagnostic($"game UDP relayed role={_launchRole} route={targetRelayPort} source={sourcePort} target={targetPort} bytes={length}");
+        if (trace <= 16) WriteTrafficDiagnostic($"game UDP send accepted role={_launchRole} route={targetRelayPort} source={sourcePort} target={targetPort} bytes={length}");
     }
 
     private void RegisterGameSocket(byte[] body)
@@ -486,16 +490,16 @@ internal sealed class OnlineGameTrafficBridge : IAsyncDisposable
     private void GameTcpFrameReceived(object? sender, OnlineIceTcpFrame frame)
     {
         if (frame.RoomId != _client.CurrentGameRoom?.RoomId || Volatile.Read(ref _disposed) != 0) return;
-        if (!_incomingStreams.Writer.TryWrite(frame)) Abort("The direct TCP queue is full; gameplay was stopped to protect state.");
+        if (!_incomingStreams.Writer.TryWrite(frame)) Abort("The incoming TCP queue is full; gameplay was stopped to protect state.");
     }
 
     private void GameDatagramReceived(object? sender, OnlineIceDatagram packet)
     {
         if (packet.RoomId != _client.CurrentGameRoom?.RoomId || Volatile.Read(ref _disposed) != 0) return;
-        var trace = Interlocked.Increment(ref _packetsReceivedDirect);
+        var trace = Interlocked.Increment(ref _packetsReceived);
         if (trace <= 16)
-            WriteTrafficDiagnostic($"game UDP received over ICE role={_launchRole} from={packet.FromUserId:N} source={packet.SourcePort} target={packet.TargetPort} bytes={packet.Payload.Length} head={Convert.ToHexString(packet.Payload.AsSpan(0, Math.Min(packet.Payload.Length, 24)))}");
-        if (!_incoming.Writer.TryWrite(packet)) Abort("The local game bridge queue is full; direct gameplay was stopped to protect state.");
+            WriteTrafficDiagnostic($"game UDP received from={packet.FromUserId:N} role={_launchRole} source={packet.SourcePort} target={packet.TargetPort} bytes={packet.Payload.Length} head={Convert.ToHexString(packet.Payload.AsSpan(0, Math.Min(packet.Payload.Length, 24)))}");
+        if (!_incoming.Writer.TryWrite(packet)) Abort("The local game bridge queue is full; gameplay was stopped to protect state.");
     }
 
     private void IceStatusChanged(object? sender, string message)
@@ -540,9 +544,9 @@ internal sealed class OnlineGameTrafficBridge : IAsyncDisposable
             remoteUserId = remote.Profile.UserId;
             streamId = Guid.NewGuid();
             var stream = new GameTcpStream(streamId, remoteUserId, client, sourcePort, targetPort);
-            if (!_tcpStreams.TryAdd((remoteUserId, streamId), stream)) throw new InvalidOperationException("Could not register the direct TCP stream.");
+            if (!_tcpStreams.TryAdd((remoteUserId, streamId), stream)) throw new InvalidOperationException("Could not register the TCP stream.");
             if (!SendGameStreamFrame(stream, StreamOpen, ReadOnlyMemory<byte>.Empty))
-                throw new IOException("The direct TCP data channel to the selected player is not ready.");
+                throw new IOException("Could not send the TCP stream setup frame over ICE or WSS.");
             WriteTrafficDiagnostic($"TCP stream open sent role={_launchRole} remote={remote.Profile.DisplayName} stream={streamId:N}");
             if (!await stream.Accepted.Task.WaitAsync(TimeSpan.FromSeconds(15), _lifetime.Token).ConfigureAwait(false))
                 throw new IOException("The remote game rejected the TCP connection.");
@@ -559,7 +563,7 @@ internal sealed class OnlineGameTrafficBridge : IAsyncDisposable
                 CloseGameTcpStream(stream);
             }
             if (error is not SocketException and not IOException and not TimeoutException and not InvalidDataException)
-                Abort("The direct TCP stream stopped: " + error.Message);
+                Abort("The TCP stream stopped: " + error.Message);
         }
         finally
         {
@@ -617,7 +621,7 @@ internal sealed class OnlineGameTrafficBridge : IAsyncDisposable
             if (!_boundGameTcpAddresses.TryGetValue(targetPort, out var localAddress))
                 throw new SocketException((int)SocketError.ConnectionRefused);
             var remoteMember = _client.CurrentGameRoom?.Members.FirstOrDefault(member => member.Profile.UserId == remoteUserId)
-                ?? throw new IOException("The direct TCP peer left the game room.");
+                ?? throw new IOException("The TCP peer left the game room.");
             localClient = new TcpClient(AddressFamily.InterNetwork) { NoDelay = true };
             localClient.Client.Bind(new IPEndPoint(IPAddress.Loopback, 0));
             var localPort = checked((ushort)((IPEndPoint)localClient.Client.LocalEndPoint!).Port);
@@ -626,9 +630,9 @@ internal sealed class OnlineGameTrafficBridge : IAsyncDisposable
             await localClient.ConnectAsync(localAddress, targetPort, _lifetime.Token).ConfigureAwait(false);
             WriteTrafficDiagnostic($"TCP local game listener connected role={_launchRole} endpoint={localAddress}:{targetPort} stream={streamId:N}");
             stream = new GameTcpStream(streamId, remoteUserId, localClient, targetPort, sourcePort);
-            if (!_tcpStreams.TryAdd((remoteUserId, streamId), stream)) throw new InvalidDataException("The direct TCP stream identifier is already active.");
+            if (!_tcpStreams.TryAdd((remoteUserId, streamId), stream)) throw new InvalidDataException("The TCP stream identifier is already active.");
             if (!SendGameStreamFrame(stream, StreamAccepted, ReadOnlyMemory<byte>.Empty))
-                throw new IOException("The direct TCP data channel is not ready.");
+                throw new IOException("Could not send the TCP stream acceptance frame over ICE or WSS.");
             _ = PumpLocalTcpToPeerAsync(stream);
         }
         catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { localClient?.Dispose(); }
@@ -671,7 +675,7 @@ internal sealed class OnlineGameTrafficBridge : IAsyncDisposable
                 var count = await stream.Stream.ReadAsync(buffer, _lifetime.Token).ConfigureAwait(false);
                 if (count == 0) break;
                 if (!SendGameStreamFrame(stream, StreamData, buffer.AsMemory(0, count)))
-                    throw new IOException("The direct TCP data channel closed during gameplay.");
+                    throw new IOException("Could not send TCP gameplay over ICE or WSS.");
             }
         }
         catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
@@ -726,7 +730,7 @@ internal sealed class OnlineGameTrafficBridge : IAsyncDisposable
         }
         catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
         catch (IOException) when (_lifetime.IsCancellationRequested) { }
-        catch (Exception error) { Abort("Could not deliver direct gameplay to EDMW: " + error.Message); }
+        catch (Exception error) { Abort("Could not deliver gameplay to EDMW: " + error.Message); }
     }
 
     private async Task InjectLocalDatagramAsync(OnlineIceDatagram packet)

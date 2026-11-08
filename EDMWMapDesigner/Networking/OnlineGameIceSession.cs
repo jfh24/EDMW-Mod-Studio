@@ -2,6 +2,7 @@ using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Globalization;
 using System.Net;
+using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Text.Json;
 using System.Threading.Channels;
@@ -23,6 +24,11 @@ internal sealed class OnlineGameIceSession : IDisposable
     private const string ControlChannelLabel = "edmw-session-control";
     private const int UdpHeaderLength = 8;
     private const int TcpHeaderLength = 25;
+    private const int RelayOutboundHeaderLength = 23;
+    private const int RelayInboundHeaderLength = 37;
+    private const byte RelayUdp = 1;
+    private const byte RelayTcp = 2;
+    private const byte RelayControl = 3;
     private const int MaximumUdpPayload = OnlineRelayClient.MaximumGamePacketBytes;
     private const int MaximumTcpPayload = OnlineRelayClient.MaximumGameStreamChunkBytes;
     internal const int MaximumControlFrameBytes = 16 * 1024;
@@ -37,6 +43,11 @@ internal sealed class OnlineGameIceSession : IDisposable
     private readonly Task _roomWorker;
     private OnlineGameRoom? _room;
     private string? _latestStatus;
+    private long _relayFramesSent;
+    private long _relayFramesReceived;
+    private long _directFramesSent;
+    private int _relayFallbackReported;
+    private int _relayQueueFailureReported;
     private int _disposed;
 
     public event EventHandler<OnlineIceDatagram>? DatagramReceived;
@@ -44,6 +55,9 @@ internal sealed class OnlineGameIceSession : IDisposable
     public event EventHandler<OnlineIceControlFrame>? ControlFrameReceived;
     public event EventHandler<string>? StatusChanged;
     public string? LatestStatus => Volatile.Read(ref _latestStatus);
+    public long RelayFramesQueued => Interlocked.Read(ref _relayFramesSent);
+    public long RelayFramesReceived => Interlocked.Read(ref _relayFramesReceived);
+    public long DirectFramesSent => Interlocked.Read(ref _directFramesSent);
     public string? PreferredLocalIpv4
     {
         get
@@ -53,7 +67,8 @@ internal sealed class OnlineGameIceSession : IDisposable
                 var room = Volatile.Read(ref _room);
                 var localId = _client.User?.UserId;
                 var hostId = room?.GameHostUserId ?? room?.Host.UserId;
-                return SelectPreferredLocalIpv4(localId, hostId, _selectedLocalIpv4ByPeer, _fallbackLocalIpv4ByPeer);
+                return SelectPreferredLocalIpv4(localId, hostId, _selectedLocalIpv4ByPeer, _fallbackLocalIpv4ByPeer)
+                    ?? FindDefaultRouteLocalIpv4();
             }
         }
     }
@@ -64,6 +79,7 @@ internal sealed class OnlineGameIceSession : IDisposable
         _client = client;
         _client.GameRoomChanged += OnGameRoomChanged;
         _client.GameSignalReceived += OnGameSignalReceived;
+        _client.GameRelayFrameReceived += OnGameRelayFrameReceived;
         _roomWorker = RunRoomUpdatesAsync();
         if (client.CurrentGameRoom is { } room) _roomUpdates.Writer.TryWrite(room);
     }
@@ -74,6 +90,39 @@ internal sealed class OnlineGameIceSession : IDisposable
     {
         if (Volatile.Read(ref _disposed) != 0) return;
         _ = ApplySignalAsync(signal);
+    }
+
+    private void OnGameRelayFrameReceived(object? sender, byte[] frame)
+    {
+        if (Volatile.Read(ref _disposed) != 0 || frame.Length is < RelayInboundHeaderLength + 1 or > OnlineRelayClient.MaximumGameRelayEnvelopeBytes ||
+            !frame.AsSpan(0, 4).SequenceEqual("EDMR"u8)) return;
+        var roomId = new Guid(frame.AsSpan(5, 16), bigEndian: true);
+        var senderId = new Guid(frame.AsSpan(21, 16), bigEndian: true);
+        var room = Volatile.Read(ref _room);
+        if (room is null || room.RoomId != roomId || room.RoomId != _client.CurrentGameRoom?.RoomId ||
+            senderId == Guid.Empty || senderId == _client.User?.UserId ||
+            !room.Members.Any(member => member.Profile.UserId == senderId)) return;
+
+        var payload = frame.AsSpan(RelayInboundHeaderLength);
+        Interlocked.Increment(ref _relayFramesReceived);
+        ReportRelayFallback();
+        switch (frame[4])
+        {
+            case RelayUdp:
+                if (payload.Length is < 5 or > 4 + MaximumUdpPayload) return;
+                var datagram = new byte[UdpHeaderLength + payload.Length - 4];
+                "EDGU"u8.CopyTo(datagram);
+                payload.CopyTo(datagram.AsSpan(UdpHeaderLength - 4));
+                HandleUdpFrame(senderId, datagram);
+                break;
+            case RelayTcp:
+                HandleTcpFrame(senderId, payload.ToArray());
+                break;
+            case RelayControl:
+                if (payload.Length is > 0 and <= MaximumControlFrameBytes)
+                    HandleControlFrame(senderId, payload.ToArray());
+                break;
+        }
     }
 
     private async Task RunRoomUpdatesAsync()
@@ -184,7 +233,8 @@ internal sealed class OnlineGameIceSession : IDisposable
 
     public bool SendDatagram(int targetRelayPort, int sourcePort, int targetPort, ReadOnlyMemory<byte> payload)
     {
-        if (payload.Length is < 1 or > MaximumUdpPayload || sourcePort is < 1 or > 65535 || targetPort is < 1 or > 65535)
+        if (payload.Length is < 1 or > MaximumUdpPayload || sourcePort is < 1 or > 65535 || targetPort is < 1 or > 65535 ||
+            targetRelayPort != 0 && (targetRelayPort is < 40000 or > 40007))
             return false;
         var room = Volatile.Read(ref _room);
         if (room is null) return false;
@@ -194,27 +244,137 @@ internal sealed class OnlineGameIceSession : IDisposable
         var sent = false;
         foreach (var member in members)
         {
-            if (!_peers.TryGetValue(member.Profile.UserId, out var peer)) continue;
             var frame = new byte[UdpHeaderLength + payload.Length];
             "EDGU"u8.CopyTo(frame);
             BinaryPrimitives.WriteUInt16BigEndian(frame.AsSpan(4, 2), checked((ushort)sourcePort));
             BinaryPrimitives.WriteUInt16BigEndian(frame.AsSpan(6, 2), checked((ushort)targetPort));
             payload.CopyTo(frame.AsMemory(UdpHeaderLength));
-            sent |= peer.SendUdp(frame);
+            if (_peers.TryGetValue(member.Profile.UserId, out var peer) && peer.SendUdp(frame))
+            {
+                Interlocked.Increment(ref _directFramesSent);
+                sent = true;
+            }
+            else
+            {
+                sent |= SendDatagramViaRelay(room, member, sourcePort, targetPort, payload);
+            }
         }
         return sent;
     }
 
-    public bool SendTcpFrame(Guid peerUserId, ReadOnlySpan<byte> frame) =>
-        _peers.TryGetValue(peerUserId, out var peer) && peer.SendTcp(frame);
+    internal bool SendDatagramViaRelay(int targetRelayPort, int sourcePort, int targetPort, ReadOnlyMemory<byte> payload)
+    {
+        if (payload.Length is < 1 or > MaximumUdpPayload || sourcePort is < 1 or > 65535 || targetPort is < 1 or > 65535 ||
+            targetRelayPort != 0 && (targetRelayPort is < 40000 or > 40007)) return false;
+        var room = Volatile.Read(ref _room);
+        if (room is null) return false;
+        var members = targetRelayPort == 0
+            ? room.Members.Where(member => member.Profile.UserId != _client.User?.UserId)
+            : room.Members.Where(member => member.RelayPort == targetRelayPort && member.Profile.UserId != _client.User?.UserId);
+        var sent = false;
+        foreach (var member in members) sent |= SendDatagramViaRelay(room, member, sourcePort, targetPort, payload);
+        return sent;
+    }
 
-    public bool SendControlFrame(Guid peerUserId, ReadOnlySpan<byte> frame) =>
-        frame.Length is > 0 and <= MaximumControlFrameBytes &&
-        _peers.TryGetValue(peerUserId, out var peer) && peer.SendControl(frame);
+    private bool SendDatagramViaRelay(OnlineGameRoom room, OnlineGameMember member, int sourcePort, int targetPort,
+        ReadOnlyMemory<byte> payload)
+    {
+        var relayPayload = new byte[4 + payload.Length];
+        BinaryPrimitives.WriteUInt16BigEndian(relayPayload.AsSpan(0, 2), checked((ushort)sourcePort));
+        BinaryPrimitives.WriteUInt16BigEndian(relayPayload.AsSpan(2, 2), checked((ushort)targetPort));
+        payload.CopyTo(relayPayload.AsMemory(4));
+        return SendRelayEnvelope(room, RelayUdp, member.RelayPort, relayPayload);
+    }
+
+    public bool SendTcpFrame(Guid peerUserId, ReadOnlySpan<byte> frame)
+    {
+        if (!IsValidTcpFrame(frame)) return false;
+        var room = Volatile.Read(ref _room);
+        var member = room?.Members.FirstOrDefault(entry => entry.Profile.UserId == peerUserId);
+        if (room is null || member is null || peerUserId == _client.User?.UserId) return false;
+        if (_peers.TryGetValue(peerUserId, out var peer) && peer.SendTcp(frame))
+        {
+            Interlocked.Increment(ref _directFramesSent);
+            return true;
+        }
+        return SendTcpFrameViaRelay(room, member, frame);
+    }
+
+    internal bool SendTcpFrameViaRelay(Guid peerUserId, ReadOnlySpan<byte> frame)
+    {
+        if (!IsValidTcpFrame(frame)) return false;
+        var room = Volatile.Read(ref _room);
+        var member = room?.Members.FirstOrDefault(entry => entry.Profile.UserId == peerUserId);
+        return room is not null && member is not null && peerUserId != _client.User?.UserId &&
+            SendTcpFrameViaRelay(room, member, frame);
+    }
+
+    private bool SendTcpFrameViaRelay(OnlineGameRoom room, OnlineGameMember member, ReadOnlySpan<byte> frame) =>
+        SendRelayEnvelope(room, RelayTcp, member.RelayPort, frame);
+
+    public bool SendControlFrame(Guid peerUserId, ReadOnlySpan<byte> frame)
+    {
+        if (frame.Length is < 1 or > MaximumControlFrameBytes) return false;
+        if (_peers.TryGetValue(peerUserId, out var peer) && peer.SendControl(frame))
+        {
+            Interlocked.Increment(ref _directFramesSent);
+            return true;
+        }
+        return SendControlFrameViaRelay(peerUserId, frame);
+    }
+
+    internal bool SendControlFrameViaRelay(Guid peerUserId, ReadOnlySpan<byte> frame)
+    {
+        if (frame.Length is < 1 or > MaximumControlFrameBytes) return false;
+        var room = Volatile.Read(ref _room);
+        var member = room?.Members.FirstOrDefault(entry => entry.Profile.UserId == peerUserId);
+        return room is not null && member is not null && peerUserId != _client.User?.UserId &&
+            SendRelayEnvelope(room, RelayControl, member.RelayPort, frame);
+    }
+
+    private bool SendRelayEnvelope(OnlineGameRoom room, byte type, int targetRelayPort, ReadOnlySpan<byte> payload)
+    {
+        if (payload.Length is < 1 || payload.Length + RelayOutboundHeaderLength > OnlineRelayClient.MaximumGameRelayEnvelopeBytes ||
+            targetRelayPort is < 40000 or > 40007) return false;
+        var frame = new byte[RelayOutboundHeaderLength + payload.Length];
+        "EDMR"u8.CopyTo(frame);
+        frame[4] = type;
+        room.RoomId.TryWriteBytes(frame.AsSpan(5, 16), bigEndian: true, out _);
+        BinaryPrimitives.WriteUInt16BigEndian(frame.AsSpan(21, 2), checked((ushort)targetRelayPort));
+        payload.CopyTo(frame.AsSpan(RelayOutboundHeaderLength));
+        if (!_client.TrySendGameRelayFrame(frame))
+        {
+            if (Interlocked.Exchange(ref _relayQueueFailureReported, 1) == 0)
+                ReportStatus("Could not queue gameplay on the secure WebSocket relay. Check that both players remain connected to the matchmaking relay.");
+            return false;
+        }
+        Interlocked.Exchange(ref _relayQueueFailureReported, 0);
+        Interlocked.Increment(ref _relayFramesSent);
+        ReportRelayFallback();
+        return true;
+    }
+
+    private void ReportRelayFallback()
+    {
+        if (Interlocked.Exchange(ref _relayFallbackReported, 1) == 0)
+            ReportStatus("Direct ICE is unavailable for some traffic; gameplay is using the secure WebSocket relay fallback.");
+    }
+
+    private static bool IsValidTcpFrame(ReadOnlySpan<byte> frame)
+    {
+        if (frame.Length is < TcpHeaderLength or > TcpHeaderLength + MaximumTcpPayload ||
+            !frame[..4].SequenceEqual("EDWT"u8)) return false;
+        var sourcePort = BinaryPrimitives.ReadUInt16BigEndian(frame.Slice(20, 2));
+        var targetPort = BinaryPrimitives.ReadUInt16BigEndian(frame.Slice(22, 2));
+        var type = frame[24];
+        var payloadLength = frame.Length - TcpHeaderLength;
+        return sourcePort != 0 && targetPort != 0 && type is >= 1 and <= 5 &&
+            (type == 3 ? payloadLength is >= 1 and <= MaximumTcpPayload : payloadLength == 0);
+    }
 
     public bool IsPeerReady(Guid peerUserId) => _peers.TryGetValue(peerUserId, out var peer) && peer.IsReady;
 
-    public async Task WaitForPeersReadyAsync(IEnumerable<Guid> peerUserIds, TimeSpan timeout,
+    public async Task WaitForGameNetworkReadyAsync(IEnumerable<Guid> peerUserIds, TimeSpan timeout,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(peerUserIds);
@@ -223,20 +383,22 @@ internal sealed class OnlineGameIceSession : IDisposable
         if (peers.Any(id => id == Guid.Empty)) throw new ArgumentException("A game room contains an invalid peer.", nameof(peerUserIds));
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         deadline.CancelAfter(timeout);
+        var room = _client.CurrentGameRoom;
+        if (room is null || !_client.IsGameRelayAvailable(room.RoomId) ||
+            peers.Any(id => !room.Members.Any(member => member.Profile.UserId == id)))
+            throw new InvalidOperationException("An authenticated matchmaking WebSocket fallback is required to prepare the game network.");
         try
         {
-            while (peers.Any(id => !_peers.TryGetValue(id, out var peer) || !peer.IsReady || !peer.TryCaptureSelectedLocalCandidate()))
+            while (Volatile.Read(ref _room)?.RoomId != room.RoomId || peers.Any(id => !_peers.ContainsKey(id)) || PreferredLocalIpv4 is null)
                 await Task.Delay(100, deadline.Token).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
-            var missing = peers.Where(id => !IsPeerReady(id)).Select(id =>
-                _client.CurrentGameRoom?.Members.FirstOrDefault(member => member.Profile.UserId == id)?.Profile.DisplayName ?? id.ToString("N"));
-            if (missing.Any())
-                throw new TimeoutException("ICE session-control channels did not become ready for: " + string.Join(", ", missing));
-            var missingRoute = peers.Where(id => !_peers.TryGetValue(id, out var peer) || !peer.HasLocalMappingIpv4)
-                .Select(id => _client.CurrentGameRoom?.Members.FirstOrDefault(member => member.Profile.UserId == id)?.Profile.DisplayName ?? id.ToString("N"));
-            throw new TimeoutException("ICE channels opened, but no local IPv4 interface candidate was available for game mapping: " + string.Join(", ", missingRoute));
+            if (PreferredLocalIpv4 is null)
+                throw new TimeoutException("Direct ICE did not provide a route, and Windows reported no usable IPv4 adapter for the game mapping.");
+            var missing = peers.Where(id => !_peers.ContainsKey(id)).Select(id =>
+                room.Members.FirstOrDefault(member => member.Profile.UserId == id)?.Profile.DisplayName ?? id.ToString("N"));
+            throw new TimeoutException("The game room peer setup was not ready for: " + string.Join(", ", missing));
         }
     }
 
@@ -355,11 +517,43 @@ internal sealed class OnlineGameIceSession : IDisposable
             .FirstOrDefault();
     }
 
+    internal static string? FindDefaultRouteLocalIpv4()
+    {
+        foreach (var adapter in NetworkInterface.GetAllNetworkInterfaces()
+                     .Where(adapter => adapter.OperationalStatus == OperationalStatus.Up)
+                     .OrderBy(adapter =>
+                     {
+                         try { return adapter.GetIPProperties().GetIPv4Properties()?.Index ?? int.MaxValue; }
+                         catch (NetworkInformationException) { return int.MaxValue; }
+                     }))
+        {
+            try
+            {
+                var properties = adapter.GetIPProperties();
+                if (!properties.GatewayAddresses.Any(gateway => gateway.Address.AddressFamily == AddressFamily.InterNetwork &&
+                        !gateway.Address.Equals(IPAddress.Any))) continue;
+                var address = properties.UnicastAddresses.Select(info => info.Address)
+                    .FirstOrDefault(IsUsableLocalIpv4);
+                if (address is not null) return address.ToString();
+            }
+            catch (NetworkInformationException) { }
+        }
+        return null;
+    }
+
+    private static bool IsUsableLocalIpv4(IPAddress address)
+    {
+        if (address.AddressFamily != AddressFamily.InterNetwork || IPAddress.IsLoopback(address)) return false;
+        var bytes = address.GetAddressBytes();
+        return bytes[0] != 0 && bytes[0] < 224 && !(bytes[0] == 169 && bytes[1] == 254);
+    }
+
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
         _client.GameRoomChanged -= OnGameRoomChanged;
         _client.GameSignalReceived -= OnGameSignalReceived;
+        _client.GameRelayFrameReceived -= OnGameRelayFrameReceived;
         _roomUpdates.Writer.TryComplete();
         _lifetime.Cancel();
         lock (_peerLock)
@@ -447,13 +641,13 @@ internal sealed class OnlineGameIceSession : IDisposable
                 {
                     Interlocked.Exchange(ref _localMappingIpv4State, 0);
                     _clearSelectedLocalCandidate(_remoteUserId);
-                    _status($"Direct ICE connection to {_remoteName} failed ({state}); gameplay cannot continue without a direct path.");
+                    _status($"Direct ICE to {_remoteName} failed ({state}); gameplay will use the secure relay path.");
                 }
             };
             _connection.OnConnectionStateChange += (_, state) =>
             {
                 if (state.ToString().Contains("FAILED", StringComparison.OrdinalIgnoreCase))
-                    _status($"Direct ICE connection to {_remoteName} failed; no relay fallback is configured.");
+                    _status($"Direct ICE to {_remoteName} failed; the authenticated WebSocket relay remains available.");
             };
             _ = SendSignalsAsync();
             if (isOfferer)

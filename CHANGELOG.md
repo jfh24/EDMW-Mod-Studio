@@ -3,15 +3,15 @@
 ## 1.4.0 Beta — 2026-11-02
 
 - Added public and friends-only relay game rooms, online friend invitations, and room discovery. Mod Studio now connects to the relay at launch and sends a 60-second heartbeat. Map collaboration options are grouped in the map script page panel, with online friend invites, incoming invitations, and clearly labeled LAN hosting/joining; the Friends dialog now has Friends and Matchmaking tabs.
-- Added direct ICE/STUN peer connections for online rooms. The relay carries authenticated matchmaking and ICE signaling only; gameplay uses an unreliable UDP data channel and a reliable TCP stream data channel between players, with no TURN or gameplay relay fallback.
+- Added direct ICE/STUN peer connections for online rooms and an authenticated WSS gameplay fallback for networks where direct ICE cannot connect. UDP game datagrams, TCP stream frames, and session-control messages can be forwarded only between current members of the same matchmaking room. The fallback uses the existing relay connection and requires no inbound port forwarding; relay latency and bandwidth apply.
 - Added an x86 native bridge for the supported game's TCP/IP provider and a local TCP stream proxy so the game's LAN host/join flow can use the direct peer channels.
 - Hardened provider hooking for valid PE imports without an original lookup table, and made Matchmaking report when the TCP/IP provider has not loaded yet.
 - Forwarded limited, multicast, and subnet-directed LAN discovery broadcasts to all relay room members, including when the in-game host is not the relay room owner.
 - Restored and foregrounded the game window after launching from Matchmaking so the modal Friends dialog does not block game input.
-- Added live direct-connection and gameplay counters to Matchmaking status for ICE peers, provider hookup, UDP sockets, room broadcasts, received packets, and local game delivery.
-- Made **Prepare game network** network-only: it waits for every player's ICE channels, configures virtual IPv4 and route mappings, then opens EDMW's normal UI. Players must already have the same map installed; matchmaking no longer transfers or installs maps.
+- Added direct ICE and WSS relay counters to Matchmaking status, alongside provider hookup, UDP sockets, room broadcasts, received packets, and local game delivery.
+- Made **Prepare game network** network-only: it requires an authenticated room relay and a usable local IPv4 mapping, configures virtual IPv4 and route mappings, then opens EDMW's normal UI. Direct ICE remains preferred when available; players can still use the game's normal UI when direct ICE fails.
 - Added reliable peer setup messages and per-player launch/readiness errors. The bridge chooses a local IPv4 ICE interface rather than the public STUN-mapped address and self-checks the game adapter and matching route-table mappings before launch.
-- Added hidden two-client loopback verification for ICE connectivity probes, virtual-IP mapping, provider hooks, and launch coordination. This does not establish an actual in-game session or cross-internet gameplay; live validation remains pending.
+- Added hidden two-client loopback verification for matchmaking, virtual-IP mapping, provider hooks, launch coordination, and bidirectional UDP, TCP, and control traffic through WSS. This does not establish an actual in-game session over the public internet; a two-PC cross-internet game test remains pending.
 - Added a guarded launcher that checks the supported game and provider hashes before injecting the bridge; it does not replace game files. Live cross-internet session validation remains pending.
 - Updated application and installer template version metadata to 1.4.0.
 

@@ -1,4 +1,5 @@
 using System.Threading.Channels;
+using System.Buffers.Binary;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
@@ -66,7 +67,7 @@ internal static class OnlineVerification
         Require(friendClient.Friends.FriendReceipts.Single() == receipt, "Accepted friendship receipts differ between peers.");
         checks.Add("Friend request, explicit acceptance, online presence, and non-friend export rejection");
         await VerifyGameRoomAndIceControlAsync(hostClient, friendClient, strangerClient, hostId, friendId);
-        checks.Add("Friends-only/public room visibility, invitation-gated membership, direct ICE UDP/TCP/control readiness, and peer acknowledgement");
+        checks.Add("Friends-only/public room visibility, invitation-gated membership, and bidirectional UDP/TCP/control traffic through authenticated WSS fallback");
 
         using var host = new OnlineCollaborationSession(hostClient);
         using var friend = new OnlineCollaborationSession(friendClient);
@@ -273,7 +274,7 @@ internal static class OnlineVerification
             await ExpectRejectedAsync(() => hostClient.SendExportAsync(friendId, "map", "Removed after reset", [1]));
         }
         completed = true;
-        if (!live) Console.WriteLine("ONLINE PASS: cold-start 503/HTML readiness and cancellation, desktop/Node authentication, friendship ACL, matchmaking room visibility and direct ICE map control, invitation-only map sessions, 512-cell grid serialization, concurrent strokes, cursors, resize, bounded export bytes and approval status, reconnect and revocation" +
+        if (!live) Console.WriteLine("ONLINE PASS: cold-start 503/HTML readiness and cancellation, desktop/Node authentication, friendship ACL, matchmaking room visibility, WSS UDP/TCP/control fallback, invitation-only map sessions, 512-cell grid serialization, concurrent strokes, cursors, resize, bounded export bytes and approval status, reconnect and revocation" +
             (restartControlDirectory is null ? "." : "; free-service identity/contact recovery across two complete filesystem replacements."));
         }
         catch (Exception error) { failure = error; throw; }
@@ -315,12 +316,24 @@ internal static class OnlineVerification
         var invitations = Channel.CreateUnbounded<OnlineGameInvite>();
         var fromHostFrames = Channel.CreateUnbounded<OnlineIceControlFrame>();
         var fromFriendFrames = Channel.CreateUnbounded<OnlineIceControlFrame>();
+        var datagramsAtFriend = Channel.CreateUnbounded<OnlineIceDatagram>();
+        var datagramsAtHost = Channel.CreateUnbounded<OnlineIceDatagram>();
+        var tcpFramesAtFriend = Channel.CreateUnbounded<OnlineIceTcpFrame>();
+        var tcpFramesAtHost = Channel.CreateUnbounded<OnlineIceTcpFrame>();
         void CaptureInvitation(object? _, OnlineGameInvite invite) => invitations.Writer.TryWrite(invite);
         void CaptureHostFrame(object? _, OnlineIceControlFrame frame) => fromHostFrames.Writer.TryWrite(frame);
         void CaptureFriendFrame(object? _, OnlineIceControlFrame frame) => fromFriendFrames.Writer.TryWrite(frame);
+        void CaptureDatagramAtHost(object? _, OnlineIceDatagram frame) => datagramsAtHost.Writer.TryWrite(frame);
+        void CaptureDatagramAtFriend(object? _, OnlineIceDatagram frame) => datagramsAtFriend.Writer.TryWrite(frame);
+        void CaptureTcpAtHost(object? _, OnlineIceTcpFrame frame) => tcpFramesAtHost.Writer.TryWrite(frame);
+        void CaptureTcpAtFriend(object? _, OnlineIceTcpFrame frame) => tcpFramesAtFriend.Writer.TryWrite(frame);
         friendClient.GameInviteReceived += CaptureInvitation;
         friendClient.GameIceSession.ControlFrameReceived += CaptureFriendFrame;
         hostClient.GameIceSession.ControlFrameReceived += CaptureHostFrame;
+        friendClient.GameIceSession.DatagramReceived += CaptureDatagramAtFriend;
+        hostClient.GameIceSession.DatagramReceived += CaptureDatagramAtHost;
+        friendClient.GameIceSession.TcpFrameReceived += CaptureTcpAtFriend;
+        hostClient.GameIceSession.TcpFrameReceived += CaptureTcpAtHost;
         try
         {
             var privateRoom = await hostClient.CreateGameRoomAsync("ICE control verification", "friends", 2);
@@ -338,34 +351,74 @@ internal static class OnlineVerification
             Require(joined.GameHostUserId == hostId && joined.Members.Length == 2,
                 "The invited player did not join the designated two-player room.");
 
-            await hostClient.GameIceSession.WaitForPeersReadyAsync([friendId], TimeSpan.FromSeconds(45));
-            await friendClient.GameIceSession.WaitForPeersReadyAsync([hostId], TimeSpan.FromSeconds(45));
-            Require(hostClient.GameIceSession.IsPeerReady(friendId) && friendClient.GameIceSession.IsPeerReady(hostId),
-                "The game room did not open direct ICE UDP, TCP, and reliable control channels for both players.");
+            await hostClient.GameIceSession.WaitForGameNetworkReadyAsync([friendId], TimeSpan.FromSeconds(45));
+            await friendClient.GameIceSession.WaitForGameNetworkReadyAsync([hostId], TimeSpan.FromSeconds(45));
+            Require(hostClient.IsGameRelayAvailable(privateRoom.RoomId) && friendClient.IsGameRelayAvailable(privateRoom.RoomId),
+                "Both room members need authenticated WebSocket relay connections before game networking can start.");
 
             var sessionId = Guid.NewGuid();
             var hostMember = joined.Members.Single(member => member.Profile.UserId == hostId);
+            var friendMember = joined.Members.Single(member => member.Profile.UserId == friendId);
             var launch = new OnlineGameClientLaunch(sessionId, OnlineGameAddress.VirtualIpv4(hostMember.RelayPort));
-            Require(hostClient.GameIceSession.SendControlFrame(friendId,
+            Require(hostClient.GameIceSession.SendControlFrameViaRelay(friendId,
                     OnlineGameSessionProtocol.EncodeJson(OnlineGameSessionFrameType.LaunchClient, launch)),
-                "The host could not send the room network launch request over its direct ICE control channel.");
+                "The host could not send a room network launch request through the WSS fallback.");
             var incomingLaunch = await fromFriendFrames.Reader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10));
             Require(incomingLaunch.RoomId == privateRoom.RoomId && incomingLaunch.FromUserId == hostId &&
                     OnlineGameSessionProtocol.TryDecodeJson(incomingLaunch.Payload,
                         OnlineGameSessionFrameType.LaunchClient, out OnlineGameClientLaunch? decodedLaunch) &&
                     decodedLaunch == launch,
-                "The network launch request changed or lost its authenticated peer identity over ICE.");
+                "The network launch request changed or lost its authenticated peer identity over WSS.");
 
             var status = new OnlineGameSessionStatus(sessionId, "Room network bridge ready.");
-            Require(friendClient.GameIceSession.SendControlFrame(hostId,
+            Require(friendClient.GameIceSession.SendControlFrameViaRelay(hostId,
                     OnlineGameSessionProtocol.EncodeJson(OnlineGameSessionFrameType.GameReady, status)),
-                "The room member could not acknowledge network readiness over ICE.");
+                "The room member could not acknowledge network readiness through the WSS fallback.");
             var acknowledgement = await fromHostFrames.Reader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10));
             Require(acknowledgement.RoomId == privateRoom.RoomId && acknowledgement.FromUserId == friendId &&
                     OnlineGameSessionProtocol.TryDecodeJson(acknowledgement.Payload,
                         OnlineGameSessionFrameType.GameReady, out OnlineGameSessionStatus? decodedStatus) &&
                     decodedStatus == status,
-                "The host did not receive the peer's network-ready acknowledgement.");
+                "The host did not receive the peer's network-ready acknowledgement through the WSS fallback.");
+
+            var hostUdpPayload = new byte[] { 1, 3, 5, 7 };
+            Require(hostClient.GameIceSession.SendDatagramViaRelay(friendMember.RelayPort, 40001, 40002, hostUdpPayload),
+                "The host could not send a game UDP datagram through the WSS fallback.");
+            var udpAtFriend = await datagramsAtFriend.Reader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10));
+            Require(udpAtFriend.RoomId == privateRoom.RoomId && udpAtFriend.FromUserId == hostId &&
+                    udpAtFriend.SourcePort == 40001 && udpAtFriend.TargetPort == 40002 && udpAtFriend.Payload.SequenceEqual(hostUdpPayload),
+                "The host's UDP datagram changed or lost its authenticated peer identity through WSS.");
+            var friendUdpPayload = new byte[] { 2, 4, 6, 8 };
+            Require(friendClient.GameIceSession.SendDatagramViaRelay(hostMember.RelayPort, 40002, 40001, friendUdpPayload),
+                "The room member could not send a game UDP datagram through the WSS fallback.");
+            var udpAtHost = await datagramsAtHost.Reader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10));
+            Require(udpAtHost.RoomId == privateRoom.RoomId && udpAtHost.FromUserId == friendId &&
+                    udpAtHost.SourcePort == 40002 && udpAtHost.TargetPort == 40001 && udpAtHost.Payload.SequenceEqual(friendUdpPayload),
+                "The room member's UDP datagram changed or lost its authenticated peer identity through WSS.");
+
+            static byte[] MakeTcpDataFrame(byte[] data)
+            {
+                var frame = new byte[25 + data.Length];
+                "EDWT"u8.CopyTo(frame);
+                Guid.NewGuid().TryWriteBytes(frame.AsSpan(4, 16));
+                BinaryPrimitives.WriteUInt16BigEndian(frame.AsSpan(20, 2), 40001);
+                BinaryPrimitives.WriteUInt16BigEndian(frame.AsSpan(22, 2), 40002);
+                frame[24] = 3;
+                data.CopyTo(frame.AsSpan(25));
+                return frame;
+            }
+            var hostTcpFrame = MakeTcpDataFrame([9, 7, 5]);
+            Require(hostClient.GameIceSession.SendTcpFrameViaRelay(friendId, hostTcpFrame),
+                "The host could not send a game TCP frame through the WSS fallback.");
+            var tcpAtFriend = await tcpFramesAtFriend.Reader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10));
+            Require(tcpAtFriend.RoomId == privateRoom.RoomId && tcpAtFriend.FromUserId == hostId && tcpAtFriend.Payload.SequenceEqual(hostTcpFrame),
+                "The host's TCP frame changed or lost its authenticated peer identity through WSS.");
+            var friendTcpFrame = MakeTcpDataFrame([8, 6, 4]);
+            Require(friendClient.GameIceSession.SendTcpFrameViaRelay(hostId, friendTcpFrame),
+                "The room member could not send a game TCP frame through the WSS fallback.");
+            var tcpAtHost = await tcpFramesAtHost.Reader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10));
+            Require(tcpAtHost.RoomId == privateRoom.RoomId && tcpAtHost.FromUserId == friendId && tcpAtHost.Payload.SequenceEqual(friendTcpFrame),
+                "The room member's TCP frame changed or lost its authenticated peer identity through WSS.");
 
             await friendClient.LeaveGameRoomAsync();
             await hostClient.LeaveGameRoomAsync();
@@ -381,6 +434,10 @@ internal static class OnlineVerification
             friendClient.GameInviteReceived -= CaptureInvitation;
             friendClient.GameIceSession.ControlFrameReceived -= CaptureFriendFrame;
             hostClient.GameIceSession.ControlFrameReceived -= CaptureHostFrame;
+            friendClient.GameIceSession.DatagramReceived -= CaptureDatagramAtFriend;
+            hostClient.GameIceSession.DatagramReceived -= CaptureDatagramAtHost;
+            friendClient.GameIceSession.TcpFrameReceived -= CaptureTcpAtFriend;
+            hostClient.GameIceSession.TcpFrameReceived -= CaptureTcpAtHost;
             if (friendClient.CurrentGameRoom is not null) await friendClient.LeaveGameRoomAsync();
             if (hostClient.CurrentGameRoom is not null) await hostClient.LeaveGameRoomAsync();
         }

@@ -5,6 +5,7 @@ using System.Net.WebSockets;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Threading.Channels;
 using EDMWMapDesigner.Civilizations;
 
 namespace EDMWMapDesigner.Networking;
@@ -18,6 +19,7 @@ public sealed class OnlineRelayClient : IDisposable
     public const int MaximumGamePacketBytes = 1200;
     public const int MaximumGameStreamChunkBytes = 1100;
     public const int MaximumGameSignalBytes = 16 * 1024;
+    internal const int MaximumGameRelayEnvelopeBytes = 16 * 1024 + 37;
     private static readonly TimeSpan ConnectTimeout = TimeSpan.FromSeconds(150);
     private static readonly TimeSpan CommandTimeout = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan TransferTimeout = TimeSpan.FromMinutes(3);
@@ -44,6 +46,16 @@ public sealed class OnlineRelayClient : IDisposable
     public OnlinePreferences Preferences { get; }
     internal string LastCloseDiagnostic { get; private set; } = "No WebSocket close attempted.";
     public bool IsConnected { get { lock (_gate) return _connection is { Authenticated: true }; } }
+    internal bool IsGameRelayAvailable(Guid roomId)
+    {
+        lock (_gate)
+        {
+            var connectionReady = _connection is { Authenticated: true } connection && connection.Socket.State == WebSocketState.Open;
+            var room = CurrentGameRoom;
+            return connectionReady && room?.RoomId == roomId && User is { } user &&
+                room.Members.Any(member => member.Profile.UserId == user.UserId);
+        }
+    }
     public bool IsConnecting { get { lock (_gate) return _isConnecting; } }
     public OnlineProfile? User { get; private set; }
     public OnlineFriendsSnapshot Friends { get; private set; } = new(new(Guid.Empty, "", ""), [], [], []);
@@ -58,6 +70,7 @@ public sealed class OnlineRelayClient : IDisposable
     public event EventHandler<OnlineGameRoom?>? GameRoomChanged;
     public event EventHandler<string>? GameRoomEnded;
     public event EventHandler<OnlineGameSignal>? GameSignalReceived;
+    internal event EventHandler<byte[]>? GameRelayFrameReceived;
     internal OnlineGameIceSession GameIceSession { get; }
     public event EventHandler<OnlineExportOffer>? ExportOfferReceived;
     public event EventHandler<string>? StatusChanged;
@@ -138,6 +151,7 @@ public sealed class OnlineRelayClient : IDisposable
                 _isConnecting = false;
             }
             StatusChanged?.Invoke(this, "Connected to the online relay.");
+            _ = GameRelaySendLoopAsync(connection);
             _ = HeartbeatLoopAsync(connection);
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
@@ -311,6 +325,39 @@ public sealed class OnlineRelayClient : IDisposable
         finally { connection.Pending.TryRemove(requestId, out _); }
     }
 
+    internal bool TrySendGameRelayFrame(ReadOnlySpan<byte> frame)
+    {
+        if (frame.Length is < 24 or > MaximumGameRelayEnvelopeBytes) return false;
+        Connection? connection;
+        lock (_gate) connection = _connection is { Authenticated: true } current ? current : null;
+        if (connection is null || connection.Socket.State != WebSocketState.Open) return false;
+        return connection.GameRelayFrames.Writer.TryWrite(frame.ToArray());
+    }
+
+    private async Task GameRelaySendLoopAsync(Connection connection)
+    {
+        try
+        {
+            await foreach (var frame in connection.GameRelayFrames.Reader.ReadAllAsync(connection.Lifetime.Token).ConfigureAwait(false))
+            {
+                await connection.SendLock.WaitAsync(connection.Lifetime.Token).ConfigureAwait(false);
+                try
+                {
+                    if (connection.Socket.State != WebSocketState.Open) return;
+                    await connection.Socket.SendAsync(frame.AsMemory(), WebSocketMessageType.Binary, true,
+                        connection.Lifetime.Token).ConfigureAwait(false);
+                }
+                finally { connection.SendLock.Release(); }
+            }
+        }
+        catch (OperationCanceledException) when (connection.Lifetime.IsCancellationRequested) { }
+        catch (ObjectDisposedException) when (connection.Lifetime.IsCancellationRequested) { }
+        catch (Exception error)
+        {
+            _ = EndConnection(connection, $"The gameplay relay send failed: {CleanText(error.Message, 180)}");
+        }
+    }
+
     private async Task HeartbeatLoopAsync(Connection connection)
     {
         using var timer = new PeriodicTimer(TimeSpan.FromSeconds(60));
@@ -432,11 +479,21 @@ public sealed class OnlineRelayClient : IDisposable
                 {
                     received = await connection.Socket.ReceiveAsync(buffer.AsMemory(), connection.Lifetime.Token).ConfigureAwait(false);
                     if (received.MessageType == WebSocketMessageType.Close) return;
-                    if (received.MessageType != WebSocketMessageType.Text || data.Length + received.Count > MaximumMessageBytes)
+                    var maximum = received.MessageType == WebSocketMessageType.Binary
+                        ? MaximumGameRelayEnvelopeBytes : MaximumMessageBytes;
+                    if (received.MessageType is not (WebSocketMessageType.Text or WebSocketMessageType.Binary) ||
+                        data.Length + received.Count > maximum)
                         throw new InvalidDataException("The online relay sent an invalid or oversized message.");
                     data.Write(buffer, 0, received.Count);
                 } while (!received.EndOfMessage);
                 lock (_gate) if (_connection != connection) continue;
+                if (received.MessageType == WebSocketMessageType.Binary)
+                {
+                    if (!connection.Authenticated) throw new InvalidDataException("The online relay sent gameplay before authentication completed.");
+                    try { GameRelayFrameReceived?.Invoke(this, data.ToArray()); }
+                    catch (Exception error) { StatusChanged?.Invoke(this, "Ignored a gameplay relay frame: " + CleanText(error.Message, 180)); }
+                    continue;
+                }
                 using var document = JsonDocument.Parse(data.ToArray(), new JsonDocumentOptions { MaxDepth = 64 });
                 HandleMessage(connection, document.RootElement);
             }
@@ -863,6 +920,8 @@ public sealed class OnlineRelayClient : IDisposable
         public ClientWebSocket Socket { get; } = new();
         public CancellationTokenSource Lifetime { get; } = new();
         public SemaphoreSlim SendLock { get; } = new(1, 1);
+        public Channel<byte[]> GameRelayFrames { get; } = Channel.CreateBounded<byte[]>(new BoundedChannelOptions(512)
+        { SingleReader = true, SingleWriter = false, FullMode = BoundedChannelFullMode.Wait });
         public ConcurrentDictionary<Guid, PendingRequest> Pending { get; } = new();
         public TaskCompletionSource<bool> ReceiveEnded { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public Task? ClosingTask { get; set; }

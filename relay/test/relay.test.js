@@ -13,6 +13,13 @@ import { applyDelta, validateProject } from '../src/project.js';
 
 const sha256 = value => createHash('sha256').update(value).digest('hex');
 const MiB = 1024 * 1024;
+function gameRelayFrame(roomId, type, targetRelayPort, payload) {
+  const header = Buffer.alloc(23);
+  header.write('EDMR', 0, 4, 'ascii'); header[4] = type;
+  Buffer.from(roomId.replaceAll('-', ''), 'hex').copy(header, 5);
+  header.writeUInt16BE(targetRelayPort, 21);
+  return Buffer.concat([header, payload]);
+}
 function project(size = 8) {
   return {
     name: 'Shared map', author: 'Host', gridSize: size, variance: 20, cells: Array(size * size).fill(3),
@@ -31,7 +38,16 @@ function delta(indices = [], cells = [], changes = {}) {
 async function client(url, identity, displayName = identity.displayName, friendReceipts = identity.friendReceipts ?? []) {
   const socket = new WebSocket(url);
   const responses = new Map(), events = [], waiters = [];
-  socket.on('message', raw => {
+  socket.on('message', (raw, binary) => {
+    if (binary) {
+      const frame = Buffer.from(raw);
+      const message = { type: 'binary', data: frame };
+      events.push(message);
+      for (const waiter of [...waiters]) if (waiter.type === 'binary' && waiter.predicate(frame)) {
+        waiters.splice(waiters.indexOf(waiter), 1); clearTimeout(waiter.timer); waiter.resolve(frame);
+      }
+      return;
+    }
     const message = JSON.parse(raw.toString());
     if (message.type === 'friends.changed' || message.type === 'response' && message.ok && Array.isArray(message.data?.friendReceipts))
       identity.friendReceipts = [...message.data.friendReceipts];
@@ -47,6 +63,7 @@ async function client(url, identity, displayName = identity.displayName, friendR
   await once(socket, 'open');
   const api = {
     identity, socket, events,
+    sendBinary(frame) { socket.send(frame, { binary: true }); },
     async command(type, fields = {}, expectedOk = true) {
       const requestId = randomUUID();
       const response = new Promise((resolve, reject) => {
@@ -64,6 +81,15 @@ async function client(url, identity, displayName = identity.displayName, friendR
       return new Promise((resolve, reject) => {
         const waiter = { type, predicate, resolve, timer: setTimeout(() => {
           waiters.splice(waiters.indexOf(waiter), 1); reject(new Error(`Timed out waiting for ${type}`));
+        }, 3000) }; waiters.push(waiter);
+      });
+    },
+    binary(predicate = () => true) {
+      const seen = events.find(event => event.type === 'binary' && predicate(event.data));
+      if (seen) return Promise.resolve(seen.data);
+      return new Promise((resolve, reject) => {
+        const waiter = { type: 'binary', predicate, resolve, timer: setTimeout(() => {
+          waiters.splice(waiters.indexOf(waiter), 1); reject(new Error('Timed out waiting for binary relay frame'));
         }, 3000) }; waiters.push(waiter);
       });
     },
@@ -562,4 +588,39 @@ test('free relay bounds room memory and rejects an oversized replacement without
   assert.equal(intact.revision, 0); assert.equal(intact.project.gridSize, 8);
   await filler.command('collab.leave');
   await extra.command('collab.project', { sessionId: small.sessionId, baseRevision: 0, project: project(512) });
+});
+
+test('authenticated matchmaking members exchange room-scoped UDP, TCP, and setup frames through WSS', async t => {
+  const f = await fixture(t);
+  const host = await f.user('Game host'), guest = await f.user('Game guest'), outsider = await f.user('Outsider');
+  const room = await host.command('game.create', { name: 'Relay fallback test', visibility: 'public', maxPlayers: 2 });
+  const joined = await guest.command('game.join', { roomId: room.roomId });
+  const hostIdBytes = Buffer.from(host.identity.userId.replaceAll('-', ''), 'hex');
+  const roomIdBytes = Buffer.from(room.roomId.replaceAll('-', ''), 'hex');
+
+  const udp = Buffer.alloc(4 + 3); udp.writeUInt16BE(4100, 0); udp.writeUInt16BE(4200, 2); udp.set([1, 2, 3], 4);
+  const udpDelivery = guest.binary(frame => frame.length === 37 + udp.length && frame[4] === 1);
+  host.sendBinary(gameRelayFrame(room.roomId, 1, 0, udp));
+  const udpFrame = await udpDelivery;
+  assert.equal(udpFrame.toString('ascii', 0, 4), 'EDMR'); assert.equal(udpFrame[4], 1);
+  assert.deepEqual(udpFrame.subarray(5, 21), roomIdBytes); assert.deepEqual(udpFrame.subarray(21, 37), hostIdBytes);
+  assert.deepEqual(udpFrame.subarray(37), udp);
+
+  const tcp = Buffer.alloc(27); tcp.write('EDWT', 0, 4, 'ascii'); tcp.fill(0x5a, 4, 20);
+  tcp.writeUInt16BE(4100, 20); tcp.writeUInt16BE(4200, 22); tcp[24] = 3; tcp[25] = 9; tcp[26] = 8;
+  const tcpDelivery = guest.binary(frame => frame[4] === 2);
+  host.sendBinary(gameRelayFrame(room.roomId, 2, joined.relayPort, tcp));
+  const tcpFrame = await tcpDelivery;
+  assert.deepEqual(tcpFrame.subarray(37), tcp);
+
+  const control = Buffer.from('launch-client-control');
+  const controlDelivery = guest.binary(frame => frame[4] === 3);
+  host.sendBinary(gameRelayFrame(room.roomId, 3, joined.relayPort, control));
+  const controlFrame = await controlDelivery;
+  assert.deepEqual(controlFrame.subarray(37), control);
+
+  const rejected = once(outsider.socket, 'close');
+  outsider.sendBinary(gameRelayFrame(room.roomId, 3, joined.relayPort, control));
+  const [closeCode] = await rejected;
+  assert.equal(closeCode, 1008);
 });

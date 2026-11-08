@@ -299,10 +299,10 @@ public sealed partial class MainForm
         _onlineGameStartState = startState;
         try
         {
-            reportStatus("Waiting for direct ICE channels to every room member…");
-            await _online.GameIceSession.WaitForPeersReadyAsync(peerIds, TimeSpan.FromSeconds(60), _onlineLifetime.Token);
+            reportStatus("Preparing the game network (direct ICE preferred; secure relay fallback ready)…");
+            await _online.GameIceSession.WaitForGameNetworkReadyAsync(peerIds, TimeSpan.FromSeconds(60), _onlineLifetime.Token);
             if (string.IsNullOrWhiteSpace(_online.GameIceSession.PreferredLocalIpv4))
-                throw new InvalidOperationException("ICE channels are ready, but they did not expose a local IPv4 interface address for GameRanger-style mapping.");
+                throw new InvalidOperationException("No usable local IPv4 adapter was found for the game network mapping.");
             reportStatus("Launching EDMW with the room network bridge…");
             var bridge = await OnlineGameTrafficBridge.LaunchAsync(_online, gamePath, _onlineLifetime.Token);
             if (_closingDesigner || IsDisposed || _online.CurrentGameRoom?.RoomId != room.RoomId)
@@ -366,7 +366,7 @@ public sealed partial class MainForm
             Console.WriteLine("BRIDGE: " + latestStatus);
         if (bridge.IsFaulted)
         {
-            var message = bridge.ProviderStatusMessage ?? "The direct gameplay bridge stopped.";
+            var message = bridge.ProviderStatusMessage ?? "The game network bridge stopped.";
             StopOnlineGameTrafficBridge();
             throw new InvalidOperationException(message);
         }

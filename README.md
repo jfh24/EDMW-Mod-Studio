@@ -2,7 +2,7 @@
 
 **EDMW Mod Studio** is a Windows modding workspace for **Empires: Dawn of the Modern World**. It combines a visual Map Designer, a Civilization Editor, and tracked installation and sharing over LAN or online with friends.
 
-Version **1.4.0 Beta** is available as a GitHub prerelease. It is built with C#/.NET Windows Forms and includes a native, 32-bit map generator for the game. Live cross-internet match validation remains pending; see the beta notes before using matchmaking.
+Version **1.4.0 Beta** is available as a GitHub prerelease. It is built with C#/.NET Windows Forms and includes a native, 32-bit map generator for the game. A direct ICE path is preferred for matchmaking gameplay, with authenticated WSS relay fallback when direct ICE cannot connect. A real two-PC cross-internet game test is still pending.
 
 **[Download v1.4.0 Beta for Windows](https://github.com/jfh24/EDMW-Mod-Studio/releases/download/v1.4.0/EDMW.Mod.Studio.exe)** · [Beta release notes and assets](https://github.com/jfh24/EDMW-Mod-Studio/releases/tag/v1.4.0) · [Changelog](CHANGELOG.md)
 
@@ -20,7 +20,7 @@ The source repository does not include the compiled executable. Download it from
 - **LAN collaboration:** host or join a shared map with synchronized paint strokes and named live cursors.
 - **LAN export:** install an export on the sender and offer it to other running instances for recipient approval.
 - **Online friends:** exchange friend codes, accept requests, and see online presence through the prefilled EDMW Mod Studio relay or a relay you choose.
-- **Online game matchmaking (1.4.0 Beta):** create public or friends-only rooms, invite accepted friends, and launch the supported game with a temporary native bridge. The relay handles sign-in, rooms, and ICE signaling; UDP and TCP gameplay use direct ICE/STUN data channels between players. There is no TURN server or gameplay relay fallback. Live cross-internet session validation remains pending.
+- **Online game matchmaking (1.4.0 Beta):** create public or friends-only rooms, invite accepted friends, and launch the supported game with a temporary native bridge. Direct ICE/STUN data channels are preferred; if a peer path is unavailable, UDP, TCP, and session-control traffic can use the authenticated WSS relay. This fallback needs no inbound port forwarding, but relay latency and bandwidth apply. A real two-PC cross-internet game test is still pending.
 - **Online collaboration and export:** invite accepted friends to edit maps, or send map and civilization exports for recipient approval. Includes a Render deployment blueprint.
 - **Installed content:** run independent civilization edits together, merge them under a custom name, or unmerge them. Review, uninstall, or share installed maps and edits directly from Home through **LAN** or **Friends**.
 
