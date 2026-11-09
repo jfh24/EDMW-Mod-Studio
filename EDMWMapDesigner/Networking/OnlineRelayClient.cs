@@ -37,13 +37,17 @@ public sealed class OnlineRelayClient : IDisposable
     private Uri? _endpoint;
     private bool _isConnecting;
     private bool _disposed;
+    private long _gameRelayFramesSent;
+    private long _gameRelayFramesDropped;
 
     public OnlineRelayClient(OnlinePreferences? preferences = null)
     {
         Preferences = preferences ?? OnlinePreferences.Load();
+        TrafficLogSetupError = OnlineTrafficLogger.Configure(Preferences.EnableNetworkTrafficLogging);
         GameIceSession = new OnlineGameIceSession(this);
     }
     public OnlinePreferences Preferences { get; }
+    internal string? TrafficLogSetupError { get; private set; }
     internal string LastCloseDiagnostic { get; private set; } = "No WebSocket close attempted.";
     public bool IsConnected { get { lock (_gate) return _connection is { Authenticated: true }; } }
     internal bool IsGameRelayAvailable(Guid roomId)
@@ -72,6 +76,19 @@ public sealed class OnlineRelayClient : IDisposable
     public event EventHandler<OnlineGameSignal>? GameSignalReceived;
     internal event EventHandler<byte[]>? GameRelayFrameReceived;
     internal OnlineGameIceSession GameIceSession { get; }
+    internal long GameRelayFramesSent => Interlocked.Read(ref _gameRelayFramesSent);
+    internal long GameRelayFramesDropped => Interlocked.Read(ref _gameRelayFramesDropped);
+    internal int GameRelayQueueDepth
+    {
+        get
+        {
+            lock (_gate)
+            {
+                try { return _connection?.GameRelayFrames.Reader.Count ?? 0; }
+                catch (NotSupportedException) { return -1; }
+            }
+        }
+    }
     public event EventHandler<OnlineExportOffer>? ExportOfferReceived;
     public event EventHandler<string>? StatusChanged;
     internal event EventHandler<OnlineRelayEvent>? RelayEventReceived;
@@ -130,6 +147,7 @@ public sealed class OnlineRelayClient : IDisposable
             connection.Socket.Options.KeepAliveTimeout = TimeSpan.FromSeconds(20);
             var socketAddress = new UriBuilder(new Uri(address, "ws"))
             { Scheme = address.Scheme == Uri.UriSchemeHttps ? "wss" : "ws" }.Uri;
+            await OnlineTrafficLogger.RecordRelayServerAsync(socketAddress, timeout.Token).ConfigureAwait(false);
             lock (_gate)
             {
                 ObjectDisposedException.ThrowIf(_disposed, this);
@@ -331,7 +349,21 @@ public sealed class OnlineRelayClient : IDisposable
         Connection? connection;
         lock (_gate) connection = _connection is { Authenticated: true } current ? current : null;
         if (connection is null || connection.Socket.State != WebSocketState.Open) return false;
-        return connection.GameRelayFrames.Writer.TryWrite(frame.ToArray());
+        if (connection.GameRelayFrames.Writer.TryWrite(frame.ToArray())) return true;
+        Interlocked.Increment(ref _gameRelayFramesDropped);
+        return false;
+    }
+
+    internal string? ConfigureNetworkTrafficLogging(bool enabled)
+    {
+        TrafficLogSetupError = OnlineTrafficLogger.Configure(enabled);
+        if (TrafficLogSetupError is null && enabled && _endpoint is { } endpoint)
+        {
+            var socketAddress = new UriBuilder(new Uri(endpoint, "ws"))
+            { Scheme = endpoint.Scheme == Uri.UriSchemeHttps ? "wss" : "ws" }.Uri;
+            _ = OnlineTrafficLogger.RecordRelayServerAsync(socketAddress);
+        }
+        return TrafficLogSetupError;
     }
 
     private async Task GameRelaySendLoopAsync(Connection connection)
@@ -346,6 +378,7 @@ public sealed class OnlineRelayClient : IDisposable
                     if (connection.Socket.State != WebSocketState.Open) return;
                     await connection.Socket.SendAsync(frame.AsMemory(), WebSocketMessageType.Binary, true,
                         connection.Lifetime.Token).ConfigureAwait(false);
+                    Interlocked.Increment(ref _gameRelayFramesSent);
                 }
                 finally { connection.SendLock.Release(); }
             }

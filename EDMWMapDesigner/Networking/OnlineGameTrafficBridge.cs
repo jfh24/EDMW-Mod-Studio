@@ -115,10 +115,17 @@ internal sealed class OnlineGameTrafficBridge : IAsyncDisposable
             var room = _client.CurrentGameRoom;
             var peers = room?.Members.Length - 1 ?? 0;
             var ready = _client.GameIceSession.ReadyPeerCount;
+            var directSent = _client.GameIceSession.DirectFramesSent;
             var relaySent = _client.GameIceSession.RelayFramesQueued;
             var relayReceived = _client.GameIceSession.RelayFramesReceived;
-            var relayState = relayReceived > 0 ? "WSS fallback receiving" : relaySent > 0 ? "WSS fallback queued" :
+            var wssWritten = _client.GameRelayFramesSent;
+            var wssDropped = _client.GameRelayFramesDropped;
+            var wssPending = _client.GameRelayQueueDepth;
+            var relayState = !_client.Preferences.EnableWssGameplay ? "WSS gameplay disabled" :
+                !_client.Preferences.EnableIceGameplay ? "WSS gameplay forced" :
+                relayReceived > 0 ? "WSS fallback receiving" : relaySent > 0 ? "WSS fallback queued" :
                 room is not null && _client.IsGameRelayAvailable(room.RoomId) ? "WSS fallback ready" : "WSS fallback unavailable";
+            var iceState = _client.Preferences.EnableIceGameplay ? $"ICE {ready}/{Math.Max(0, peers)} peers" : "ICE gameplay disabled";
             var local = room?.Members.FirstOrDefault(member => member.Profile.UserId == _client.User?.UserId);
             var virtualIp = local is null ? "IP pending" : OnlineGameAddress.VirtualIpv4(local.RelayPort);
             var adapterMapping = Volatile.Read(ref _adapterMappingStatus) switch
@@ -143,7 +150,7 @@ internal sealed class OnlineGameTrafficBridge : IAsyncDisposable
                 "incomplete" => "global IP Helper detours incomplete",
                 _ => "global IP Helper detours pending",
             };
-            return $"{state} · {globalMapping} · {adapterMapping} · {routeMapping} · IP {virtualIp} · ICE {ready}/{Math.Max(0, peers)} peers · {relayState} queued/received {relaySent}/{relayReceived} frames · UDP {Interlocked.Read(ref _registeredGameSockets)} · TX {Interlocked.Read(ref _packetsSent)} (broadcast {Interlocked.Read(ref _broadcastPackets)}) · RX {Interlocked.Read(ref _packetsReceived)} · game {Interlocked.Read(ref _packetsInjectedToGame)}";
+            return $"{state} · {globalMapping} · {adapterMapping} · {routeMapping} · IP {virtualIp} · {iceState} · {relayState} · game frames ICE-sent/WSS-enqueued {directSent}/{relaySent}, WSS socket-written {wssWritten}, dropped {wssDropped}, pending {wssPending}, received {relayReceived} · UDP {Interlocked.Read(ref _registeredGameSockets)} · TX {Interlocked.Read(ref _packetsSent)} (broadcast {Interlocked.Read(ref _broadcastPackets)}) · RX {Interlocked.Read(ref _packetsReceived)} · game {Interlocked.Read(ref _packetsInjectedToGame)}";
         }
     }
 

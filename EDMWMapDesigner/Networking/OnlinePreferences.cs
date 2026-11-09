@@ -14,6 +14,9 @@ public sealed class OnlinePreferences
     private const int MaximumPreferencesBytes = 4 * 1024 * 1024;
     public string Endpoint { get; set; } = DefaultEndpoint;
     public string DisplayName { get; set; } = Environment.UserName;
+    public bool EnableIceGameplay { get; set; } = true;
+    public bool EnableWssGameplay { get; set; } = true;
+    public bool EnableNetworkTrafficLogging { get; set; }
     public Dictionary<string, string> ProtectedIdentities { get; set; } = new(StringComparer.Ordinal);
     [JsonIgnore] public bool PersistIdentity { get; set; } = true;
     [JsonIgnore] internal string? LoadError { get; private init; }

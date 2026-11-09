@@ -39,6 +39,7 @@ internal sealed class OnlineGamePanel : UserControl
     private readonly Button _prepareNetwork;
     private readonly Button _setGameHost;
     private readonly Button _copyHostAddress;
+    private readonly Button _transportSettings;
     private bool _busy;
 
     public OnlineGamePanel(OnlineRelayClient client, Func<string?>? gameTrafficStatus = null,
@@ -106,6 +107,10 @@ internal sealed class OnlineGamePanel : UserControl
             SetStatus($"Copied EDMW host IP {address}.");
             return Task.CompletedTask;
         }));
+        _transportSettings = Button("⚙", ShowTransportSettingsAsync);
+        _transportSettings.Width = 34;
+        _transportSettings.AccessibleName = "Matchmaking network and logging settings";
+        _tips.SetToolTip(_transportSettings, "Configure ICE, WSS gameplay relay, and network traffic logging.");
 
         MedievalTheme.StyleTextInput(_name);
         MedievalTheme.StyleTextInput(_visibility);
@@ -194,7 +199,7 @@ internal sealed class OnlineGamePanel : UserControl
         _ = RunAsync(async () =>
         {
             await _client.RefreshGameRoomsAsync(_lifetime.Token);
-            SetStatus("Game rooms refreshed.");
+            SetStatus(_client.TrafficLogSetupError ?? "Game rooms refreshed.", error: _client.TrafficLogSetupError is not null);
         });
     }
 
@@ -283,11 +288,18 @@ internal sealed class OnlineGamePanel : UserControl
         content.RowStyles.Add(new RowStyle(SizeType.Absolute, 32));
         content.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
         content.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
-        content.Controls.Add(new Label
+        var titleRow = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, Margin = Padding.Empty };
+        titleRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        titleRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 34));
+        titleRow.Controls.Add(new Label
         {
             Text = "Current room", Dock = DockStyle.Fill, ForeColor = MedievalTheme.GoldBright,
             Font = MedievalTheme.DisplayFont(12), TextAlign = ContentAlignment.MiddleLeft
         }, 0, 0);
+        _transportSettings.Dock = DockStyle.Fill;
+        _transportSettings.Margin = new Padding(0, 0, 0, 2);
+        titleRow.Controls.Add(_transportSettings, 1, 0);
+        content.Controls.Add(titleRow, 0, 0);
         content.Controls.Add(_roomState, 0, 1);
 
         var inviteRow = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, Margin = Padding.Empty };
@@ -312,6 +324,168 @@ internal sealed class OnlineGamePanel : UserControl
         actions.Controls.Add(_prepareNetwork, 1, 0);
         content.Controls.Add(actions, 0, 3);
         return Card(content);
+    }
+
+    private Task ShowTransportSettingsAsync()
+    {
+        using var dialog = new Form
+        {
+            Text = "Matchmaking network settings",
+            StartPosition = FormStartPosition.CenterParent,
+            FormBorderStyle = FormBorderStyle.FixedDialog,
+            MaximizeBox = false,
+            MinimizeBox = false,
+            ShowIcon = false,
+            ShowInTaskbar = false,
+            ClientSize = new Size(500, 438),
+            BackColor = MedievalTheme.Sidebar,
+            ForeColor = MedievalTheme.Text,
+            Font = MedievalTheme.UiFont()
+        };
+
+        var directIce = new CheckBox
+        {
+            Text = "Direct ICE / STUN gameplay",
+            Checked = _client.Preferences.EnableIceGameplay,
+            AutoSize = true,
+            ForeColor = MedievalTheme.GoldBright,
+            Font = MedievalTheme.UiFont(10, FontStyle.Bold),
+            Margin = Padding.Empty,
+            AccessibleName = "Enable direct ICE gameplay"
+        };
+        var wssRelay = new CheckBox
+        {
+            Text = "WSS gameplay relay",
+            Checked = _client.Preferences.EnableWssGameplay,
+            AutoSize = true,
+            ForeColor = MedievalTheme.GoldBright,
+            Font = MedievalTheme.UiFont(10, FontStyle.Bold),
+            Margin = Padding.Empty,
+            AccessibleName = "Enable WSS gameplay relay"
+        };
+        var debugLog = new CheckBox
+        {
+            Text = "Log network traffic to a text file",
+            Checked = _client.Preferences.EnableNetworkTrafficLogging,
+            AutoSize = true,
+            ForeColor = MedievalTheme.GoldBright,
+            Font = MedievalTheme.UiFont(10, FontStyle.Bold),
+            Margin = Padding.Empty,
+            AccessibleName = "Enable network traffic logging"
+        };
+
+        var content = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill, Padding = new Padding(18, 14, 18, 14), ColumnCount = 1, RowCount = 6,
+            BackColor = MedievalTheme.Sidebar, Margin = Padding.Empty
+        };
+        content.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        content.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
+        content.RowStyles.Add(new RowStyle(SizeType.Absolute, 64));
+        content.RowStyles.Add(new RowStyle(SizeType.Absolute, 64));
+        content.RowStyles.Add(new RowStyle(SizeType.Absolute, 78));
+        content.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        content.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
+        content.Controls.Add(new Label
+        {
+            Text = "Gameplay transports", Dock = DockStyle.Fill, ForeColor = MedievalTheme.GoldBright,
+            Font = MedievalTheme.DisplayFont(15), TextAlign = ContentAlignment.MiddleLeft
+        }, 0, 0);
+        content.Controls.Add(TransportOption(directIce,
+            "Send and accept gameplay directly over negotiated ICE data channels."), 0, 1);
+        content.Controls.Add(TransportOption(wssRelay,
+            "Send and accept gameplay through the authenticated WebSocket relay when enabled."), 0, 2);
+        content.Controls.Add(TransportOption(debugLog,
+            "Record each gameplay frame's direction, size, virtual endpoint IPs, ICE candidate IPs, and WSS relay IPs. Packet contents are excluded."), 0, 3);
+        content.Controls.Add(new Label
+        {
+            Text = "Matchmaking, login, and ICE signaling stay on WSS. ICE may still negotiate for network setup, but with direct ICE gameplay off, game frames use WSS. " +
+                "For a definitive WSS test, turn off direct ICE on both players, leave WSS gameplay enabled, and confirm the WSS queued and received counters rise. " +
+                "WSS server IPs in the log are DNS-resolved candidates.\r\n\r\nLog file: " + OnlineTrafficLogger.LogPath,
+            Dock = DockStyle.Fill, ForeColor = MedievalTheme.TextSecondary,
+            TextAlign = ContentAlignment.MiddleLeft, Font = MedievalTheme.UiFont(8.5f), Padding = new Padding(2, 6, 2, 6)
+        }, 0, 4);
+
+        var buttons = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Fill, FlowDirection = FlowDirection.RightToLeft, WrapContents = false,
+            Margin = Padding.Empty, Padding = Padding.Empty, BackColor = Color.Transparent
+        };
+        var save = FriendsDialog.MakeButton("Save settings", () =>
+        {
+            var previousIce = _client.Preferences.EnableIceGameplay;
+            var previousWss = _client.Preferences.EnableWssGameplay;
+            var previousLog = _client.Preferences.EnableNetworkTrafficLogging;
+            _client.Preferences.EnableIceGameplay = directIce.Checked;
+            _client.Preferences.EnableWssGameplay = wssRelay.Checked;
+            _client.Preferences.EnableNetworkTrafficLogging = debugLog.Checked;
+            try { _client.Preferences.Save(); }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException or InvalidDataException)
+            {
+                _client.Preferences.EnableIceGameplay = previousIce;
+                _client.Preferences.EnableWssGameplay = previousWss;
+                _client.Preferences.EnableNetworkTrafficLogging = previousLog;
+                MedievalDialog.Show(dialog, "Could not save the matchmaking settings: " + error.Message,
+                    "Matchmaking settings", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return Task.CompletedTask;
+            }
+
+            var logError = _client.ConfigureNetworkTrafficLogging(debugLog.Checked);
+            if (logError is not null)
+            {
+                _client.Preferences.EnableIceGameplay = previousIce;
+                _client.Preferences.EnableWssGameplay = previousWss;
+                _client.Preferences.EnableNetworkTrafficLogging = previousLog;
+                try { _client.Preferences.Save(); } catch (Exception) { }
+                MedievalDialog.Show(dialog, logError, "Network traffic log", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return Task.CompletedTask;
+            }
+
+            RefreshActions();
+            var mode = !directIce.Checked && wssRelay.Checked ? "WSS gameplay is forced." :
+                !directIce.Checked && !wssRelay.Checked ? "Gameplay networking is disabled." :
+                "Gameplay transport settings saved.";
+            SetStatus(debugLog.Checked
+                ? $"{mode} Network traffic log: {OnlineTrafficLogger.LogPath}"
+                : mode);
+            dialog.DialogResult = DialogResult.OK;
+            dialog.Close();
+            return Task.CompletedTask;
+        }, primary: true);
+        var cancel = FriendsDialog.MakeButton("Cancel", () =>
+        {
+            dialog.DialogResult = DialogResult.Cancel;
+            dialog.Close();
+            return Task.CompletedTask;
+        });
+        buttons.Controls.Add(save);
+        buttons.Controls.Add(cancel);
+        content.Controls.Add(buttons, 0, 5);
+        dialog.Controls.Add(content);
+        dialog.AcceptButton = save;
+        dialog.CancelButton = cancel;
+        _ = dialog.ShowDialog(this);
+        return Task.CompletedTask;
+    }
+
+    private static Control TransportOption(CheckBox toggle, string description)
+    {
+        var content = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2, Padding = new Padding(10, 6, 8, 5),
+            Margin = Padding.Empty, BackColor = MedievalTheme.Surface
+        };
+        content.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        content.RowStyles.Add(new RowStyle(SizeType.Absolute, 26));
+        content.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        content.Controls.Add(toggle, 0, 0);
+        content.Controls.Add(new Label
+        {
+            Text = description, Dock = DockStyle.Fill, ForeColor = MedievalTheme.TextSecondary,
+            Font = MedievalTheme.UiFont(8.5f), TextAlign = ContentAlignment.MiddleLeft,
+            Padding = new Padding(25, 0, 2, 0), AutoEllipsis = true
+        }, 0, 1);
+        return content;
     }
 
     private Control GameHostControls()
@@ -547,6 +721,7 @@ internal sealed class OnlineGamePanel : UserControl
         var host = active is not null && _client.User?.UserId == active.Host.UserId;
         var designatedGameHost = active is not null && _client.User?.UserId ==
             (active.GameHostUserId ?? active.Host.UserId);
+        var gameplayTransportsEnabled = _client.Preferences.EnableIceGameplay || _client.Preferences.EnableWssGameplay;
         var friend = _friendPicker.SelectedItem as FriendChoice;
         _create.Enabled = connected && !_busy && active is null;
         _name.Enabled = _visibility.Enabled = _capacity.Enabled = connected && !_busy && active is null;
@@ -560,12 +735,13 @@ internal sealed class OnlineGamePanel : UserControl
         _gameHostPicker.Enabled = connected && !_busy && host;
         _copyHostAddress.Enabled = active is not null && DesignatedGameHost(active) is not null;
         _prepareNetwork.Enabled = connected && !_busy && active is not null && designatedGameHost &&
-            _prepareGameNetwork is not null && _gameTrafficStatus() is null;
+            gameplayTransportsEnabled && _prepareGameNetwork is not null && _gameTrafficStatus() is null;
         _setGameHost.Enabled = connected && !_busy && host && _gameHostPicker.SelectedItem is GameHostChoice selectedHost &&
             active?.GameHostUserId != selectedHost.Member.Profile.UserId;
         _tips.SetToolTip(_prepareNetwork, !connected ? "Connect to the relay first." : _busy ? "A matchmaking action is in progress."
             : active is null ? "Join a matchmaking room first."
             : !designatedGameHost ? "Only the designated EDMW host can prepare the room game network."
+            : !gameplayTransportsEnabled ? "Enable ICE or WSS gameplay in the matchmaking settings first."
             : _gameTrafficStatus() is not null ? "EDMW already has an active game bridge. Close the game to prepare another room."
             : "Open EDMW's native UI on each room member and configure the room's virtual IP network.");
         _tips.SetToolTip(_setGameHost, !host ? "The matchmaking room host chooses which member is hosting EDMW." :

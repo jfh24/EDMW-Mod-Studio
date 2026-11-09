@@ -1,8 +1,8 @@
 # EDMW Mod Studio distribution
 
-**[Download EDMW Mod Studio v1.4.0 Beta for Windows](https://github.com/jfh24/EDMW-Mod-Studio/releases/download/v1.4.0/EDMW.Mod.Studio.exe)**
+**[Download EDMW Mod Studio v1.4.0 for Windows](https://github.com/jfh24/EDMW-Mod-Studio/releases/download/v1.4.0/EDMW.Mod.Studio.exe)**
 
-See the [v1.4.0 beta release page](https://github.com/jfh24/EDMW-Mod-Studio/releases/tag/v1.4.0) for assets and the [beta notes](../docs/releases/v1.4.0.md). The v1.3.0 stable release remains available from its [release page](https://github.com/jfh24/EDMW-Mod-Studio/releases/tag/v1.3.0).
+See the [v1.4.0 release page](https://github.com/jfh24/EDMW-Mod-Studio/releases/tag/v1.4.0) for assets and the [release notes](../docs/releases/v1.4.0.md). The v1.3.0 release remains available from its [release page](https://github.com/jfh24/EDMW-Mod-Studio/releases/tag/v1.3.0).
 
 The compiled application is a GitHub release asset. It is not committed to Git, so a source clone contains this README but does not contain the executable. The download is named `EDMW.Mod.Studio.exe`; run it directly or rename it to `EDMW Mod Studio.exe`.
 

@@ -2,7 +2,7 @@
 
 EDMW Mod Studio is a Windows design tool for **Empires: Dawn of the Modern World**. Its Map Designer provides a visual canvas for painting terrain, shaping elevation, defining map structure, and exporting maps over LAN. Its separate Civilization Editor provides an editable project workspace for civilization rules, units, buildings, technologies, abilities, economy, ages, assets, and AI. LAN export installs the export on the sender and offers it to other running designers for approval.
 
-This guide covers the 1.4.0 beta and the 1.3.0 stable release, including custom effect actions, online friends, installed sharing, and relay game matchmaking. The beta launches the supported game with a temporary bridge from its TCP/IP provider to the relay; the relay must also run the 1.4.0 server source for matchmaking commands to work. Live cross-internet session validation remains pending. For beta scope and known limits, see the [v1.4.0 beta notes](releases/v1.4.0.md). For source builds and architecture, see [development](development.md).
+This guide covers v1.4.0 and v1.3.0, including custom effect actions, online friends, installed sharing, and relay game matchmaking. The supported game uses a temporary provider bridge, while the relay handles matchmaking and can forward room gameplay. For v1.4.0 changes, see the [release notes](releases/v1.4.0.md). For source builds and architecture, see [development](development.md).
 
 ## What the app does
 
@@ -25,7 +25,7 @@ This guide covers the 1.4.0 beta and the 1.3.0 stable release, including custom 
 
 ## Getting started
 
-1. Download and open [EDMW.Mod.Studio.exe from the v1.4.0 beta](https://github.com/jfh24/EDMW-Mod-Studio/releases/download/v1.4.0/EDMW.Mod.Studio.exe), or open `dist/EDMW Mod Studio.exe` after a local source build.
+1. Download and open [EDMW.Mod.Studio.exe from v1.4.0](https://github.com/jfh24/EDMW-Mod-Studio/releases/download/v1.4.0/EDMW.Mod.Studio.exe), or open `dist/EDMW Mod Studio.exe` after a local source build.
 2. Use the small settings button in the top-right toolbar to confirm or change the EDMW installation folder.
 3. Choose a terrain type and paint directly on the map canvas.
 4. Use the left rail to adjust the brush or generate random land. Terrain, resources, and player starts are arranged as full-width sections in the right inspector, with Elevation and Ramps side by side at the bottom.
@@ -52,7 +52,9 @@ On the map script page, use the collaboration panel to invite an online friend. 
 
 To prepare an internet game from Mod Studio, open **Friends > Matchmaking**, create or join a room, and wait for all players to join it. The room host selects the EDMW host in **EDMW host** if another room member will host, then the designated host selects **Prepare game network**. Mod Studio opens EDMW's native game UI for each player and maps room traffic through virtual IP addresses. Each player must already have the same map installed. The host creates the game through EDMW's multiplayer UI. Other players choose Join by IP and enter the host address shown in Matchmaking; **Copy host IP** copies it to the clipboard. Everyone must use the supported game/provider build and close any separately running EDMW process first. If setup or a player launch fails, Mod Studio reports the player and failed stage.
 
-Room members negotiate direct ICE connections as soon as they join. Matchmaking status shows direct `ICE` peers, hooked UDP sockets, `TX` (datagrams sent directly), `broadcast` (broadcast datagrams sent to peers), `RX` (datagrams received directly), and `game` (datagrams delivered into the game). If ICE does not reach all room peers, internet gameplay cannot connect; this beta has STUN but no TURN or gameplay relay fallback. Live cross-internet session validation remains pending for this beta.
+Use the gear beside **Current room** to open Matchmaking settings. **Direct ICE / STUN gameplay** and **WSS gameplay relay** are independently switchable and saved between launches. With both enabled, direct peer channels are preferred and WSS carries gameplay when a direct route is unavailable. To route gameplay through WSS, turn off direct ICE gameplay on each player and leave WSS enabled. Matchmaking login, room traffic, and ICE signaling continue to use WSS.
+
+Enable **Log network traffic to a text file** to record gameplay direction, protocol, virtual endpoints, ICE candidate endpoints, and WSS relay address details. The log excludes packet contents and is written to `%LOCALAPPDATA%\EDMW Map Designer\logs\network-traffic.log`; WSS server IPs are DNS-resolved candidates. Matchmaking status includes ICE-sent and WSS-enqueued frames, WSS socket-written and received counts, dropped and pending frames, hooked UDP sockets, `TX`, `broadcast`, `RX`, and game delivery counts.
 
 Mod Studio connects to the configured relay automatically when it opens and sends a heartbeat every 60 seconds while connected. The Friends dialog has **Friends** for connection settings, friend codes, and requests, plus **Matchmaking** for relay game rooms and game invitations. Use the collaboration panel on the map script page for all map collaboration: online friends appear with **Invite** buttons, incoming map invitations have **Join** buttons, and local-network collaboration is labeled **Host LAN session** and **Join LAN**. The same panel provides **Leave online session** when applicable. Request actions change to **Decline request** or **Cancel request** when appropriate. Close the Friends dialog with its title-bar **×** or **Esc**. Tooltips describe unavailable actions; failed actions show a warning dialog.
 
@@ -151,6 +153,4 @@ Map installation adds generated map files without replacing the game's original 
 
 ## Build and compatibility
 
-See [the project README](../README.md) for the source build and [development](development.md#game-compatibility) for the supported game checks. The editor exposes source data and supported installation fields; unsupported authored changes block export. Complete in-game and multiplayer validation remains outside the claims made by the offline checks.
-
-See [credits](credits.md) for geographic source notices and [the wildlife engineering report](manual-wildlife-and-fish.md) for implementation evidence.
+See [the project README](../README.md) for source builds and [development](development.md#game-compatibility) for game compatibility details. Unsupported authored changes are blocked from export. See [credits](credits.md) for geographic source notices.
