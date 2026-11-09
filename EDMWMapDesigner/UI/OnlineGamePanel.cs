@@ -27,7 +27,9 @@ internal sealed class OnlineGamePanel : UserControl
     private readonly ComboBox _gameHostPicker = new() { DropDownStyle = ComboBoxStyle.DropDownList, Height = 32, AccessibleName = "EDMW game host" };
     private readonly ListView _rooms = MakeList("Available relay game rooms");
     private readonly ListView _invitations = MakeList("Incoming game invitations");
-    private readonly Label _roomState = new() { Dock = DockStyle.Fill, ForeColor = MedievalTheme.TextSecondary, AutoEllipsis = true, TextAlign = ContentAlignment.MiddleLeft };
+    private readonly Label _roomsEmpty = EmptyListLabel("No open game rooms. Refresh the list or create a room.");
+    private readonly Label _invitationsEmpty = EmptyListLabel("No game invitations yet.");
+    private readonly Label _roomState = new() { Dock = DockStyle.Fill, ForeColor = MedievalTheme.TextSecondary, AutoEllipsis = true, TextAlign = ContentAlignment.MiddleLeft, AccessibleName = "Current game room" };
     private readonly Label _hostAddress = new() { Dock = DockStyle.Fill, ForeColor = MedievalTheme.TextSecondary, AutoEllipsis = true, TextAlign = ContentAlignment.MiddleLeft, AccessibleName = "EDMW host virtual IP address" };
     private readonly Label _status = new() { Dock = DockStyle.Fill, ForeColor = MedievalTheme.TextSecondary, AutoEllipsis = true, TextAlign = ContentAlignment.MiddleLeft };
     private readonly Button _create;
@@ -127,11 +129,10 @@ internal sealed class OnlineGamePanel : UserControl
         ConfigureJoinContextMenus();
         _friendPicker.SelectedIndexChanged += (_, _) => RefreshActions();
         _gameHostPicker.SelectedIndexChanged += (_, _) => RefreshActions();
-        _name.TextChanged += (_, _) => RefreshActions();
 
         var layout = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(16), ColumnCount = 2, RowCount = 2, BackColor = Color.Transparent };
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 278));
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 330));
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
 
@@ -210,28 +211,32 @@ internal sealed class OnlineGamePanel : UserControl
     {
         var content = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 5, Margin = Padding.Empty };
         content.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        content.RowStyles.Add(new RowStyle(SizeType.Absolute, 24));
-        content.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
-        content.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
+        content.RowStyles.Add(new RowStyle(SizeType.Absolute, 25));
         content.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
-        content.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        content.RowStyles.Add(new RowStyle(SizeType.Absolute, 52));
+        content.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
+        content.RowStyles.Add(new RowStyle(SizeType.Absolute, 18));
         var heading = new Label { Text = "Create a game room", Dock = DockStyle.Fill, ForeColor = MedievalTheme.GoldBright, Font = MedievalTheme.DisplayFont(12), TextAlign = ContentAlignment.MiddleLeft };
         content.Controls.Add(heading, 0, 0);
         _name.Dock = DockStyle.Fill;
-        _name.Margin = new Padding(0, 2, 0, 2);
+        _name.Margin = Padding.Empty;
         content.Controls.Add(MedievalTheme.FrameInput(_name), 0, 1);
-        var options = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, Margin = Padding.Empty };
+        var options = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 2, Margin = Padding.Empty };
         options.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         options.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 76));
-        options.Controls.Add(MedievalTheme.FrameInput(_visibility), 0, 0);
-        options.Controls.Add(MedievalTheme.FrameInput(_capacity), 1, 0);
+        options.RowStyles.Add(new RowStyle(SizeType.Absolute, 16));
+        options.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        options.Controls.Add(new Label { Text = "Room access", Dock = DockStyle.Fill, ForeColor = MedievalTheme.TextSecondary, TextAlign = ContentAlignment.MiddleLeft }, 0, 0);
+        options.Controls.Add(new Label { Text = "Players", Dock = DockStyle.Fill, ForeColor = MedievalTheme.TextSecondary, TextAlign = ContentAlignment.MiddleLeft }, 1, 0);
+        options.Controls.Add(MedievalTheme.FrameInput(_visibility), 0, 1);
+        options.Controls.Add(MedievalTheme.FrameInput(_capacity), 1, 1);
         content.Controls.Add(options, 0, 2);
         _create.Dock = DockStyle.Fill;
         _create.Margin = Padding.Empty;
         content.Controls.Add(_create, 0, 3);
         content.Controls.Add(new Label
         {
-            Text = "Friends-only rooms appear to accepted friends and invitees.", Dock = DockStyle.Fill,
+            Text = "Friends-only rooms are visible to friends and invitees.", Dock = DockStyle.Fill,
             ForeColor = MedievalTheme.TextSecondary, TextAlign = ContentAlignment.MiddleLeft, AutoEllipsis = true
         }, 0, 4);
         return Card(content);
@@ -241,10 +246,21 @@ internal sealed class OnlineGamePanel : UserControl
     {
         var content = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2, Margin = Padding.Empty };
         content.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        content.RowStyles.Add(new RowStyle(SizeType.Absolute, 27));
+        content.RowStyles.Add(new RowStyle(SizeType.Absolute, 32));
         content.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        content.Controls.Add(new Label { Text = "Available game rooms", Dock = DockStyle.Fill, ForeColor = MedievalTheme.GoldBright, Font = MedievalTheme.DisplayFont(12), TextAlign = ContentAlignment.MiddleLeft }, 0, 0);
-        content.Controls.Add(_rooms, 0, 1);
+        var header = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, Margin = Padding.Empty };
+        header.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        header.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 120));
+        header.Controls.Add(new Label
+        {
+            Text = "Available game rooms", Dock = DockStyle.Fill, ForeColor = MedievalTheme.GoldBright,
+            Font = MedievalTheme.DisplayFont(12), TextAlign = ContentAlignment.MiddleLeft
+        }, 0, 0);
+        _refresh.Dock = DockStyle.Fill;
+        _refresh.Margin = new Padding(4, 0, 0, 2);
+        header.Controls.Add(_refresh, 1, 0);
+        content.Controls.Add(header, 0, 0);
+        content.Controls.Add(ListWithEmptyState(_rooms, _roomsEmpty), 0, 1);
         return Card(content);
     }
 
@@ -255,7 +271,46 @@ internal sealed class OnlineGamePanel : UserControl
         content.RowStyles.Add(new RowStyle(SizeType.Absolute, 27));
         content.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         content.Controls.Add(new Label { Text = "Game invitations", Dock = DockStyle.Fill, ForeColor = MedievalTheme.GoldBright, Font = MedievalTheme.DisplayFont(12), TextAlign = ContentAlignment.MiddleLeft }, 0, 0);
-        content.Controls.Add(_invitations, 0, 1);
+        content.Controls.Add(ListWithEmptyState(_invitations, _invitationsEmpty), 0, 1);
+        return Card(content);
+    }
+
+    private Control CurrentRoomCard()
+    {
+        var content = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 4, Margin = Padding.Empty };
+        content.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        content.RowStyles.Add(new RowStyle(SizeType.Absolute, 25));
+        content.RowStyles.Add(new RowStyle(SizeType.Absolute, 32));
+        content.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
+        content.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
+        content.Controls.Add(new Label
+        {
+            Text = "Current room", Dock = DockStyle.Fill, ForeColor = MedievalTheme.GoldBright,
+            Font = MedievalTheme.DisplayFont(12), TextAlign = ContentAlignment.MiddleLeft
+        }, 0, 0);
+        content.Controls.Add(_roomState, 0, 1);
+
+        var inviteRow = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, Margin = Padding.Empty };
+        inviteRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        inviteRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 112));
+        _friendPicker.Dock = DockStyle.Fill;
+        _friendPicker.Margin = new Padding(0, 0, 5, 0);
+        _invite.Dock = DockStyle.Fill;
+        _invite.Margin = Padding.Empty;
+        inviteRow.Controls.Add(MedievalTheme.FrameInput(_friendPicker), 0, 0);
+        inviteRow.Controls.Add(_invite, 1, 0);
+        content.Controls.Add(inviteRow, 0, 2);
+
+        var actions = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, Margin = Padding.Empty };
+        actions.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 42));
+        actions.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 58));
+        _leave.Dock = DockStyle.Fill;
+        _leave.Margin = new Padding(0, 0, 5, 0);
+        _prepareNetwork.Dock = DockStyle.Fill;
+        _prepareNetwork.Margin = Padding.Empty;
+        actions.Controls.Add(_leave, 0, 0);
+        actions.Controls.Add(_prepareNetwork, 1, 0);
+        content.Controls.Add(actions, 0, 3);
         return Card(content);
     }
 
@@ -263,11 +318,11 @@ internal sealed class OnlineGamePanel : UserControl
     {
         var content = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 4, Margin = Padding.Empty };
         content.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        content.RowStyles.Add(new RowStyle(SizeType.Absolute, 24));
+        content.RowStyles.Add(new RowStyle(SizeType.Absolute, 25));
         content.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
-        content.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
-        content.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        content.Controls.Add(new Label { Text = "EDMW game host", Dock = DockStyle.Fill, ForeColor = MedievalTheme.GoldBright, Font = MedievalTheme.DisplayFont(12), TextAlign = ContentAlignment.MiddleLeft }, 0, 0);
+        content.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
+        content.RowStyles.Add(new RowStyle(SizeType.Absolute, 24));
+        content.Controls.Add(new Label { Text = "Host settings", Dock = DockStyle.Fill, ForeColor = MedievalTheme.GoldBright, Font = MedievalTheme.DisplayFont(12), TextAlign = ContentAlignment.MiddleLeft }, 0, 0);
         _gameHostPicker.Dock = DockStyle.Fill;
         _gameHostPicker.Margin = Padding.Empty;
         content.Controls.Add(MedievalTheme.FrameInput(_gameHostPicker), 0, 1);
@@ -288,62 +343,42 @@ internal sealed class OnlineGamePanel : UserControl
         return Card(content);
     }
 
-    private Control CreateRoomStatusCard()
+    private static Control ListWithEmptyState(ListView list, Label empty)
     {
-        var content = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 1, Margin = Padding.Empty };
-        content.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        content.Controls.Add(_roomState, 0, 0);
-        return Card(content);
+        var host = new Panel { Dock = DockStyle.Fill, Margin = Padding.Empty, BackColor = MedievalTheme.Input };
+        list.Dock = DockStyle.Fill;
+        void ResizeEmptyState()
+        {
+            var headerHeight = Math.Min(host.ClientSize.Height, Math.Max(22, list.Font.Height + 8));
+            empty.SetBounds(0, headerHeight, host.ClientSize.Width, Math.Max(0, host.ClientSize.Height - headerHeight));
+        }
+        host.Controls.Add(list);
+        host.Controls.Add(empty);
+        empty.BringToFront();
+        host.SizeChanged += (_, _) => ResizeEmptyState();
+        ResizeEmptyState();
+        return host;
     }
 
-    private Control CreateInviteCard()
+    private static Label EmptyListLabel(string message) => new()
     {
-        var content = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3, Margin = Padding.Empty };
-        content.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        content.RowStyles.Add(new RowStyle(SizeType.Absolute, 24));
-        content.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
-        content.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
-        content.Controls.Add(new Label { Text = "Invite a friend", Dock = DockStyle.Fill, ForeColor = MedievalTheme.GoldBright, Font = MedievalTheme.DisplayFont(12), TextAlign = ContentAlignment.MiddleLeft }, 0, 0);
-        _friendPicker.Dock = DockStyle.Fill;
-        _friendPicker.Margin = Padding.Empty;
-        content.Controls.Add(MedievalTheme.FrameInput(_friendPicker), 0, 1);
-        _invite.Dock = DockStyle.Fill;
-        _invite.Margin = Padding.Empty;
-        content.Controls.Add(_invite, 0, 2);
-        return Card(content);
-    }
+        Text = message, Dock = DockStyle.Fill, Visible = true, AutoEllipsis = true,
+        TextAlign = ContentAlignment.MiddleCenter, BackColor = MedievalTheme.Input,
+        ForeColor = MedievalTheme.TextSecondary, Padding = new Padding(16),
+        AccessibleRole = AccessibleRole.StaticText
+    };
 
     private Control CreateSidebar()
     {
         var scroll = new Panel { Dock = DockStyle.Fill, AutoScroll = true, Margin = Padding.Empty, BackColor = Color.Transparent };
-        var stack = new TableLayoutPanel { Dock = DockStyle.Top, ColumnCount = 1, RowCount = 5, Margin = Padding.Empty, BackColor = Color.Transparent };
+        var stack = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, ColumnCount = 1, RowCount = 3, Margin = Padding.Empty, BackColor = Color.Transparent };
         stack.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        stack.RowStyles.Add(new RowStyle(SizeType.Absolute, 158));
-        stack.RowStyles.Add(new RowStyle(SizeType.Absolute, 52));
-        stack.RowStyles.Add(new RowStyle(SizeType.Absolute, 150));
-        stack.RowStyles.Add(new RowStyle(SizeType.Absolute, 118));
-        stack.RowStyles.Add(new RowStyle(SizeType.Absolute, 150));
-        stack.Controls.Add(CreateRoomCard(), 0, 0);
-        stack.Controls.Add(CreateRoomStatusCard(), 0, 1);
+        stack.RowStyles.Add(new RowStyle(SizeType.Absolute, 152));
+        stack.RowStyles.Add(new RowStyle(SizeType.Absolute, 186));
+        stack.RowStyles.Add(new RowStyle(SizeType.Absolute, 144));
+        stack.Controls.Add(CurrentRoomCard(), 0, 0);
+        stack.Controls.Add(CreateRoomCard(), 0, 1);
         stack.Controls.Add(GameHostControls(), 0, 2);
-        stack.Controls.Add(CreateInviteCard(), 0, 3);
-
-        var actions = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 4, Margin = new Padding(0, 0, 0, 8) };
-        actions.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        actions.RowStyles.Add(new RowStyle(SizeType.Absolute, 25));
-        actions.RowStyles.Add(new RowStyle(SizeType.Absolute, 32));
-        actions.RowStyles.Add(new RowStyle(SizeType.Absolute, 32));
-        actions.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
-        actions.Controls.Add(new Label { Text = "Room actions", Dock = DockStyle.Fill, ForeColor = MedievalTheme.GoldBright, Font = MedievalTheme.DisplayFont(12), TextAlign = ContentAlignment.MiddleLeft }, 0, 0);
-        foreach (var button in new[] { _refresh, _leave, _prepareNetwork })
-        {
-            button.Dock = DockStyle.Fill;
-            button.Margin = new Padding(0, 1, 0, 1);
-        }
-        actions.Controls.Add(_refresh, 0, 1);
-        actions.Controls.Add(_leave, 0, 2);
-        actions.Controls.Add(_prepareNetwork, 0, 3);
-        stack.Controls.Add(Card(actions), 0, 4);
         scroll.Controls.Add(stack);
         scroll.SizeChanged += (_, _) => stack.Width = Math.Max(0, scroll.ClientSize.Width - SystemInformation.VerticalScrollBarWidth);
         stack.Width = scroll.ClientSize.Width;
@@ -425,6 +460,11 @@ internal sealed class OnlineGamePanel : UserControl
             _friendPicker.Items.Add(choice);
             if (friend.UserId == selected) _friendPicker.SelectedItem = choice;
         }
+        if (_friendPicker.Items.Count == 0)
+        {
+            _friendPicker.Items.Add("No online friends");
+            _friendPicker.SelectedIndex = 0;
+        }
         if (_friendPicker.SelectedIndex < 0 && _friendPicker.Items.Count > 0) _friendPicker.SelectedIndex = 0;
     }
 
@@ -455,8 +495,12 @@ internal sealed class OnlineGamePanel : UserControl
             if (selectedInvite == invitation.RoomId) row.Selected = true;
         }
         _invitations.EndUpdate();
+        _roomsEmpty.Visible = _rooms.Items.Count == 0;
+        _invitationsEmpty.Visible = _invitations.Items.Count == 0;
         var active = _client.CurrentGameRoom;
-        _roomState.Text = active is null ? "No active room" : $"In {active.Name} · {active.Members.Length}/{active.MaxPlayers} players";
+        _roomState.Text = active is null
+            ? "No active room · create one or right-click a room to join."
+            : $"{active.Name} · {active.Members.Length}/{active.MaxPlayers} players · {(active.Visibility == "public" ? "Public" : "Friends only")}";
         RefreshGameHostPicker();
         RefreshFriendPicker();
         RefreshActions();
@@ -477,6 +521,11 @@ internal sealed class OnlineGamePanel : UserControl
                     _gameHostPicker.Items.Add(choice);
                     if (member.Profile.UserId == (room.GameHostUserId ?? room.Host.UserId)) _gameHostPicker.SelectedItem = choice;
                 }
+            }
+            else
+            {
+                _gameHostPicker.Items.Add("Join a room to choose its host");
+                _gameHostPicker.SelectedIndex = 0;
             }
         }
         finally { _gameHostPicker.EndUpdate(); }
@@ -499,14 +548,16 @@ internal sealed class OnlineGamePanel : UserControl
         var designatedGameHost = active is not null && _client.User?.UserId ==
             (active.GameHostUserId ?? active.Host.UserId);
         var friend = _friendPicker.SelectedItem as FriendChoice;
-        _create.Enabled = connected && !_busy && active is null && !string.IsNullOrWhiteSpace(_name.Text);
+        _create.Enabled = connected && !_busy && active is null;
+        _name.Enabled = _visibility.Enabled = _capacity.Enabled = connected && !_busy && active is null;
         _tips.SetToolTip(_create, !connected ? "Connect to the relay first." : _busy ? "A matchmaking request is in progress."
             : active is not null ? "Leave your active game room before creating another."
-            : string.IsNullOrWhiteSpace(_name.Text) ? "Enter a game room name." : "Create a relay game room.");
+            : "Set the room name, access, and player limit.");
         _refresh.Enabled = connected && !_busy;
         _friendPicker.Enabled = connected && !_busy && host;
         _invite.Enabled = connected && !_busy && host && friend is not null;
         _leave.Enabled = connected && !_busy && active is not null;
+        _gameHostPicker.Enabled = connected && !_busy && host;
         _copyHostAddress.Enabled = active is not null && DesignatedGameHost(active) is not null;
         _prepareNetwork.Enabled = connected && !_busy && active is not null && designatedGameHost &&
             _prepareGameNetwork is not null && _gameTrafficStatus() is null;

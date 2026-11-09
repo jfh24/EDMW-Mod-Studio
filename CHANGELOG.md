@@ -2,6 +2,7 @@
 
 ## 1.4.0 Beta — 2026-11-02
 
+- Reworked Matchmaking into clearly separated **Current room**, **Create a game room**, and **Host settings** cards. Grouped invite, leave, and network actions with the current room, moved refresh beside the room list, and added empty-list guidance.
 - Added public and friends-only relay game rooms, online friend invitations, and room discovery. Mod Studio now connects to the relay at launch and sends a 60-second heartbeat. Map collaboration options are grouped in the map script page panel, with online friend invites, incoming invitations, and clearly labeled LAN hosting/joining; the Friends dialog now has Friends and Matchmaking tabs.
 - Added direct ICE/STUN peer connections for online rooms and an authenticated WSS gameplay fallback for networks where direct ICE cannot connect. UDP game datagrams, TCP stream frames, and session-control messages can be forwarded only between current members of the same matchmaking room. The fallback uses the existing relay connection and requires no inbound port forwarding; relay latency and bandwidth apply.
 - Added an x86 native bridge for the supported game's TCP/IP provider and a local TCP stream proxy so the game's LAN host/join flow can use the direct peer channels.
